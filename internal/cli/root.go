@@ -10,9 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/unleashtheagents/uta/internal/config"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/provider/builtin"
+	"github.com/unleashtheagents/uta/internal/provider/declarative"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/version"
 )
@@ -62,7 +64,24 @@ func newApp(_ context.Context) (*App, error) {
 		st.Close()
 		return nil, err
 	}
-	// Declarative YAML providers (~/.uta/providers/*.yaml) load here in a later chunk.
+
+	// Declarative providers from ~/.uta/providers/*.yaml. Errors are non-fatal
+	// (we surface them via slog warnings and `uta doctor` lists them).
+	provsDir, _ := paths.ProvidersDir(home)
+	descriptors, descErrs := config.LoadProvidersDir(provsDir)
+	for _, e := range descErrs {
+		fmt.Fprintln(os.Stderr, "warn: provider descriptor:", e)
+	}
+	for _, d := range descriptors {
+		p, err := declarative.New(d)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: provider %s: %v\n", d.Name, err)
+			continue
+		}
+		if err := reg.Register(p, d.Force); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: register %s: %v\n", d.Name, err)
+		}
+	}
 
 	return &App{
 		Home:     home,
