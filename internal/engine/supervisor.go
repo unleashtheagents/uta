@@ -48,6 +48,15 @@ type RunRequest struct {
 	Workdir         string
 	MaxSubtasks     int // hard cap passed to the planner prompt (default 8)
 	WorkflowPath    string
+
+	// PreSetSubtasks, if non-empty, replaces the planner step entirely. The
+	// supervisor fans these subtasks out directly. Used by uta.yaml workflows
+	// that specify subtasks explicitly.
+	PreSetSubtasks []SubtaskSpec
+
+	// SkipSynthesis, if true, joins subtask outputs verbatim instead of
+	// calling the synthesizer provider. Used when synthesis.mode=skip in YAML.
+	SkipSynthesis bool
 }
 
 // RunResult is what the supervisor returns once a run is done (success or not).
@@ -125,17 +134,27 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	})
 
 	// ----- Planning -----
-	plan, planErr := s.runPlanner(ctx, sessionID, planner, req)
+	var plan Plan
 	planFell := false
-	if planErr != nil {
-		s.emit(sessionID, "", trajectory.PlanFallback, map[string]any{"error": planErr.Error()})
-		plan = FallbackPlan(req.Goal)
-		planFell = true
+	if len(req.PreSetSubtasks) > 0 {
+		plan = Plan{Subtasks: req.PreSetSubtasks}
+		s.emit(sessionID, "", trajectory.PlanProposed, map[string]any{
+			"subtasks":     plan.Subtasks,
+			"source":       "workflow-yaml",
+		})
+	} else {
+		var planErr error
+		plan, planErr = s.runPlanner(ctx, sessionID, planner, req)
+		if planErr != nil {
+			s.emit(sessionID, "", trajectory.PlanFallback, map[string]any{"error": planErr.Error()})
+			plan = FallbackPlan(req.Goal)
+			planFell = true
+		}
+		s.emit(sessionID, "", trajectory.PlanProposed, map[string]any{
+			"subtasks":      plan.Subtasks,
+			"used_fallback": planFell,
+		})
 	}
-	s.emit(sessionID, "", trajectory.PlanProposed, map[string]any{
-		"subtasks":     plan.Subtasks,
-		"used_fallback": planFell,
-	})
 
 	// ----- Fan-out -----
 	outcomes := make([]SubtaskOutcome, len(plan.Subtasks))
@@ -213,20 +232,9 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	}
 
 	// ----- Synthesis -----
-	s.emit(sessionID, "", trajectory.SynthesisStarted, map[string]any{"synth": synthName})
-	synthPrompt := RenderSynthPrompt(req.Goal, outcomes)
-	synthCtx, synthCancel := context.WithTimeout(ctx, req.SubtaskTimeout)
-	defer synthCancel()
-	final, synthErr := s.callProvider(synthCtx, sessionID, "", synth, synthPrompt, req)
-
 	finalText := ""
 	finalRef := ""
-	if synthErr == nil {
-		finalText = final.FinalText
-		ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
-		finalRef = ref
-	} else {
-		// Synthesis failure isn't fatal — fall back to a join of subtask outputs.
+	if req.SkipSynthesis {
 		var b strings.Builder
 		for _, o := range outcomes {
 			fmt.Fprintf(&b, "## %s (%s)\n\n%s\n\n", o.Title, o.ID, o.Result)
@@ -234,10 +242,28 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		finalText = strings.TrimSpace(b.String())
 		ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
 		finalRef = ref
-		s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"error": synthErr.Error(), "fallback": "joined"})
-	}
-	if synthErr == nil {
-		s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"chars": len(finalText)})
+		s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"mode": "skip", "chars": len(finalText)})
+	} else {
+		s.emit(sessionID, "", trajectory.SynthesisStarted, map[string]any{"synth": synthName})
+		synthPrompt := RenderSynthPrompt(req.Goal, outcomes)
+		synthCtx, synthCancel := context.WithTimeout(ctx, req.SubtaskTimeout)
+		final, synthErr := s.callProvider(synthCtx, sessionID, "", synth, synthPrompt, req)
+		synthCancel()
+		if synthErr == nil {
+			finalText = final.FinalText
+			ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
+			finalRef = ref
+			s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"chars": len(finalText)})
+		} else {
+			var b strings.Builder
+			for _, o := range outcomes {
+				fmt.Fprintf(&b, "## %s (%s)\n\n%s\n\n", o.Title, o.ID, o.Result)
+			}
+			finalText = strings.TrimSpace(b.String())
+			ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
+			finalRef = ref
+			s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"error": synthErr.Error(), "fallback": "joined"})
+		}
 	}
 
 	status := "completed"

@@ -17,6 +17,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
+	"github.com/unleashtheagents/uta/internal/config"
 	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -38,17 +39,80 @@ func newRunCmd() *cobra.Command {
 		printJSONL     bool
 		preApprove     []string
 		workdir        string
+		workflowFile   string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "decompose a goal, fan it out to agent providers, and synthesize the result",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var preSet []engine.SubtaskSpec
+			var skipSynth bool
+			var workflowGoal string
+
+			if workflowFile != "" {
+				wf, err := config.LoadWorkflow(workflowFile)
+				if err != nil {
+					return err
+				}
+				workflowGoal = wf.Goal
+				if workerName == "" {
+					workerName = wf.Defaults.Worker
+				}
+				if plannerName == "" {
+					plannerName = wf.Defaults.Planner
+				}
+				if synthName == "" {
+					synthName = wf.Synthesis.Worker
+				}
+				if maxParallel == 0 || maxParallel == 4 { // 4 is the flag default; let YAML win if it sets something
+					if wf.Defaults.MaxParallel > 0 {
+						maxParallel = wf.Defaults.MaxParallel
+					}
+				}
+				if maxSubtasks == 0 || maxSubtasks == 6 {
+					if wf.Defaults.MaxSubtasks > 0 {
+						maxSubtasks = wf.Defaults.MaxSubtasks
+					}
+				}
+				if wf.Defaults.SubtaskTimeout > 0 {
+					subtaskTimeout = wf.Defaults.SubtaskTimeout
+				}
+				if wf.Defaults.Timeout > 0 {
+					runTimeout = wf.Defaults.Timeout
+				}
+				if workdir == "" {
+					workdir = wf.Defaults.Workdir
+				}
+				if len(preApprove) == 0 {
+					preApprove = wf.Defaults.PreApprove
+				}
+				if strings.EqualFold(wf.Synthesis.Mode, "skip") {
+					skipSynth = true
+				}
+				for i, st := range wf.Subtasks {
+					id := st.ID
+					if id == "" {
+						id = fmt.Sprintf("s%d", i+1)
+					}
+					title := st.Title
+					if title == "" {
+						title = id
+					}
+					preSet = append(preSet, engine.SubtaskSpec{
+						ID: id, Title: title, Prompt: st.Prompt, Worker: st.Worker,
+					})
+				}
+			}
+
 			if strings.TrimSpace(goal) == "" && len(args) > 0 {
 				goal = strings.Join(args, " ")
 			}
 			if strings.TrimSpace(goal) == "" {
-				return errors.New("--goal/-g is required (or pass the goal as positional args)")
+				goal = workflowGoal
+			}
+			if strings.TrimSpace(goal) == "" {
+				return errors.New("--goal/-g is required (or pass via -f workflow.yaml, or as positional args)")
 			}
 
 			app, err := newApp(cmd.Context())
@@ -111,6 +175,9 @@ func newRunCmd() *cobra.Command {
 				FailFast:        failFast,
 				PreApproveTools: preApprove,
 				Workdir:         workdir,
+				WorkflowPath:    workflowFile,
+				PreSetSubtasks:  preSet,
+				SkipSynthesis:   skipSynth,
 			})
 
 			if liveDone != nil {
@@ -162,6 +229,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&printJSONL, "print-jsonl", false, "stream every trajectory event to stdout as JSONL")
 	cmd.Flags().StringSliceVar(&preApprove, "pre-approve", nil, "comma-separated tools the worker may use without prompting (provider-specific)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "working directory exposed to the worker (defaults to CWD)")
+	cmd.Flags().StringVarP(&workflowFile, "file", "f", "", "load a uta.yaml workflow file (flags can still override its fields)")
 
 	return cmd
 }

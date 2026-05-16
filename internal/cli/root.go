@@ -90,6 +90,7 @@ func Execute() {
 	root.AddCommand(newResumeCmd())
 	root.AddCommand(newSessionsCmd())
 	root.AddCommand(newTrajectoryCmd())
+	root.AddCommand(newInitCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
