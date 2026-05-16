@@ -145,12 +145,22 @@ func newRunCmd() *cobra.Command {
 			bus := trajectory.NewBus()
 			defer bus.Shutdown()
 
+			noColor, _ := cmd.Flags().GetBool("no-color")
+
 			// Optional live JSONL pipe.
 			var liveDone chan struct{}
 			if printJSONL {
 				liveDone = make(chan struct{})
 				ch := bus.Subscribe(256)
 				go streamJSONL(cmd.OutOrStdout(), ch, liveDone)
+			}
+
+			// Friendly progress to stderr unless we're streaming JSONL or -y CI mode chose silence.
+			var renderDone <-chan struct{}
+			if !printJSONL {
+				rdr := NewRenderer(cmd.ErrOrStderr(), noColor)
+				rdr.ShowGoal(goal, workerName)
+				renderDone = rdr.Subscribe(bus)
 			}
 
 			recorder := trajectory.NewRecorder(app.Store)
@@ -180,9 +190,12 @@ func newRunCmd() *cobra.Command {
 				SkipSynthesis:   skipSynth,
 			})
 
+			bus.Shutdown()
 			if liveDone != nil {
-				bus.Shutdown()
 				<-liveDone
+			}
+			if renderDone != nil {
+				<-renderDone
 			}
 
 			if runErr != nil {

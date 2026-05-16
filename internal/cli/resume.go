@@ -41,6 +41,12 @@ func newResumeCmd() *cobra.Command {
 
 			bus := trajectory.NewBus()
 			defer bus.Shutdown()
+
+			noColor, _ := cmd.Flags().GetBool("no-color")
+			rdr := NewRenderer(cmd.ErrOrStderr(), noColor)
+			rdr.ShowGoal(goal, workerName)
+			renderDone := rdr.Subscribe(bus)
+
 			recorder := trajectory.NewRecorder(app.Store)
 			deps := engine.Deps{
 				Store: app.Store, Blobs: app.Blobs, Recorder: recorder,
@@ -57,6 +63,8 @@ func newResumeCmd() *cobra.Command {
 				PreApproveTools: preApprove,
 				Workdir:         workdir,
 			})
+			bus.Shutdown()
+			<-renderDone
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					os.Exit(130)

@@ -1,0 +1,228 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mattn/go-isatty"
+
+	"github.com/unleashtheagents/uta/internal/trajectory"
+)
+
+// Renderer subscribes to the trajectory bus and writes a friendly,
+// dot-streaming progress log to stderr. Color is enabled iff stderr is a TTY
+// and neither --no-color nor NO_COLOR disable it.
+type Renderer struct {
+	w        io.Writer
+	color    bool
+	mu       sync.Mutex
+	phase    string
+	started  time.Time
+	doneSubs int
+}
+
+const (
+	ansiReset  = "\x1b[0m"
+	ansiBold   = "\x1b[1m"
+	ansiDim    = "\x1b[2m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiRed    = "\x1b[31m"
+	ansiCyan   = "\x1b[36m"
+)
+
+// NewRenderer constructs a progress renderer. forceNoColor overrides
+// auto-detection; pass true when --no-color is set.
+func NewRenderer(w io.Writer, forceNoColor bool) *Renderer {
+	color := !forceNoColor
+	if os.Getenv("NO_COLOR") != "" {
+		color = false
+	}
+	if f, ok := w.(*os.File); ok {
+		if !isatty.IsTerminal(f.Fd()) {
+			color = false
+		}
+	}
+	return &Renderer{w: w, color: color, started: time.Now()}
+}
+
+// Subscribe attaches to bus and renders events as they arrive. The returned
+// channel closes when the bus is shut down and the renderer has drained.
+func (r *Renderer) Subscribe(bus *trajectory.Bus) <-chan struct{} {
+	done := make(chan struct{})
+	ch := bus.Subscribe(256)
+	go func() {
+		defer close(done)
+		for ev := range ch {
+			r.handle(ev)
+		}
+		r.finish()
+	}()
+	return done
+}
+
+// ShowGoal prints a leading "→ Goal: ..." line. Call once before the run starts.
+func (r *Renderer) ShowGoal(goal, worker string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	one := strings.ReplaceAll(strings.TrimSpace(goal), "\n", " ")
+	if len(one) > 96 {
+		one = one[:95] + "…"
+	}
+	fmt.Fprintf(r.w, "%s %s\n", r.cyan("→"), r.bold(one))
+	fmt.Fprintf(r.w, "%s\n", r.dim(fmt.Sprintf("  worker=%s", worker)))
+}
+
+func (r *Renderer) c(s, code string) string {
+	if !r.color {
+		return s
+	}
+	return code + s + ansiReset
+}
+
+func (r *Renderer) green(s string) string  { return r.c(s, ansiGreen) }
+func (r *Renderer) red(s string) string    { return r.c(s, ansiRed) }
+func (r *Renderer) yellow(s string) string { return r.c(s, ansiYellow) }
+func (r *Renderer) cyan(s string) string   { return r.c(s, ansiCyan) }
+func (r *Renderer) bold(s string) string   { return r.c(s, ansiBold) }
+func (r *Renderer) dim(s string) string    { return r.c(s, ansiDim) }
+
+// startPhase begins a new labeled phase. Caller must hold r.mu.
+func (r *Renderer) startPhaseLocked(label string) {
+	if r.phase != "" {
+		// Force-close any prior unclosed phase with a quiet newline.
+		fmt.Fprintln(r.w)
+	}
+	r.phase = label
+	fmt.Fprintf(r.w, "  %s ", r.dim(label+"…"))
+}
+
+func (r *Renderer) endPhaseLocked(suffixGreen, suffixDim string) {
+	if r.phase == "" {
+		return
+	}
+	parts := []string{r.green("✓")}
+	if suffixGreen != "" {
+		parts = append(parts, r.green(suffixGreen))
+	}
+	if suffixDim != "" {
+		parts = append(parts, r.dim(suffixDim))
+	}
+	fmt.Fprintf(r.w, " %s\n", strings.Join(parts, " "))
+	r.phase = ""
+}
+
+func (r *Renderer) dotLocked(marker string) {
+	if r.phase == "" {
+		return
+	}
+	if marker == "" {
+		marker = r.dim(".")
+	}
+	fmt.Fprint(r.w, marker)
+}
+
+func (r *Renderer) handle(ev trajectory.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	switch ev.Kind {
+	case trajectory.GoalReceived:
+		r.startPhaseLocked("Planning")
+
+	case trajectory.PlanProposed:
+		var p struct {
+			Subtasks []map[string]any `json:"subtasks"`
+			Source   string           `json:"source"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		n := len(p.Subtasks)
+		suffix := fmt.Sprintf("%d subtask", n)
+		if n != 1 {
+			suffix += "s"
+		}
+		if p.Source == "workflow-yaml" {
+			suffix += " (from workflow)"
+		}
+		r.endPhaseLocked(suffix, "")
+		r.doneSubs = 0
+		r.startPhaseLocked(fmt.Sprintf("Running %s", suffix))
+
+	case trajectory.PlanFallback:
+		r.endPhaseLocked("", r.yellow("planner output unparseable; using fallback"))
+		r.startPhaseLocked("Running 1 subtask")
+
+	case trajectory.SubtaskStdout,
+		trajectory.SubtaskAssistantText,
+		trajectory.SubtaskToolCall,
+		trajectory.SubtaskToolResult,
+		trajectory.SubtaskStarted:
+		r.dotLocked("")
+
+	case trajectory.SubtaskCompleted:
+		r.doneSubs++
+		r.dotLocked(r.green("•"))
+
+	case trajectory.SubtaskFailed:
+		r.dotLocked(r.red("!"))
+
+	case trajectory.SynthesisStarted:
+		r.endPhaseLocked("", "")
+		r.startPhaseLocked("Synthesizing")
+
+	case trajectory.SynthesisCompleted:
+		var p struct {
+			Chars int    `json:"chars"`
+			Mode  string `json:"mode"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		switch {
+		case p.Error != "":
+			r.endPhaseLocked("", r.yellow("synth failed; joined subtask outputs"))
+		case p.Mode == "skip":
+			r.endPhaseLocked("", r.dim("(skip mode)"))
+		default:
+			r.endPhaseLocked("", r.dim(fmt.Sprintf("%d chars", p.Chars)))
+		}
+
+	case trajectory.RunCompleted:
+		var p struct {
+			Status   string `json:"status"`
+			Subtasks int    `json:"subtasks"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		elapsed := time.Since(r.started).Round(time.Second)
+		switch p.Status {
+		case "partial":
+			fmt.Fprintf(r.w, "%s %s\n\n", r.yellow("◐"),
+				r.bold(r.yellow(fmt.Sprintf("Partial: %d subtasks, some failed (%s)", p.Subtasks, elapsed))))
+		default:
+			fmt.Fprintf(r.w, "%s %s\n\n", r.green("✓"),
+				r.bold(r.green(fmt.Sprintf("Done in %s", elapsed))))
+		}
+
+	case trajectory.RunFailed:
+		r.endPhaseLocked("", "")
+		fmt.Fprintf(r.w, "%s %s\n\n", r.red("✗"), r.bold(r.red("Run failed")))
+
+	case trajectory.RunCancelled:
+		r.endPhaseLocked("", "")
+		fmt.Fprintf(r.w, "%s %s\n\n", r.yellow("×"), r.bold(r.yellow("Run cancelled")))
+	}
+}
+
+// finish flushes any leftover state when the bus closes mid-run.
+func (r *Renderer) finish() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.phase != "" {
+		fmt.Fprintln(r.w)
+		r.phase = ""
+	}
+}
