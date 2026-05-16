@@ -87,6 +87,7 @@ func Execute() {
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newProvidersCmd())
 	root.AddCommand(newRunCmd())
+	root.AddCommand(newResumeCmd())
 	root.AddCommand(newSessionsCmd())
 	root.AddCommand(newTrajectoryCmd())
 
