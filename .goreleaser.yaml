@@ -1,0 +1,84 @@
+version: 2
+
+project_name: uta
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: uta
+    main: ./cmd/uta
+    binary: uta
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/unleashtheagents/uta/internal/version.Version={{.Version}}
+      - -X github.com/unleashtheagents/uta/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/unleashtheagents/uta/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+brews:
+  - name: uta
+    repository:
+      owner: unleashtheagents
+      name: homebrew-tap
+      branch: main
+    homepage: "https://unleashtheagents.ai"
+    description: "CLI agent orchestrator — decompose goals, fan out to Claude Code / Gemini CLI, synthesize."
+    license: MIT
+    test: |
+      system "#{bin}/uta", "--version"
+    install: |
+      bin.install "uta"
+      generate_completions_from_executable(bin/"uta", "completion")
+
+release:
+  github:
+    owner: unleashtheagents
+    name: uta
+  draft: false
+  prerelease: auto
+  footer: |
+    ---
+    *Install:* `brew install unleashtheagents/tap/uta` or `curl -fsSL https://get.unleashtheagents.ai/install.sh | sh`
