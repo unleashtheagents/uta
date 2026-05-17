@@ -31,3 +31,4 @@ secrets.json
 # AI-agent context files — kept local-only, never committed
 CLAUDE.md
 .claude/
+.uta/
