@@ -155,6 +155,7 @@ func Execute() {
 	root.AddCommand(newImportCmd())
 	root.AddCommand(newProjectCmd())
 	root.AddCommand(newCtxCmd())
+	root.AddCommand(newAuditCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
