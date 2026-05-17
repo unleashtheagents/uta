@@ -171,9 +171,19 @@ func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 	return result, nil
 }
 
-// parseGeminiLine is permissive — it sniffs common shapes of stream-json
-// events without locking us to a specific schema, since Gemini CLI's stream
-// format hasn't been as well-documented as Claude's.
+// parseGeminiLine decodes one Gemini CLI stream-json line. Empirically the
+// schema (as of gemini v0.42) is:
+//
+//	{"type":"init","session_id":"...","model":"..."}
+//	{"type":"message","role":"user","content":"<echo of the prompt>"}
+//	{"type":"message","role":"assistant","content":"<reply>","delta":true}
+//	{"type":"tool_call",...}
+//	{"type":"tool_result",...}
+//	{"type":"result","status":"success","stats":{...}}
+//
+// We must distinguish user-role messages (echoes of the prompt) from
+// assistant-role messages (the actual reply). Without this filter the
+// gatherer ends up trying to parse our OWN prompt as the response.
 func parseGeminiLine(line []byte, events chan<- provider.Event) (sessionID, text string) {
 	var generic map[string]any
 	if err := json.Unmarshal(line, &generic); err != nil {
@@ -185,7 +195,7 @@ func parseGeminiLine(line []byte, events chan<- provider.Event) (sessionID, text
 		return "", ""
 	}
 
-	// Session id may surface under a few keys.
+	// Session id may surface under a few keys; init events carry it.
 	if v, ok := pickString(generic, "session_id", "sessionId", "session"); ok {
 		payload, _ := json.Marshal(map[string]string{"session_id": v})
 		safeEmit(events, provider.Event{
@@ -196,33 +206,20 @@ func parseGeminiLine(line []byte, events chan<- provider.Event) (sessionID, text
 		sessionID = v
 	}
 
-	// Dispatch on `type`, falling through to text extraction otherwise.
 	t, _ := generic["type"].(string)
 	switch strings.ToLower(t) {
-	case "tool_call", "tool_use":
-		payload, _ := json.Marshal(generic)
-		safeEmit(events, provider.Event{
-			Kind:      provider.EventToolCall,
-			Timestamp: time.Now(),
-			Payload:   payload,
-		})
-	case "tool_result":
-		payload, _ := json.Marshal(generic)
-		safeEmit(events, provider.Event{
-			Kind:      provider.EventToolResult,
-			Timestamp: time.Now(),
-			Payload:   payload,
-		})
-	case "error":
-		payload, _ := json.Marshal(generic)
-		safeEmit(events, provider.Event{
-			Kind:      provider.EventError,
-			Timestamp: time.Now(),
-			Payload:   payload,
-		})
-	default:
-		// Look for text under common shapes.
-		if v, ok := pickString(generic, "text", "content", "response", "result", "output"); ok && v != "" {
+	case "init":
+		// Already captured session_id above; nothing else to do.
+		return sessionID, ""
+
+	case "message":
+		// Only capture assistant-role content. User-role messages are echoes
+		// of the prompt and would corrupt the response text we accumulate.
+		role, _ := generic["role"].(string)
+		if strings.ToLower(role) != "assistant" {
+			return sessionID, ""
+		}
+		if v, ok := pickString(generic, "content", "text"); ok && v != "" {
 			payload, _ := json.Marshal(map[string]string{"text": v})
 			safeEmit(events, provider.Event{
 				Kind:      provider.EventAssistantText,
@@ -230,26 +227,53 @@ func parseGeminiLine(line []byte, events chan<- provider.Event) (sessionID, text
 				Payload:   payload,
 			})
 			text = v
-		} else if msg, ok := generic["message"].(map[string]any); ok {
-			if v, ok := pickString(msg, "text", "content"); ok && v != "" {
-				payload, _ := json.Marshal(map[string]string{"text": v})
-				safeEmit(events, provider.Event{
-					Kind:      provider.EventAssistantText,
-					Timestamp: time.Now(),
-					Payload:   payload,
-				})
-				text = v
-			}
-		} else {
-			// Unknown shape — keep as opaque chunk so nothing is lost.
-			safeEmit(events, provider.Event{
-				Kind:      provider.EventStdoutChunk,
-				Timestamp: time.Now(),
-				Payload:   json.RawMessage(line),
-			})
 		}
+		return sessionID, text
+
+	case "tool_call", "tool_use":
+		payload, _ := json.Marshal(generic)
+		safeEmit(events, provider.Event{
+			Kind:      provider.EventToolCall,
+			Timestamp: time.Now(),
+			Payload:   payload,
+		})
+		return sessionID, ""
+
+	case "tool_result":
+		payload, _ := json.Marshal(generic)
+		safeEmit(events, provider.Event{
+			Kind:      provider.EventToolResult,
+			Timestamp: time.Now(),
+			Payload:   payload,
+		})
+		return sessionID, ""
+
+	case "error":
+		payload, _ := json.Marshal(generic)
+		safeEmit(events, provider.Event{
+			Kind:      provider.EventError,
+			Timestamp: time.Now(),
+			Payload:   payload,
+		})
+		return sessionID, ""
+
+	case "result", "stats", "telemetry":
+		// Terminal / metadata events. The `result` event may carry a
+		// `content` field on some gemini versions — capture only if it
+		// hasn't already arrived via a message event.
+		return sessionID, ""
+
+	default:
+		// Unknown event types: record as opaque stdout but do NOT pull text
+		// into the final answer. Being conservative here prevents echoes
+		// from corrupting downstream parsers.
+		safeEmit(events, provider.Event{
+			Kind:      provider.EventStdoutChunk,
+			Timestamp: time.Now(),
+			Payload:   json.RawMessage(line),
+		})
+		return sessionID, ""
 	}
-	return sessionID, text
 }
 
 func pickString(m map[string]any, keys ...string) (string, bool) {
