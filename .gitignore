@@ -1,5 +1,29 @@
+# build artifacts
 /uta
 /dist/
 *.test
 *.out
+
+# environment / secrets — never commit
+.envrc
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+.npmrc
+
+# local databases / blobs (in case someone runs uta from this dir)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# editor / OS noise
 .DS_Store
+.idea/
+.vscode/
+*.swp
