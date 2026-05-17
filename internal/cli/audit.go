@@ -7,18 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/sentinel"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 )
 
-// Default critic personas that ship with `uta audit`. Two distinct lenses
-// produce useful disagreement; users can add more via --critic.
-var defaultCritics = []engine.CriticSpec{
+// builtinPersonas ships with uta as a starter library. Users add more via
+// YAML files in ~/.uta/personas/.
+var builtinPersonas = []engine.CriticSpec{
 	{
 		ID:    "trail-of-bits",
 		Title: "Trail-of-Bits style auditor",
@@ -48,6 +50,79 @@ upgradeability storage layout, and reentrancy guards.
 Severity is the same scale as Trail-of-Bits. Where in doubt, prefer
 demonstrating the issue with a minimal pseudocode counterexample in the body.`,
 	},
+	{
+		ID:    "gas-optimizer",
+		Title: "Gas / storage optimizer",
+		Prompt: `You are a gas-cost auditor. Focus exclusively on EVM efficiency:
+storage packing (uint128/uint64 fields that could share a slot), unnecessary
+SLOAD/SSTORE, redundant external calls, inefficient loops over storage,
+unbounded loops, missing 'view'/'pure', use of memory vs calldata, suboptimal
+operator selection (e.g. < vs <=).
+
+Severity scale tilts down — gas waste is mostly LOW/INFO unless it enables a
+griefing DoS (then HIGH). Pair every finding with the approximate gas
+saved if possible.`,
+	},
+	{
+		ID:    "defi-economist",
+		Title: "DeFi economic-attack reviewer",
+		Prompt: `You are reviewing economic safety. Focus on: oracle dependencies (TWAP
+window, price manipulation), MEV exposure (sandwich, JIT liquidity),
+liquidation incentives, fee accumulation rounding, flash-loan-amplified
+attacks, governance attack surface, and value-extraction paths that bypass
+intended invariants.
+
+HIGH = a demonstrable economic exploit. MEDIUM = an incentive misalignment
+likely to be gamed. LOW = subtle accounting issue. INFO = design
+observation.`,
+	},
+	{
+		ID:    "code-quality",
+		Title: "Code-quality reviewer",
+		Prompt: `You are a senior reviewer. Focus on: naming, function length, dead code,
+inconsistent error handling, missing or misleading NatSpec, public vs
+internal exposure, magic numbers, and the readability/maintainability of
+control flow.
+
+Severity here is almost always INFO or LOW — flag MEDIUM only when the
+code-quality issue is severe enough to mask a future bug (a misleadingly
+named function used in a security-critical path).`,
+	},
+	{
+		ID:    "supply-chain",
+		Title: "Supply-chain / dependency reviewer",
+		Prompt: `You audit external dependencies and integration surface. Focus on:
+unpinned versions (npm ^x.y.z, go modules without exact tags), unverified
+package sources, eval/exec patterns reading untrusted data, environment
+variable handling, secret leakage in logs, build-time vs runtime trust
+boundaries, and supply-chain attack vectors via post-install hooks.
+
+HIGH = an exploitable supply-chain vector exists today. MEDIUM = unpinned
+critical dep. LOW = best-practice violation.`,
+	},
+}
+
+// resolvePersonas merges builtinPersonas with any user-defined personas
+// loaded from ~/.uta/personas/ at app startup. User personas with the same
+// id as a built-in override the built-in only when force: true.
+func resolvePersonas(app *App) map[string]engine.CriticSpec {
+	out := map[string]engine.CriticSpec{}
+	for _, p := range builtinPersonas {
+		out[p.ID] = p
+	}
+	for _, up := range app.UserPersonas {
+		_, exists := out[up.ID]
+		if exists && !up.Force {
+			continue
+		}
+		out[up.ID] = engine.CriticSpec{
+			ID:     up.ID,
+			Title:  up.Title,
+			Prompt: up.Prompt,
+			Worker: up.Worker,
+		}
+	}
+	return out
 }
 
 func newAuditCmd() *cobra.Command {
@@ -66,10 +141,12 @@ func newAuditCmd() *cobra.Command {
 		toolTimeout    time.Duration
 		reviseTimeout  time.Duration
 		runTimeout     time.Duration
+		budgetTime     time.Duration
 		preApprove     []string
 		printJSONL     bool
 		outputJSON     string
 		outputSARIF    string
+		listPersonas   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "audit [path]",
@@ -93,6 +170,16 @@ Critic identifiers can be passed via --critic <id> repeatedly; uta ships
 your own workflow YAML and using 'uta run -f' instead.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if listPersonas {
+				app, err := newApp(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer app.Close()
+				printPersonaList(cmd.OutOrStdout(), app)
+				return nil
+			}
+
 			path := "."
 			if len(args) > 0 {
 				path = args[0]
@@ -115,7 +202,7 @@ your own workflow YAML and using 'uta run -f' instead.`,
 			}
 			defer app.Close()
 
-			selected, err := resolveCritics(critics)
+			selected, err := resolveCritics(app, critics)
 			if err != nil {
 				return err
 			}
@@ -224,6 +311,17 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 				Registry: app.Registry,
 			})
 
+			// Sentinel: watcher subscribes to the trajectory bus, can cancel
+			// the run via the context if a critical alert fires. Persists its
+			// alerts via the same recorder the supervisor uses.
+			sent := sentinel.NewSentinel(sentinel.Config{
+				BudgetWallClock: budgetTime,
+				PublishOnBus:    bus,
+				Recorder:        recorder,
+				Cancel:          cancel,
+			})
+			go sent.Watch(ctx, bus)
+
 			result, runErr := sup.RunReflector(ctx, req)
 
 			bus.Shutdown()
@@ -315,7 +413,37 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 	cmd.Flags().BoolVar(&printJSONL, "print-jsonl", false, "stream every trajectory event to stdout as JSONL")
 	cmd.Flags().StringVar(&outputJSON, "output-json", "", "write the final FindingsReport JSON to this path ('-' for stdout)")
 	cmd.Flags().StringVar(&outputSARIF, "output-sarif", "", "also write a SARIF 2.1.0 report to this path ('-' for stdout)")
+	cmd.Flags().DurationVar(&budgetTime, "budget-time", 0, "wall-clock budget. The Sentinel emits a warning at 80% and cancels the run at 100%.")
+	cmd.Flags().BoolVar(&listPersonas, "list-personas", false, "list known critic personas (built-ins + ~/.uta/personas/) and exit")
 	return cmd
+}
+
+func printPersonaList(w interface{ Write([]byte) (int, error) }, app *App) {
+	reg := resolvePersonas(app)
+	ids := make([]string, 0, len(reg))
+	for id := range reg {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	userIDs := map[string]bool{}
+	for _, up := range app.UserPersonas {
+		userIDs[up.ID] = true
+	}
+	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }), "Available critic personas:")
+	for _, id := range ids {
+		p := reg[id]
+		src := "built-in"
+		if userIDs[id] {
+			src = "user"
+		}
+		title := p.Title
+		if title == "" {
+			title = "(no title)"
+		}
+		fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "  %-22s %-8s %s\n", id, "["+src+"]", title)
+	}
+	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }))
+	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }), "Add your own by dropping a YAML into ~/.uta/personas/ — see `uta persona example`.")
 }
 
 // buildToolSpecs parses --tool flag values into ToolSpec structs.
@@ -368,29 +496,35 @@ func buildToolSpecs(values []string, timeout time.Duration) []engine.ToolSpec {
 	return out
 }
 
-func resolveCritics(ids []string) ([]engine.CriticSpec, error) {
+func resolveCritics(app *App, ids []string) ([]engine.CriticSpec, error) {
+	registry := resolvePersonas(app)
 	if len(ids) == 0 {
-		return defaultCritics, nil
-	}
-	byID := map[string]engine.CriticSpec{}
-	for _, c := range defaultCritics {
-		byID[c.ID] = c
+		// Default selection: trail-of-bits + openzeppelin-style. Keeps the
+		// v0.4 default behavior even though we now ship more personas.
+		out := []engine.CriticSpec{}
+		for _, id := range []string{"trail-of-bits", "openzeppelin-style"} {
+			if c, ok := registry[id]; ok {
+				out = append(out, c)
+			}
+		}
+		return out, nil
 	}
 	out := make([]engine.CriticSpec, 0, len(ids))
 	var missing []string
 	for _, id := range ids {
-		if c, ok := byID[id]; ok {
+		if c, ok := registry[id]; ok {
 			out = append(out, c)
 			continue
 		}
 		missing = append(missing, id)
 	}
 	if len(missing) > 0 {
-		known := make([]string, 0, len(byID))
-		for id := range byID {
+		known := make([]string, 0, len(registry))
+		for id := range registry {
 			known = append(known, id)
 		}
-		return nil, fmt.Errorf("unknown critic(s): %s. Built-in critics: %s", strings.Join(missing, ","), strings.Join(known, ","))
+		sort.Strings(known)
+		return nil, fmt.Errorf("unknown critic(s): %s. Available: %s", strings.Join(missing, ","), strings.Join(known, ", "))
 	}
 	return out, nil
 }

@@ -41,6 +41,7 @@ const (
 	ReviseStarted         Kind = "revise_started"
 	ReviseCompleted       Kind = "revise_completed"
 	ReflectorCompleted    Kind = "reflector_completed"
+	SentinelAlert         Kind = "sentinel_alert"
 	SynthesisStarted      Kind = "synthesis_started"
 	SynthesisCompleted    Kind = "synthesis_completed"
 	RunCompleted          Kind = "run_completed"

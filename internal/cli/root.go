@@ -25,6 +25,9 @@ import (
 // somewhere up the tree), the App is project-scoped — DB and blobs come from
 // the project state dir, not the global home. Providers always come from the
 // global home (they're user-wide, not project-specific).
+//
+// User-defined personas (~/.uta/personas/*.yaml) are loaded at startup
+// alongside provider descriptors.
 type App struct {
 	// GlobalHome is always $UTA_HOME or ~/.uta. Used for providers and as
 	// the fallback when no project is active.
@@ -42,9 +45,10 @@ type App struct {
 	// otherwise. Subtasks see this as $UTA_CONTEXT_DIR.
 	ContextDir string
 
-	Store    *store.Store
-	Blobs    *store.Blobs
-	Registry *provider.Registry
+	Store        *store.Store
+	Blobs        *store.Blobs
+	Registry     *provider.Registry
+	UserPersonas []*config.Persona
 }
 
 func (a *App) Close() {
@@ -126,9 +130,17 @@ func newApp(_ context.Context) (*App, error) {
 		}
 	}
 
+	// User-defined personas under <globalHome>/personas/.
+	personasDir, _ := config.PersonasDir(globalHome)
+	personas, personaErrs := config.LoadPersonasDir(personasDir)
+	for _, e := range personaErrs {
+		fmt.Fprintln(os.Stderr, "warn: persona:", e)
+	}
+
 	app.Store = st
 	app.Blobs = store.NewBlobs(blobsDir)
 	app.Registry = reg
+	app.UserPersonas = personas
 	return app, nil
 }
 
