@@ -170,6 +170,7 @@ func Execute() {
 	root.AddCommand(newAuditCmd())
 	root.AddCommand(newIdeasCmd())
 	root.AddCommand(newImproveCmd())
+	root.AddCommand(newServeCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
