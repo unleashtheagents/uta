@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uta installer — downloads the latest release for your OS+arch from GitHub,
+# uta installer -- downloads the latest release for your OS+arch from GitHub,
 # verifies its sha256, and drops the binary in /usr/local/bin (or
 # $HOME/.local/bin if /usr/local/bin isn't writable).
 #
@@ -39,7 +39,7 @@ case "$ARCH_RAW" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  note "resolving latest release of ${REPO}…"
+  note "resolving latest release of ${REPO}..."
   TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | \
     awk -F\" '/"tag_name":/ {print $4; exit}')"
   [ -n "$TAG" ] || err "could not resolve latest tag"
@@ -65,7 +65,7 @@ mkdir -p "$INSTALL_DIR"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-note "downloading $ASSET…"
+note "downloading ${ASSET}..."
 curl -fsSL -o "$TMP/$ASSET" "$URL" || err "download failed: $URL"
 curl -fsSL -o "$TMP/checksums.txt" "$CHECKSUM_URL" || err "checksums download failed"
 
