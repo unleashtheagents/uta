@@ -54,6 +54,18 @@ func newResumeCmd() *cobra.Command {
 			}
 			sup := engine.New(deps)
 
+			var subtaskEnv []string
+			if app.InProject() {
+				subtaskEnv = []string{
+					"UTA_PROJECT_ROOT=" + app.ProjectRoot,
+					"UTA_CONTEXT_DIR=" + app.ContextDir,
+					"UTA_PROJECT_NAME=" + app.ProjectName,
+				}
+				if workdir == "" {
+					workdir = app.ProjectRoot
+				}
+			}
+
 			result, err := sup.Resume(ctx, engine.ResumeRequest{
 				PriorSessionID:  args[0],
 				Goal:            goal,
@@ -62,6 +74,7 @@ func newResumeCmd() *cobra.Command {
 				RunTimeout:      runTimeout,
 				PreApproveTools: preApprove,
 				Workdir:         workdir,
+				Env:             subtaskEnv,
 			})
 			bus.Shutdown()
 			<-renderDone

@@ -28,6 +28,7 @@ type ResumeRequest struct {
 	RunTimeout      time.Duration
 	PreApproveTools []string
 	Workdir         string
+	Env             []string // additional env vars for the provider call
 }
 
 // Resume executes a follow-up turn. Returns the new session's RunResult.
@@ -108,6 +109,7 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 
 	opts := provider.RunOptions{
 		Workdir:         req.Workdir,
+		Env:             req.Env,
 		Timeout:         req.SubtaskTimeout,
 		PreApproveTools: req.PreApproveTools,
 	}

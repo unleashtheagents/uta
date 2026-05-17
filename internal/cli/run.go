@@ -186,6 +186,20 @@ func newRunCmd() *cobra.Command {
 			}
 			sup := engine.New(deps)
 
+			// Project context: subtasks see the project's root + shared context
+			// dir as env vars, and the project root becomes the default workdir.
+			var subtaskEnv []string
+			if app.InProject() {
+				subtaskEnv = []string{
+					"UTA_PROJECT_ROOT=" + app.ProjectRoot,
+					"UTA_CONTEXT_DIR=" + app.ContextDir,
+					"UTA_PROJECT_NAME=" + app.ProjectName,
+				}
+				if workdir == "" {
+					workdir = app.ProjectRoot
+				}
+			}
+
 			result, runErr := sup.Run(ctx, engine.RunRequest{
 				Goal:            goal,
 				WorkerName:      workerName,
@@ -202,6 +216,7 @@ func newRunCmd() *cobra.Command {
 				PreSetSubtasks:  preSet,
 				SkipSynthesis:   skipSynth,
 				Strategy:        strategyFlag,
+				Env:             subtaskEnv,
 			})
 
 			bus.Shutdown()

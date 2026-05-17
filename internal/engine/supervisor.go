@@ -62,6 +62,11 @@ type RunRequest struct {
 	// subtask in parallel (the original v0.1.0 behavior). "dag" honors
 	// SubtaskSpec.Needs and SubtaskSpec.Gate.
 	Strategy string
+
+	// Env is appended to os.Environ() for every provider invocation made
+	// during this run. Used to inject UTA_PROJECT_ROOT / UTA_CONTEXT_DIR
+	// when the run is project-scoped.
+	Env []string
 }
 
 // RunResult is what the supervisor returns once a run is done (success or not).
@@ -335,6 +340,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID string, prov provider.AgentProvider, prompt string, req RunRequest) (provider.RunResult, error) {
 	opts := provider.RunOptions{
 		Workdir:         req.Workdir,
+		Env:             req.Env,
 		Timeout:         req.SubtaskTimeout,
 		PreApproveTools: req.PreApproveTools,
 	}
