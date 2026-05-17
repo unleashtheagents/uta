@@ -40,6 +40,7 @@ func newRunCmd() *cobra.Command {
 		preApprove     []string
 		workdir        string
 		workflowFile   string
+		strategyFlag   string
 	)
 
 	cmd := &cobra.Command{
@@ -90,6 +91,9 @@ func newRunCmd() *cobra.Command {
 				if strings.EqualFold(wf.Synthesis.Mode, "skip") {
 					skipSynth = true
 				}
+				if strategyFlag == "" {
+					strategyFlag = wf.InferStrategy()
+				}
 				for i, st := range wf.Subtasks {
 					id := st.ID
 					if id == "" {
@@ -99,9 +103,18 @@ func newRunCmd() *cobra.Command {
 					if title == "" {
 						title = id
 					}
-					preSet = append(preSet, engine.SubtaskSpec{
-						ID: id, Title: title, Prompt: st.Prompt, Worker: st.Worker,
-					})
+					spec := engine.SubtaskSpec{
+						ID: id, Title: title, Prompt: st.Prompt, Worker: st.Worker, Needs: st.Needs,
+					}
+					if st.Gate != nil {
+						spec.Gate = &engine.Gate{
+							Cmd:           st.Gate.Cmd,
+							Timeout:       st.Gate.Timeout,
+							RetryProducer: st.Gate.RetryProducer,
+							MaxRetries:    st.Gate.MaxRetries,
+						}
+					}
+					preSet = append(preSet, spec)
 				}
 			}
 
@@ -188,6 +201,7 @@ func newRunCmd() *cobra.Command {
 				WorkflowPath:    workflowFile,
 				PreSetSubtasks:  preSet,
 				SkipSynthesis:   skipSynth,
+				Strategy:        strategyFlag,
 			})
 
 			bus.Shutdown()
@@ -243,6 +257,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&preApprove, "pre-approve", nil, "comma-separated tools the worker may use without prompting (provider-specific)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "working directory exposed to the worker (defaults to CWD)")
 	cmd.Flags().StringVarP(&workflowFile, "file", "f", "", "load a uta.yaml workflow file (flags can still override its fields)")
+	cmd.Flags().StringVar(&strategyFlag, "strategy", "", "orchestration strategy: fanout (parallel, default) or dag (with needs+gates). Auto-detected from workflow YAML if unset.")
 
 	return cmd
 }

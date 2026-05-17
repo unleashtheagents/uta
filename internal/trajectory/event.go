@@ -25,6 +25,11 @@ const (
 	SubtaskAssistantText  Kind = "subtask_assistant_text"
 	SubtaskCompleted      Kind = "subtask_completed"
 	SubtaskFailed         Kind = "subtask_failed"
+	SubtaskSkipped        Kind = "subtask_skipped" // DAG: an upstream dep failed
+	GateStarted           Kind = "gate_started"
+	GatePassed            Kind = "gate_passed"
+	GateFailed            Kind = "gate_failed"
+	ProducerRetried       Kind = "producer_retried"
 	SynthesisStarted      Kind = "synthesis_started"
 	SynthesisCompleted    Kind = "synthesis_completed"
 	RunCompleted          Kind = "run_completed"

@@ -5,14 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // SubtaskSpec is one decomposed unit of work.
 type SubtaskSpec struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Prompt string `json:"prompt"`
-	Worker string `json:"worker,omitempty"` // optional per-subtask override (YAML workflows)
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Prompt string   `json:"prompt"`
+	Worker string   `json:"worker,omitempty"` // optional per-subtask override (YAML workflows)
+	Needs  []string `json:"needs,omitempty"`  // DAG dependencies — subtask IDs that must complete first
+	Gate   *Gate    `json:"gate,omitempty"`   // optional verification gate run after the subtask
+}
+
+// Gate is a verification step that runs after a subtask completes. A non-zero
+// exit blocks downstream subtasks. When RetryProducer is true the producing
+// subtask is re-run with the gate's output appended to its prompt, up to
+// MaxRetries times.
+type Gate struct {
+	Cmd           string        `json:"cmd"`
+	Timeout       time.Duration `json:"timeout,omitempty"`
+	RetryProducer bool          `json:"retry_producer,omitempty"`
+	MaxRetries    int           `json:"max_retries,omitempty"`
 }
 
 // Plan is what the planner LLM is asked to produce.

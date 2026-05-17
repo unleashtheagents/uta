@@ -57,6 +57,11 @@ type RunRequest struct {
 	// SkipSynthesis, if true, joins subtask outputs verbatim instead of
 	// calling the synthesizer provider. Used when synthesis.mode=skip in YAML.
 	SkipSynthesis bool
+
+	// Strategy chooses the orchestration shape. "" or "fanout" runs every
+	// subtask in parallel (the original v0.1.0 behavior). "dag" honors
+	// SubtaskSpec.Needs and SubtaskSpec.Gate.
+	Strategy string
 }
 
 // RunResult is what the supervisor returns once a run is done (success or not).
@@ -83,8 +88,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if req.WorkerName == "" {
 		return RunResult{}, errors.New("worker is required")
 	}
-	worker, ok := s.deps.Registry.Get(req.WorkerName)
-	if !ok {
+	if _, ok := s.deps.Registry.Get(req.WorkerName); !ok {
 		return RunResult{}, fmt.Errorf("worker %q not registered", req.WorkerName)
 	}
 	plannerName := firstNonEmpty(req.PlannerName, req.WorkerName)
@@ -130,7 +134,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 	s.emit(sessionID, "", trajectory.GoalReceived, map[string]any{
 		"goal": req.Goal, "worker": req.WorkerName, "planner": plannerName, "synth": synthName,
-		"max_parallel": req.MaxParallel,
+		"max_parallel": req.MaxParallel, "strategy": pickStrategy(req.Strategy, Plan{Subtasks: req.PreSetSubtasks}),
 	})
 
 	// ----- Planning -----
@@ -156,66 +160,27 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		})
 	}
 
-	// ----- Fan-out -----
-	outcomes := make([]SubtaskOutcome, len(plan.Subtasks))
-	sem := make(chan struct{}, req.MaxParallel)
-	var wg sync.WaitGroup
-	anyFailed := false
-	var failedMu sync.Mutex
-
-	for i, spec := range plan.Subtasks {
-		i, spec := i, spec
-		// Resolve the worker for this subtask (allow per-subtask override).
-		subtaskWorker := worker
-		subtaskWorkerName := req.WorkerName
-		if spec.Worker != "" {
-			if p, ok := s.deps.Registry.Get(spec.Worker); ok {
-				subtaskWorker = p
-				subtaskWorkerName = spec.Worker
-			}
-		}
-		subtaskID := uuid.NewString()
-		promptRef, err := s.deps.Blobs.Put([]byte(spec.Prompt), "txt")
-		if err != nil {
-			promptRef = ""
-		}
-		if err := s.deps.Store.CreateSubtask(store.Subtask{
-			ID:        subtaskID,
-			SessionID: sessionID,
-			Ord:       i,
-			Title:     spec.Title,
-			PromptRef: promptRef,
-			Worker:    subtaskWorkerName,
-			Status:    "pending",
-		}); err != nil {
-			outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "subtask create failed: " + err.Error(), Failed: true}
-			continue
-		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "cancelled before start", Failed: true}
-				return
-			}
-			defer func() { <-sem }()
-
-			outcome := s.runSubtask(ctx, sessionID, subtaskID, spec, subtaskWorker, subtaskWorkerName, req)
-			outcomes[i] = outcome
-			if outcome.Failed {
-				failedMu.Lock()
-				anyFailed = true
-				failedMu.Unlock()
-				if req.FailFast {
-					cancel()
-				}
-			}
-		}()
+	// ----- Strategy dispatch -----
+	strategy := pickStrategy(req.Strategy, plan)
+	var (
+		outcomes  []SubtaskOutcome
+		anyFailed bool
+		abortedFF bool
+		stratErr  error
+	)
+	switch strategy {
+	case "dag":
+		outcomes, anyFailed, abortedFF, stratErr = s.runDAG(ctx, sessionID, plan, req)
+	default:
+		outcomes, anyFailed, abortedFF, stratErr = s.runFanout(ctx, sessionID, plan, req)
 	}
-	wg.Wait()
+
+	if stratErr != nil {
+		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": stratErr.Error()})
+		_ = s.deps.Store.MarkSession(sessionID, "failed", "")
+		subs, _ := s.deps.Store.SubtaskListBySession(sessionID)
+		return RunResult{SessionID: sessionID, Status: "failed", Subtasks: subs}, stratErr
+	}
 
 	// Cancellation detection: distinguish user/timeout cancel from clean finish.
 	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) && !req.FailFast {
@@ -224,7 +189,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		return RunResult{SessionID: sessionID, Status: "cancelled"}, ctxErr
 	}
 
-	if anyFailed && req.FailFast {
+	if anyFailed && (req.FailFast || abortedFF) {
 		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": "fail-fast: a subtask failed"})
 		_ = s.deps.Store.MarkSession(sessionID, "failed", "")
 		subs, _ := s.deps.Store.SubtaskListBySession(sessionID)
@@ -506,4 +471,93 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// pickStrategy resolves the orchestration strategy. Explicit value wins; on
+// "" we auto-detect: any subtask with Needs or Gate triggers "dag", else
+// "fanout".
+func pickStrategy(explicit string, plan Plan) string {
+	if explicit != "" {
+		return explicit
+	}
+	for _, s := range plan.Subtasks {
+		if len(s.Needs) > 0 || s.Gate != nil {
+			return "dag"
+		}
+	}
+	return "fanout"
+}
+
+// runFanout is the v0.1.0 supervisor pattern: every subtask runs in parallel
+// under MaxParallel. No deps, no gates. Returns (outcomes, anyFailed,
+// abortedByFailFast, err) like runDAG.
+func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan, req RunRequest) ([]SubtaskOutcome, bool, bool, error) {
+	outcomes := make([]SubtaskOutcome, len(plan.Subtasks))
+	sem := make(chan struct{}, req.MaxParallel)
+	var wg sync.WaitGroup
+	anyFailed := false
+	var mu sync.Mutex
+
+	subCtx, cancelSubs := context.WithCancel(ctx)
+	defer cancelSubs()
+
+	for i, spec := range plan.Subtasks {
+		i, spec := i, spec
+		subtaskWorkerName := req.WorkerName
+		var subtaskWorker provider.AgentProvider
+		if spec.Worker != "" {
+			if p, ok := s.deps.Registry.Get(spec.Worker); ok {
+				subtaskWorker = p
+				subtaskWorkerName = spec.Worker
+			}
+		}
+		if subtaskWorker == nil {
+			subtaskWorker, _ = s.deps.Registry.Get(subtaskWorkerName)
+		}
+
+		subtaskID := uuid.NewString()
+		promptRef, err := s.deps.Blobs.Put([]byte(spec.Prompt), "txt")
+		if err != nil {
+			promptRef = ""
+		}
+		if err := s.deps.Store.CreateSubtask(store.Subtask{
+			ID:        subtaskID,
+			SessionID: sessionID,
+			Ord:       i,
+			Title:     spec.Title,
+			PromptRef: promptRef,
+			Worker:    subtaskWorkerName,
+			Status:    "pending",
+		}); err != nil {
+			outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "subtask create failed: " + err.Error(), Failed: true}
+			continue
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-subCtx.Done():
+				outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "cancelled before start", Failed: true}
+				return
+			}
+			defer func() { <-sem }()
+
+			outcome := s.runSubtask(subCtx, sessionID, subtaskID, spec, subtaskWorker, subtaskWorkerName, req)
+			mu.Lock()
+			outcomes[i] = outcome
+			if outcome.Failed {
+				anyFailed = true
+				if req.FailFast {
+					cancelSubs()
+				}
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	abortedByFailFast := anyFailed && req.FailFast && subCtx.Err() != nil
+	return outcomes, anyFailed, abortedByFailFast, nil
 }
