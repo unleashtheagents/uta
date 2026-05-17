@@ -1,0 +1,18 @@
+# Template for ~/projects/uta/.envrc — copy to .envrc, then `direnv allow` (or `source .envrc`).
+# .envrc is gitignored. Never commit it.
+#
+# What this does:
+#   - Forces gh + goreleaser to use the `unleashtheagents` GitHub account
+#     regardless of which account is "active" in the gh keyring. This
+#     prevents accidentally pushing/releasing under another identity.
+#
+# Requires: `gh` already logged in as `unleashtheagents` once.
+# Verify with: gh auth status | grep unleashtheagents
+
+# Resolved dynamically so token rotation just works — no re-edit needed.
+export GH_TOKEN="$(gh auth token -u unleashtheagents 2>/dev/null || true)"
+export GITHUB_TOKEN="$GH_TOKEN"
+
+# Optional: lock the active gh account for this shell.
+# (no-op if it's already active; safe to keep.)
+gh auth switch -u unleashtheagents >/dev/null 2>&1 || true
