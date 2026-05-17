@@ -168,6 +168,8 @@ func Execute() {
 	root.AddCommand(newProjectCmd())
 	root.AddCommand(newCtxCmd())
 	root.AddCommand(newAuditCmd())
+	root.AddCommand(newIdeasCmd())
+	root.AddCommand(newImproveCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
