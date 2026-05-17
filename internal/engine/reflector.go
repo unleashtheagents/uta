@@ -46,10 +46,12 @@ const (
 type ReflectorRequest struct {
 	Goal          string        // overall objective; appears in critic preamble
 	InputSummary  string        // e.g. "the Solidity code under ./contracts"
-	Critics       []CriticSpec  // required, ≥1
+	Critics       []CriticSpec  // ≥1 unless Tools is non-empty
+	Tools         []ToolSpec    // external analysis tools that join the findings stream
 	Reviser       *ReviserSpec  // optional; nil = audit-only (single iteration)
 	MaxIterations int           // hard ceiling; default 3
 	StopWhen      StopCondition // default StopAtNoHigh
+	ToolsOnly     bool          // when true, skip critics and run only tools each iter
 
 	DefaultWorker  string
 	MaxParallel    int           // critic parallelism within an iteration
@@ -125,8 +127,11 @@ Your reviser charter:
 // subtasks are persisted to the supervisor's store. Each iteration writes a
 // FindingsReport to the project context directory if one is set.
 func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (ReflectorResult, error) {
-	if len(req.Critics) == 0 {
-		return ReflectorResult{}, errors.New("reflector: at least one critic is required")
+	if !req.ToolsOnly && len(req.Critics) == 0 && len(req.Tools) == 0 {
+		return ReflectorResult{}, errors.New("reflector: at least one critic or tool is required")
+	}
+	if req.ToolsOnly && len(req.Tools) == 0 {
+		return ReflectorResult{}, errors.New("reflector: tools-only mode requires at least one tool")
 	}
 	if strings.TrimSpace(req.InputSummary) == "" {
 		return ReflectorResult{}, errors.New("reflector: input_summary is required")
@@ -137,8 +142,8 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 	if req.StopWhen == "" {
 		req.StopWhen = StopAtNoHigh
 	}
-	if req.DefaultWorker == "" {
-		return ReflectorResult{}, errors.New("reflector: default_worker is required")
+	if req.DefaultWorker == "" && !req.ToolsOnly {
+		return ReflectorResult{}, errors.New("reflector: default_worker is required (unless tools-only)")
 	}
 	if req.MaxParallel <= 0 {
 		req.MaxParallel = 4
@@ -153,8 +158,10 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 		req.RunTimeout = 2 * time.Hour
 	}
 
-	if _, ok := s.deps.Registry.Get(req.DefaultWorker); !ok {
-		return ReflectorResult{}, fmt.Errorf("reflector: default worker %q not registered", req.DefaultWorker)
+	if req.DefaultWorker != "" {
+		if _, ok := s.deps.Registry.Get(req.DefaultWorker); !ok {
+			return ReflectorResult{}, fmt.Errorf("reflector: default worker %q not registered", req.DefaultWorker)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, req.RunTimeout)
@@ -175,10 +182,12 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 
 	s.emit(sessionID, "", trajectory.GoalReceived, map[string]any{
 		"goal": req.Goal, "worker": req.DefaultWorker, "strategy": "reflector",
-		"critics":       len(req.Critics),
+		"critics":        len(req.Critics),
+		"tools":          len(req.Tools),
+		"tools_only":     req.ToolsOnly,
 		"max_iterations": req.MaxIterations,
-		"stop_when":     string(req.StopWhen),
-		"reviser":       req.Reviser != nil,
+		"stop_when":      string(req.StopWhen),
+		"reviser":        req.Reviser != nil,
 	})
 
 	res := ReflectorResult{SessionID: sessionID}
@@ -187,14 +196,19 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 	for iter := 1; iter <= req.MaxIterations; iter++ {
 		s.emit(sessionID, "", trajectory.IterationStarted, map[string]any{"iteration": iter})
 
-		// --- run critics in parallel ---
+		// --- run critics + tools in parallel ---
 		perCritic := map[string][]Finding{}
 		var perCriticMu sync.Mutex
 		sem := make(chan struct{}, req.MaxParallel)
 		var wg sync.WaitGroup
 		anyCriticErr := false
 
-		for _, c := range req.Critics {
+		// Critics first (unless we're in tools-only mode).
+		critics := req.Critics
+		if req.ToolsOnly {
+			critics = nil
+		}
+		for _, c := range critics {
 			c := c
 			ord++
 			subtaskID := uuid.NewString()
@@ -294,6 +308,89 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				})
 			}()
 		}
+
+		// --- launch tools in the same wave ---
+		for _, t := range req.Tools {
+			spec := ResolveToolSpec(t)
+			if spec.Workdir == "" {
+				spec.Workdir = req.Workdir
+			}
+			ord++
+			subtaskID := uuid.NewString()
+			promptRef, _ := s.deps.Blobs.Put(
+				[]byte(fmt.Sprintf("tool: %s %s\n(adapter: %s)\n", spec.Cmd, strings.Join(spec.Args, " "), spec.Adapter)),
+				"txt",
+			)
+			_ = s.deps.Store.CreateSubtask(store.Subtask{
+				ID: subtaskID, SessionID: sessionID, Ord: ord,
+				Title:     fmt.Sprintf("iter %d · tool %s", iter, spec.ID),
+				PromptRef: promptRef, Worker: "tool:" + spec.ID, Status: "running",
+			})
+			s.emit(sessionID, subtaskID, trajectory.ToolStarted, map[string]any{
+				"iteration": iter, "tool": spec.ID, "cmd": spec.Cmd, "adapter": spec.Adapter,
+			})
+
+			wg.Add(1)
+			specCopy := spec
+			subID := subtaskID
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+
+				start := time.Now()
+				result := runTool(ctx, specCopy)
+				done := time.Now()
+
+				var rawRef string
+				if len(result.Stdout) > 0 {
+					if r, perr := s.deps.Blobs.Put([]byte(result.Stdout), "txt"); perr == nil {
+						rawRef = r
+					}
+				}
+
+				if result.Err != nil {
+					perCriticMu.Lock()
+					anyCriticErr = true
+					perCriticMu.Unlock()
+					s.emit(sessionID, subID, trajectory.ToolFailed, map[string]any{
+						"tool":  specCopy.ID,
+						"error": result.Err.Error(),
+						"exit":  result.ExitCode,
+					})
+					_ = s.deps.Store.UpdateSubtask(store.Subtask{
+						ID: subID, Status: "failed",
+						StartedAt: &start, CompletedAt: &done,
+						ResultText:  truncate(result.Stdout, 8000),
+						RawOutputRef: rawRef,
+						Error:       result.Err.Error(),
+						ErrorKind:   "tool",
+					})
+					return
+				}
+
+				perCriticMu.Lock()
+				perCritic[specCopy.ID] = result.Findings
+				perCriticMu.Unlock()
+				s.emit(sessionID, subID, trajectory.ToolCompleted, map[string]any{
+					"tool":        specCopy.ID,
+					"findings":    len(result.Findings),
+					"exit":        result.ExitCode,
+					"duration_ms": result.Duration.Milliseconds(),
+				})
+				_ = s.deps.Store.UpdateSubtask(store.Subtask{
+					ID: subID, Status: "completed",
+					StartedAt: &start, CompletedAt: &done,
+					ResultText:   truncate(result.Stdout, 8000),
+					RawOutputRef: rawRef,
+				})
+			}()
+		}
+
 		wg.Wait()
 
 		// --- aggregate ---

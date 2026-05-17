@@ -3,15 +3,19 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/version"
 )
+
+var execLookPath = exec.LookPath
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
@@ -97,6 +101,21 @@ func runDoctor(cmd *cobra.Command) error {
 	if !anyProvider {
 		fmt.Fprintln(out, "\n[warn] no providers detected. Install at least one of: claude, gemini.")
 		allOK = false
+	}
+
+	// Audit tool adapters — best-effort PATH probe.
+	fmt.Fprintln(out)
+	for _, toolID := range engine.KnownBuiltinTools() {
+		spec := engine.ResolveToolSpec(engine.ToolSpec{ID: toolID})
+		if spec.Cmd == "" {
+			continue
+		}
+		path, err := execLookPath(spec.Cmd)
+		if err == nil {
+			fmt.Fprintf(out, "[ok]   tool:     %-12s %s\n", toolID, path)
+		} else {
+			fmt.Fprintf(out, "[--]   tool:     %-12s not on PATH (binary: %s)\n", toolID, spec.Cmd)
+		}
 	}
 
 	fmt.Fprintln(out)
