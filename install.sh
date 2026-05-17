@@ -4,9 +4,9 @@
 # $HOME/.local/bin if /usr/local/bin isn't writable).
 #
 # Usage:
-#   curl -fsSL https://get.unleashtheagents.ai/install.sh | sh
-#   curl -fsSL https://get.unleashtheagents.ai/install.sh | UTA_VERSION=v0.2.0 sh
-#   curl -fsSL https://get.unleashtheagents.ai/install.sh | UTA_INSTALL_DIR=$HOME/bin sh
+#   curl -fsSL https://unleashtheagents.ai/install.sh | sh
+#   curl -fsSL https://unleashtheagents.ai/install.sh | UTA_VERSION=v0.2.0 sh
+#   curl -fsSL https://unleashtheagents.ai/install.sh | UTA_INSTALL_DIR=$HOME/bin sh
 
 set -eu
 

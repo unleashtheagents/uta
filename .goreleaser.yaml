@@ -81,4 +81,4 @@ release:
   prerelease: auto
   footer: |
     ---
-    *Install:* `brew install unleashtheagents/tap/uta` or `curl -fsSL https://get.unleashtheagents.ai/install.sh | sh`
+    *Install:* `brew install unleashtheagents/tap/uta` or `curl -fsSL https://unleashtheagents.ai/install.sh | sh`

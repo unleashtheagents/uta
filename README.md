@@ -11,7 +11,7 @@ Status: **pre-alpha**. v1 in active development.
 brew install unleashtheagents/tap/uta
 
 # curl | sh
-curl -fsSL https://get.unleashtheagents.ai/install.sh | sh
+curl -fsSL https://unleashtheagents.ai/install.sh | sh
 
 # Go toolchain
 go install github.com/unleashtheagents/uta/cmd/uta@latest
