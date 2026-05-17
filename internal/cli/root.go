@@ -110,6 +110,8 @@ func Execute() {
 	root.AddCommand(newSessionsCmd())
 	root.AddCommand(newTrajectoryCmd())
 	root.AddCommand(newInitCmd())
+	root.AddCommand(newExportDBCmd())
+	root.AddCommand(newImportCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
