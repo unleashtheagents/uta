@@ -27,3 +27,7 @@ secrets.json
 .idea/
 .vscode/
 *.swp
+
+# AI-agent context files — kept local-only, never committed
+CLAUDE.md
+.claude/
