@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,7 @@ func (g *GateResult) Passed() bool { return g.Err == nil && g.ExitCode == 0 }
 // CombinedOutputTail returns up to maxBytes from the end of stdout/stderr
 // concatenated, suitable for feeding back to the producer agent on retry.
 func (g *GateResult) CombinedOutputTail(maxBytes int) string {
-	var b bytes.Buffer
+	var b strings.Builder
 	if g.Stdout != "" {
 		b.WriteString("--- stdout ---\n")
 		b.WriteString(g.Stdout)
@@ -62,7 +63,12 @@ func runGate(parent context.Context, gate *Gate, workdir string) GateResult {
 	}
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "sh", "-c", gate.Cmd)
+	var cmd *exec.Cmd
+	if len(gate.Args) > 0 {
+		cmd = exec.CommandContext(ctx, gate.Cmd, gate.Args...)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", gate.Cmd)
+	}
 	cmd.Dir = workdir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

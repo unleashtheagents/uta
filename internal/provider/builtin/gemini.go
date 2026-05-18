@@ -22,14 +22,28 @@ import (
 //
 // Output format empirically discovered at the smoke-test stage: parser is
 // permissive so it handles minor schema drift across versions.
-type Gemini struct{}
+type Gemini struct {
+	pathOnce sync.Once
+	path     string
+	pathErr  error
+}
 
-func (Gemini) Name() string { return "gemini" }
+func (g *Gemini) Name() string { return "gemini" }
+
+// resolvePath looks up the absolute path to `gemini` exactly once and caches
+// the result. We resolve up front (not per RunHeadless) so a PATH change in a
+// subtask environment can't redirect us to a different binary mid-run.
+func (g *Gemini) resolvePath() (string, error) {
+	g.pathOnce.Do(func() {
+		g.path, g.pathErr = exec.LookPath("gemini")
+	})
+	return g.path, g.pathErr
+}
 
 var geminiVersionRE = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
 
-func (Gemini) Detect(ctx context.Context) provider.Detection {
-	path, err := exec.LookPath("gemini")
+func (g *Gemini) Detect(ctx context.Context) provider.Detection {
+	path, err := g.resolvePath()
 	if err != nil {
 		return provider.Detection{Available: false, Notes: "binary 'gemini' not found on PATH"}
 	}
@@ -62,18 +76,18 @@ func (Gemini) Detect(ctx context.Context) provider.Detection {
 	}
 }
 
-func (g Gemini) RunHeadless(ctx context.Context, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (g *Gemini) RunHeadless(ctx context.Context, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	return g.runHeadless(ctx, prompt, "", opts, events)
 }
 
-func (g Gemini) ResumeHeadless(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (g *Gemini) ResumeHeadless(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	if sessionID == "" {
 		return provider.RunResult{}, fmt.Errorf("gemini resume: empty session id: %w", provider.ErrUnsupported)
 	}
 	return g.runHeadless(ctx, prompt, sessionID, opts, events)
 }
 
-func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (g *Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json"}
 	if resumeID != "" {
 		args = append(args, "-r", resumeID)
@@ -86,7 +100,11 @@ func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, "gemini", args...)
+	binPath, err := g.resolvePath()
+	if err != nil {
+		return provider.RunResult{}, fmt.Errorf("gemini: %w: binary 'gemini' not found on PATH", provider.ErrTransport)
+	}
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	if opts.Workdir != "" {
 		cmd.Dir = opts.Workdir
 	}
@@ -160,11 +178,34 @@ func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 		}
 		stderr := strings.TrimSpace(stderrBuf.String())
 		low := strings.ToLower(stderr)
+		// Order matters: quota signals are checked BEFORE auth signals
+		// because Gemini's 429 responses include the raw "Authorization:"
+		// header in their stderr dumps, and a naive contains("auth") match
+		// would misclassify capacity-exhausted as auth-failed.
 		switch {
-		case strings.Contains(low, "auth") || strings.Contains(low, "unauthorized") || strings.Contains(low, "api key"):
-			return result, fmt.Errorf("gemini: %w: %s", provider.ErrAuth, stderr)
-		case strings.Contains(low, "quota") || strings.Contains(low, "rate limit"):
+		case strings.Contains(low, "quota") ||
+			strings.Contains(low, "rate limit") ||
+			strings.Contains(low, "ratelimit") ||
+			strings.Contains(low, "rate_limit") ||
+			strings.Contains(low, "resource_exhausted") ||
+			strings.Contains(low, "resource exhausted") ||
+			strings.Contains(low, "capacity_exhausted") ||
+			strings.Contains(low, "model_capacity") ||
+			strings.Contains(low, "no capacity available") ||
+			strings.Contains(low, "too many requests") ||
+			strings.Contains(low, `"code": 429`) ||
+			strings.Contains(low, `"code":429`) ||
+			strings.Contains(low, "status 429"):
 			return result, fmt.Errorf("gemini: %w: %s", provider.ErrQuota, stderr)
+		case strings.Contains(low, "unauthorized") ||
+			strings.Contains(low, "invalid api key") ||
+			strings.Contains(low, "invalid_api_key") ||
+			strings.Contains(low, "authentication failed") ||
+			strings.Contains(low, "api key not valid") ||
+			strings.Contains(low, "permission denied") ||
+			strings.Contains(low, `"code": 401`) ||
+			strings.Contains(low, `"code": 403`):
+			return result, fmt.Errorf("gemini: %w: %s", provider.ErrAuth, stderr)
 		case exit != 0:
 			return result, fmt.Errorf("gemini exit %d: %w: %s", exit, provider.ErrWorkerFailed, stderr)
 		default:

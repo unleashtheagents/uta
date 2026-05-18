@@ -23,7 +23,12 @@ type SubtaskSpec struct {
 // subtask is re-run with the gate's output appended to its prompt, up to
 // MaxRetries times.
 type Gate struct {
-	Cmd           string        `json:"cmd"`
+	Cmd string `json:"cmd"`
+	// Args, when non-empty, causes Cmd to be executed directly with these
+	// arguments instead of being interpreted by `sh -c`. Direct execution
+	// avoids shell-quoting hazards when the binary and arguments are known
+	// up front (mirrors ToolSpec's non-ShellMode path).
+	Args          []string      `json:"args,omitempty"`
 	Timeout       time.Duration `json:"timeout,omitempty"`
 	RetryProducer bool          `json:"retry_producer,omitempty"`
 	MaxRetries    int           `json:"max_retries,omitempty"`

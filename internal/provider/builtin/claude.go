@@ -22,14 +22,28 @@ import (
 // Invocation:  claude -p --output-format stream-json --verbose [--resume <id>]
 //              [--allowedTools ...] [--add-dir <workdir>]
 // Prompt is fed via stdin (avoids argv length and quoting bugs).
-type Claude struct{}
+type Claude struct {
+	pathOnce sync.Once
+	path     string
+	pathErr  error
+}
 
-func (Claude) Name() string { return "claude" }
+func (c *Claude) Name() string { return "claude" }
+
+// resolvePath looks up the absolute path to `claude` exactly once and caches
+// the result. We resolve up front (not per RunHeadless) so a PATH change in a
+// subtask environment can't redirect us to a different binary mid-run.
+func (c *Claude) resolvePath() (string, error) {
+	c.pathOnce.Do(func() {
+		c.path, c.pathErr = exec.LookPath("claude")
+	})
+	return c.path, c.pathErr
+}
 
 var claudeVersionRE = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
 
-func (Claude) Detect(ctx context.Context) provider.Detection {
-	path, err := exec.LookPath("claude")
+func (c *Claude) Detect(ctx context.Context) provider.Detection {
+	path, err := c.resolvePath()
 	if err != nil {
 		return provider.Detection{Available: false, Notes: "binary 'claude' not found on PATH"}
 	}
@@ -58,18 +72,18 @@ func (Claude) Detect(ctx context.Context) provider.Detection {
 	}
 }
 
-func (c Claude) RunHeadless(ctx context.Context, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (c *Claude) RunHeadless(ctx context.Context, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	return c.runHeadless(ctx, prompt, "", opts, events)
 }
 
-func (c Claude) ResumeHeadless(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (c *Claude) ResumeHeadless(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	if sessionID == "" {
 		return provider.RunResult{}, fmt.Errorf("claude resume: empty session id: %w", provider.ErrUnsupported)
 	}
 	return c.runHeadless(ctx, prompt, sessionID, opts, events)
 }
 
-func (Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if resumeID != "" {
 		args = append(args, "--resume", resumeID)
@@ -88,7 +102,11 @@ func (Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	binPath, err := c.resolvePath()
+	if err != nil {
+		return provider.RunResult{}, fmt.Errorf("claude: %w: binary 'claude' not found on PATH", provider.ErrTransport)
+	}
+	cmd := exec.CommandContext(ctx, binPath, args...)
 	if opts.Workdir != "" {
 		cmd.Dir = opts.Workdir
 	}
@@ -163,13 +181,30 @@ func (Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 			return result, ctx.Err()
 		}
 		stderr := strings.TrimSpace(stderrBuf.String())
-		if strings.Contains(stderr, "API key") || strings.Contains(stderr, "auth") || strings.Contains(stderr, "Unauthorized") {
+		low := strings.ToLower(stderr)
+		// Order matters: quota / rate-limit signals come BEFORE auth signals
+		// so a 429 response that happens to contain "Authorization:" header
+		// text isn't misclassified as an auth failure.
+		switch {
+		case strings.Contains(low, "quota") ||
+			strings.Contains(low, "rate limit") ||
+			strings.Contains(low, "ratelimit") ||
+			strings.Contains(low, "rate_limit") ||
+			strings.Contains(low, "too many requests") ||
+			strings.Contains(low, "overloaded") ||
+			strings.Contains(low, "status 429"):
+			return result, fmt.Errorf("claude: %w: %s", provider.ErrQuota, stderr)
+		case strings.Contains(low, "invalid api key") ||
+			strings.Contains(low, "invalid_api_key") ||
+			strings.Contains(low, "unauthorized") ||
+			strings.Contains(low, "authentication failed") ||
+			strings.Contains(low, "api key not valid"):
 			return result, fmt.Errorf("claude: %w: %s", provider.ErrAuth, stderr)
-		}
-		if exit != 0 {
+		case exit != 0:
 			return result, fmt.Errorf("claude exit %d: %w: %s", exit, provider.ErrWorkerFailed, stderr)
+		default:
+			return result, fmt.Errorf("claude: %w: %v: %s", provider.ErrTransport, waitErr, stderr)
 		}
-		return result, fmt.Errorf("claude: %w: %v: %s", provider.ErrTransport, waitErr, stderr)
 	}
 	if scanErr != nil {
 		return result, fmt.Errorf("claude stream parse: %w: %v", provider.ErrTransport, scanErr)

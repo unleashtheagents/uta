@@ -12,6 +12,11 @@ import (
 // agent binary (e.g., a hanging `--version`) can't stall DetectAll.
 const detectTimeout = 5 * time.Second
 
+// detectConcurrency caps how many Detect() calls run in parallel. Each Detect
+// typically spawns a subprocess, so unbounded fan-out across many declarative
+// providers could hit OS process limits.
+const detectConcurrency = 8
+
 // Registry holds all known providers — built-ins registered at startup plus any
 // declarative YAML providers loaded from ~/.uta/providers/.
 type Registry struct {
@@ -68,10 +73,13 @@ func (r *Registry) DetectAll(ctx context.Context) map[string]Detection {
 	out := make(map[string]Detection, len(providers))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, detectConcurrency)
 	for _, p := range providers {
 		wg.Add(1)
 		go func(p AgentProvider) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			dctx, cancel := context.WithTimeout(ctx, detectTimeout)
 			defer cancel()
 			d := p.Detect(dctx)

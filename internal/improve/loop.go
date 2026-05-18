@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -120,6 +121,12 @@ func Loop(ctx context.Context, sup *engine.Supervisor, board *Board, reg *provid
 			gathered, gerr := runGatherStep(ctx, gatherer, board, reg, req)
 			if gerr != nil {
 				res.LastError = gerr
+				// Quota-exhausted gather is a graceful stop, not a crash —
+				// the iterations we've already completed are real work.
+				if errors.Is(gerr, provider.ErrQuota) {
+					res.StoppedBecause = "quota_exhausted"
+					return res, nil
+				}
 				res.StoppedBecause = "error"
 				return res, gerr
 			}
@@ -151,32 +158,68 @@ func Loop(ctx context.Context, sup *engine.Supervisor, board *Board, reg *provid
 	}
 }
 
+// gatherQuotaRetries is how many additional attempts we make after the first
+// quota-classified failure. Total attempts = 1 + this.
+const gatherQuotaRetries = 2
+
+// gatherBackoffBase is the wall-clock pause before the first retry. Doubles
+// each subsequent retry (5m → 10m → 20m if you raise gatherQuotaRetries).
+const gatherBackoffBase = 5 * time.Minute
+
 func runGatherStep(ctx context.Context, g *Gatherer, board *Board, reg *provider.Registry, req LoopRequest) (int, error) {
 	if _, ok := reg.Get(req.GatherWorker); !ok {
 		return 0, fmt.Errorf("gatherer worker %q not registered", req.GatherWorker)
 	}
-	existing, _ := board.List(ListOptions{Limit: 200, Newest: true})
 
-	gres, err := g.Run(ctx, GatherRequest{
-		WorkerName: req.GatherWorker,
-		Workdir:    req.Workdir,
-		Env:        req.Env,
-		Timeout:    req.GatherTimeout,
-		MaxIdeas:   req.GatherMaxIdeas,
-		Goal:       req.GatherGoal,
-		Existing:   existing,
-	})
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, idea := range gres.Ideas {
-		if err := board.Insert(idea); err != nil {
-			return n, fmt.Errorf("persist gathered idea: %w", err)
+	var lastErr error
+	for attempt := 0; attempt <= gatherQuotaRetries; attempt++ {
+		if attempt > 0 {
+			backoff := gatherBackoffBase * time.Duration(1<<(attempt-1))
+			fmt.Fprintf(os.Stderr,
+				"[uta improve] gather hit quota (attempt %d/%d); waiting %s before retry…\n",
+				attempt, gatherQuotaRetries+1, backoff)
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(backoff):
+			}
 		}
-		n++
+
+		existing, _ := board.List(ListOptions{Limit: 200, Newest: true})
+		gres, err := g.Run(ctx, GatherRequest{
+			WorkerName: req.GatherWorker,
+			Workdir:    req.Workdir,
+			Env:        req.Env,
+			Timeout:    req.GatherTimeout,
+			MaxIdeas:   req.GatherMaxIdeas,
+			Goal:       req.GatherGoal,
+			Existing:   existing,
+		})
+
+		if err == nil {
+			n := 0
+			for _, idea := range gres.Ideas {
+				if ierr := board.Insert(idea); ierr != nil {
+					return n, fmt.Errorf("persist gathered idea: %w", ierr)
+				}
+				n++
+			}
+			return n, nil
+		}
+
+		lastErr = err
+		// Quota / capacity errors get retried with backoff. Anything else
+		// (auth, transport, parse, worker-failed) is permanent — return
+		// immediately so the loop can stop with a real reason.
+		if !errors.Is(err, provider.ErrQuota) {
+			return 0, err
+		}
 	}
-	return n, nil
+
+	// Exhausted quota retries. Wrap the last error so the loop can detect it
+	// via errors.Is(..., provider.ErrQuota) and stop gracefully rather than
+	// reporting it as a hard failure.
+	return 0, fmt.Errorf("gather quota exhausted after %d attempts: %w", gatherQuotaRetries+1, lastErr)
 }
 
 // executeIdea drives one idea through the DAG: a single subtask whose prompt

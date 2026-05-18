@@ -222,8 +222,8 @@ func parseFindingsAdapter(toolID, stdout, _ string) ([]Finding, error) {
 // Each detector has: check (rule id), impact (severity), confidence,
 // description, elements[].source_mapping.{filename_relative,lines[]}.
 func parseSlither(toolID, stdout, _ string) ([]Finding, error) {
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	payload := extractJSONObject(stdout)
+	if payload == "" {
 		return nil, nil
 	}
 	var root struct {
@@ -246,7 +246,7 @@ func parseSlither(toolID, stdout, _ string) ([]Finding, error) {
 			} `json:"detectors"`
 		} `json:"results"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &root); err != nil {
+	if err := json.Unmarshal([]byte(payload), &root); err != nil {
 		return nil, fmt.Errorf("slither json: %w", err)
 	}
 	out := make([]Finding, 0, len(root.Results.Detectors))
@@ -274,8 +274,8 @@ func parseSlither(toolID, stdout, _ string) ([]Finding, error) {
 //   {"issues":[{"swc-id":"...","severity":"...","title":"...","description":"...","filename":"...","lineno":N}]}
 //   {"messages":[...],"issues":[...]} (newer)
 func parseMythril(toolID, stdout, _ string) ([]Finding, error) {
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	payload := extractJSONObject(stdout)
+	if payload == "" {
 		return nil, nil
 	}
 	var raw struct {
@@ -289,7 +289,7 @@ func parseMythril(toolID, stdout, _ string) ([]Finding, error) {
 			SourceMap   string `json:"sourceMap"`
 		} `json:"issues"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return nil, fmt.Errorf("mythril json: %w", err)
 	}
 	out := make([]Finding, 0, len(raw.Issues))
@@ -351,6 +351,22 @@ func parseForgeTest(toolID, stdout, _ string) ([]Finding, error) {
 		}
 	}
 	return out, nil
+}
+
+// extractJSONObject returns the substring from the first '{' to the last '}'
+// in s, trimmed. This mirrors the permissive extraction in ParseFindings so
+// tool adapters tolerate warnings, logs, or banners printed before/after the
+// JSON payload. Returns "" when no balanced shape is present.
+func extractJSONObject(s string) string {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return ""
+	}
+	end := strings.LastIndex(s, "}")
+	if end <= start {
+		return ""
+	}
+	return s[start : end+1]
 }
 
 func filenameOnly(s string) string {

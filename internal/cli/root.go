@@ -103,11 +103,11 @@ func newApp(_ context.Context) (*App, error) {
 	}
 
 	reg := provider.NewRegistry()
-	if err := reg.Register(builtin.Claude{}, false); err != nil {
+	if err := reg.Register(&builtin.Claude{}, false); err != nil {
 		st.Close()
 		return nil, err
 	}
-	if err := reg.Register(builtin.Gemini{}, false); err != nil {
+	if err := reg.Register(&builtin.Gemini{}, false); err != nil {
 		st.Close()
 		return nil, err
 	}
