@@ -22,18 +22,29 @@ cd "$(dirname "$0")/.."   # repo root
 : "${VERIFY:=go test ./...}"
 : "${GOAL:=robustness, tests, and code quality}"
 : "${PRE_APPROVE:=Read,Edit,Write,Bash(go *),Bash(gofmt *),Bash(golangci-lint *)}"
+# Set GATHER_WHEN_EMPTY=0 to disable auto-gather. Useful when you've pre-seeded
+# the board with a curated roadmap and don't want gemini to drift the agenda.
+: "${GATHER_WHEN_EMPTY:=1}"
+
+gather_flag=""
+case "$GATHER_WHEN_EMPTY" in
+  1|true|TRUE|yes|YES) gather_flag="--gather-when-empty" ;;
+  0|false|FALSE|no|NO) gather_flag="" ;;
+  *) echo "abort: GATHER_WHEN_EMPTY must be 0 or 1 (got: $GATHER_WHEN_EMPTY)" >&2; exit 1 ;;
+esac
 
 # Show resolved config so a paste-mangled override can't hide.
 cat <<EOM
 self-improve config:
-  WORKER         $WORKER
-  GATHER_WORKER  $GATHER_WORKER
-  VERIFY         $VERIFY
-  GOAL           $GOAL
-  BUDGET         $BUDGET
-  MAX_ITER       $MAX_ITER
-  PER_IDEA       $PER_IDEA
-  PRE_APPROVE    $PRE_APPROVE
+  WORKER             $WORKER
+  GATHER_WORKER      $GATHER_WORKER
+  VERIFY             $VERIFY
+  GOAL               $GOAL
+  BUDGET             $BUDGET
+  MAX_ITER           $MAX_ITER
+  PER_IDEA           $PER_IDEA
+  GATHER_WHEN_EMPTY  $GATHER_WHEN_EMPTY
+  PRE_APPROVE        $PRE_APPROVE
 EOM
 
 # Sanity: working tree must be clean. If not, refuse to run rather than
@@ -59,6 +70,6 @@ exec uta improve \
   --budget "$BUDGET" \
   --max-iter "$MAX_ITER" \
   --per-idea-timeout "$PER_IDEA" \
-  --gather-when-empty \
+  $gather_flag \
   --gather-goal "$GOAL" \
   --pre-approve "$PRE_APPROVE"
