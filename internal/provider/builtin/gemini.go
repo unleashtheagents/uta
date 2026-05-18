@@ -90,8 +90,14 @@ func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 	if opts.Workdir != "" {
 		cmd.Dir = opts.Workdir
 	}
+	// Gemini's workspace-trust dialog blocks indefinitely in headless mode
+	// without a TTY. Setting GEMINI_CLI_TRUST_WORKSPACE=true is the
+	// supported way to bypass it. We make it the default here so callers
+	// don't have to export it externally; opts.Env can still override
+	// because exec.Cmd honors the last occurrence of a key.
+	cmd.Env = append(cmd.Environ(), "GEMINI_CLI_TRUST_WORKSPACE=true")
 	if len(opts.Env) > 0 {
-		cmd.Env = append(cmd.Environ(), opts.Env...)
+		cmd.Env = append(cmd.Env, opts.Env...)
 	}
 
 	stdout, err := cmd.StdoutPipe()
