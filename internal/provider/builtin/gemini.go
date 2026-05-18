@@ -111,7 +111,7 @@ func (Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts pro
 		sessionID string
 		finalText strings.Builder
 	)
-	tee := newTeeWriter(&rawMu, &rawBuf)
+	tee := &lockedWriter{mu: &rawMu, w: &rawBuf}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
@@ -285,17 +285,3 @@ func pickString(m map[string]any, keys ...string) (string, bool) {
 	return "", false
 }
 
-type teeWriter struct {
-	mu  *sync.Mutex
-	buf *bytes.Buffer
-}
-
-func newTeeWriter(mu *sync.Mutex, buf *bytes.Buffer) *teeWriter {
-	return &teeWriter{mu: mu, buf: buf}
-}
-
-func (t *teeWriter) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.buf.Write(p)
-}

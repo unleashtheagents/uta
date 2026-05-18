@@ -182,22 +182,24 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 	if stratErr != nil {
 		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": stratErr.Error()})
-		_ = s.deps.Store.MarkSession(sessionID, "failed", "")
-		subs, _ := s.deps.Store.SubtaskListBySession(sessionID)
+		s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
+		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+		s.dbErr(sessionID, "", "subtask_list", listErr)
 		return RunResult{SessionID: sessionID, Status: "failed", Subtasks: subs}, stratErr
 	}
 
 	// Cancellation detection: distinguish user/timeout cancel from clean finish.
 	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) && !req.FailFast {
 		s.emit(sessionID, "", trajectory.RunCancelled, map[string]any{"reason": ctxErr.Error()})
-		_ = s.deps.Store.MarkSession(sessionID, "cancelled", "")
+		s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "cancelled", ""))
 		return RunResult{SessionID: sessionID, Status: "cancelled"}, ctxErr
 	}
 
 	if anyFailed && (req.FailFast || abortedFF) {
 		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": "fail-fast: a subtask failed"})
-		_ = s.deps.Store.MarkSession(sessionID, "failed", "")
-		subs, _ := s.deps.Store.SubtaskListBySession(sessionID)
+		s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
+		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+		s.dbErr(sessionID, "", "subtask_list", listErr)
 		return RunResult{SessionID: sessionID, Status: "failed", Subtasks: subs}, errors.New("a subtask failed (fail-fast)")
 	}
 
@@ -240,10 +242,11 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if anyFailed {
 		status = "partial"
 	}
-	_ = s.deps.Store.MarkSession(sessionID, status, finalRef)
+	s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, status, finalRef))
 	s.emit(sessionID, "", trajectory.RunCompleted, map[string]any{"status": status, "subtasks": len(plan.Subtasks)})
 
-	subs, _ := s.deps.Store.SubtaskListBySession(sessionID)
+	subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+	s.dbErr(sessionID, "", "subtask_list", listErr)
 	return RunResult{SessionID: sessionID, Status: status, FinalAnswer: finalText, Subtasks: subs}, nil
 }
 
@@ -266,13 +269,11 @@ func (s *Supervisor) runPlanner(ctx context.Context, sessionID string, planner p
 // trajectory events and updates the subtask row.
 func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string, spec SubtaskSpec, prov provider.AgentProvider, workerName string, req RunRequest) SubtaskOutcome {
 	startedAt := time.Now()
-	if err := s.deps.Store.UpdateSubtask(store.Subtask{
+	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID:        subtaskID,
 		Status:    "running",
 		StartedAt: &startedAt,
-	}); err != nil {
-		// Best-effort; an update miss isn't fatal for the run.
-	}
+	}))
 	s.emit(sessionID, subtaskID, trajectory.SubtaskStarted, map[string]any{
 		"spec_id": spec.ID, "title": spec.Title, "worker": workerName,
 	})
@@ -295,7 +296,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 		s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"spec_id": spec.ID, "error": err.Error(), "kind": kind,
 		})
-		_ = s.deps.Store.UpdateSubtask(store.Subtask{
+		s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 			ID:                subtaskID,
 			ProviderSessionID: result.SessionID,
 			Status:            "failed",
@@ -305,7 +306,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 			RawOutputRef:      rawRef,
 			Error:             err.Error(),
 			ErrorKind:         kind,
-		})
+		}))
 		return SubtaskOutcome{
 			ID:     spec.ID,
 			Title:  spec.Title,
@@ -317,7 +318,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 	s.emit(sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"spec_id": spec.ID, "chars": len(result.FinalText), "provider_session_id": result.SessionID,
 	})
-	_ = s.deps.Store.UpdateSubtask(store.Subtask{
+	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID:                subtaskID,
 		ProviderSessionID: result.SessionID,
 		Status:            "completed",
@@ -325,7 +326,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 		CompletedAt:       &completedAt,
 		ResultText:        truncate(result.FinalText, 8000),
 		RawOutputRef:      rawRef,
-	})
+	}))
 	return SubtaskOutcome{
 		ID:     spec.ID,
 		Title:  spec.Title,
@@ -435,6 +436,19 @@ func (s *Supervisor) emit(sessionID, subtaskID string, kind trajectory.Kind, pay
 	if s.deps.Bus != nil {
 		s.deps.Bus.Publish(ev)
 	}
+}
+
+// dbErr surfaces a non-fatal database error on the trajectory bus. These
+// writes are best-effort — a locked or wedged DB shouldn't fail the run —
+// but silently swallowing the error hides real corruption from operators.
+func (s *Supervisor) dbErr(sessionID, subtaskID, op string, err error) {
+	if err == nil {
+		return
+	}
+	s.emit(sessionID, subtaskID, trajectory.SubtaskStdout, map[string]any{
+		"db_error": err.Error(),
+		"op":       op,
+	})
 }
 
 func classifyError(err error) string {

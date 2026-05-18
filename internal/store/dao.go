@@ -131,10 +131,7 @@ func (s *Store) ListSessions(limit int, statusFilter string) ([]Session, error) 
 			return nil, err
 		}
 		sess.CreatedAt = time.Unix(0, createdNs)
-		if completedNs.Valid {
-			t := time.Unix(0, completedNs.Int64)
-			sess.CompletedAt = &t
-		}
+		sess.CompletedAt = nullTime(completedNs)
 		out = append(out, sess)
 	}
 	return out, rows.Err()
@@ -153,10 +150,7 @@ func (s *Store) GetSession(id string) (Session, error) {
 		return sess, err
 	}
 	sess.CreatedAt = time.Unix(0, createdNs)
-	if completedNs.Valid {
-		t := time.Unix(0, completedNs.Int64)
-		sess.CompletedAt = &t
-	}
+	sess.CompletedAt = nullTime(completedNs)
 	return sess, nil
 }
 
@@ -207,14 +201,8 @@ func (s *Store) LastSubtask(sessionID string) (Subtask, error) {
 	if err != nil {
 		return t, err
 	}
-	if started.Valid {
-		v := time.Unix(0, started.Int64)
-		t.StartedAt = &v
-	}
-	if completed.Valid {
-		v := time.Unix(0, completed.Int64)
-		t.CompletedAt = &v
-	}
+	t.StartedAt = nullTime(started)
+	t.CompletedAt = nullTime(completed)
 	return t, nil
 }
 
@@ -236,6 +224,16 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullTime converts a nullable nanosecond timestamp into a *time.Time,
+// returning nil when the column was NULL.
+func nullTime(ns sql.NullInt64) *time.Time {
+	if !ns.Valid {
+		return nil
+	}
+	t := time.Unix(0, ns.Int64)
+	return &t
 }
 
 func nonEmpty(s, fallback string) string {
@@ -263,14 +261,8 @@ func (s *Store) SubtaskListBySession(sessionID string) ([]Subtask, error) {
 			&t.ResultText, &t.RawOutputRef, &t.Error, &t.ErrorKind); err != nil {
 			return nil, err
 		}
-		if started.Valid {
-			v := time.Unix(0, started.Int64)
-			t.StartedAt = &v
-		}
-		if completed.Valid {
-			v := time.Unix(0, completed.Int64)
-			t.CompletedAt = &v
-		}
+		t.StartedAt = nullTime(started)
+		t.CompletedAt = nullTime(completed)
 		out = append(out, t)
 	}
 	return out, rows.Err()

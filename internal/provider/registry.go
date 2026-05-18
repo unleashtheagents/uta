@@ -5,7 +5,12 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
+
+// detectTimeout bounds a single provider's Detect() call so one misbehaving
+// agent binary (e.g., a hanging `--version`) can't stall DetectAll.
+const detectTimeout = 5 * time.Second
 
 // Registry holds all known providers — built-ins registered at startup plus any
 // declarative YAML providers loaded from ~/.uta/providers/.
@@ -67,7 +72,9 @@ func (r *Registry) DetectAll(ctx context.Context) map[string]Detection {
 		wg.Add(1)
 		go func(p AgentProvider) {
 			defer wg.Done()
-			d := p.Detect(ctx)
+			dctx, cancel := context.WithTimeout(ctx, detectTimeout)
+			defer cancel()
+			d := p.Detect(dctx)
 			mu.Lock()
 			out[p.Name()] = d
 			mu.Unlock()
