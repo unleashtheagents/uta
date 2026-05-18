@@ -140,7 +140,12 @@ func (r *Renderer) handle(ev trajectory.Event) {
 			Subtasks []map[string]any `json:"subtasks"`
 			Source   string           `json:"source"`
 		}
-		_ = json.Unmarshal(ev.Payload, &p)
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			r.endPhaseLocked("", r.yellow("plan payload unparseable"))
+			r.doneSubs = 0
+			r.startPhaseLocked("Running subtasks")
+			return
+		}
 		n := len(p.Subtasks)
 		suffix := fmt.Sprintf("%d subtask", n)
 		if n != 1 {
@@ -181,7 +186,10 @@ func (r *Renderer) handle(ev trajectory.Event) {
 			Mode  string `json:"mode"`
 			Error string `json:"error"`
 		}
-		_ = json.Unmarshal(ev.Payload, &p)
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			r.endPhaseLocked("", r.yellow("synth payload unparseable"))
+			return
+		}
 		switch {
 		case p.Error != "":
 			r.endPhaseLocked("", r.yellow("synth failed; joined subtask outputs"))
@@ -196,8 +204,12 @@ func (r *Renderer) handle(ev trajectory.Event) {
 			Status   string `json:"status"`
 			Subtasks int    `json:"subtasks"`
 		}
-		_ = json.Unmarshal(ev.Payload, &p)
 		elapsed := time.Since(r.started).Round(time.Second)
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			fmt.Fprintf(r.w, "%s %s\n\n", r.green("✓"),
+				r.bold(r.green(fmt.Sprintf("Done in %s", elapsed))))
+			return
+		}
 		switch p.Status {
 		case "partial":
 			fmt.Fprintf(r.w, "%s %s\n\n", r.yellow("◐"),

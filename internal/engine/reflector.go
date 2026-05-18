@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 )
@@ -226,11 +227,11 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 			}
 			prompt := fmt.Sprintf(criticPreambleTmpl, req.Goal, req.InputSummary, req.Workdir, c.Prompt)
 			promptRef, _ := s.deps.Blobs.Put([]byte(prompt), "txt")
-			_ = s.deps.Store.CreateSubtask(store.Subtask{
+			s.dbErr(sessionID, subtaskID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 				ID: subtaskID, SessionID: sessionID, Ord: ord,
 				Title: fmt.Sprintf("iter %d · critic %s", iter, c.ID),
 				PromptRef: promptRef, Worker: worker, Status: "running",
-			})
+			}))
 			s.emit(sessionID, subtaskID, trajectory.CriticStarted, map[string]any{
 				"iteration": iter, "critic": c.ID, "worker": worker,
 			})
@@ -269,12 +270,12 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 					s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 						"critic": c.ID, "error": err.Error(), "kind": kind,
 					})
-					_ = s.deps.Store.UpdateSubtask(store.Subtask{
+					s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 						ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 						StartedAt: &start, CompletedAt: &done,
-						ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+						ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 						Error: err.Error(), ErrorKind: kind,
-					})
+					}))
 					return
 				}
 
@@ -286,26 +287,29 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 					s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 						"critic": c.ID, "error": parseErr.Error(), "kind": "parse",
 					})
-					_ = s.deps.Store.UpdateSubtask(store.Subtask{
+					s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 						ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 						StartedAt: &start, CompletedAt: &done,
-						ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+						ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 						Error: parseErr.Error(), ErrorKind: "parse",
-					})
+					}))
 					return
 				}
 
+				for i := range findings {
+					findings[i].SubtaskID = subtaskID
+				}
 				perCriticMu.Lock()
 				perCritic[c.ID] = findings
 				perCriticMu.Unlock()
 				s.emit(sessionID, subtaskID, trajectory.CriticCompleted, map[string]any{
 					"critic": c.ID, "findings": len(findings),
 				})
-				_ = s.deps.Store.UpdateSubtask(store.Subtask{
+				s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 					ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 					StartedAt: &start, CompletedAt: &done,
-					ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
-				})
+					ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+				}))
 			}()
 		}
 
@@ -321,11 +325,11 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				[]byte(fmt.Sprintf("tool: %s %s\n(adapter: %s)\n", spec.Cmd, strings.Join(spec.Args, " "), spec.Adapter)),
 				"txt",
 			)
-			_ = s.deps.Store.CreateSubtask(store.Subtask{
+			s.dbErr(sessionID, subtaskID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 				ID: subtaskID, SessionID: sessionID, Ord: ord,
 				Title:     fmt.Sprintf("iter %d · tool %s", iter, spec.ID),
 				PromptRef: promptRef, Worker: "tool:" + spec.ID, Status: "running",
-			})
+			}))
 			s.emit(sessionID, subtaskID, trajectory.ToolStarted, map[string]any{
 				"iteration": iter, "tool": spec.ID, "cmd": spec.Cmd, "adapter": spec.Adapter,
 			})
@@ -362,17 +366,20 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 						"error": result.Err.Error(),
 						"exit":  result.ExitCode,
 					})
-					_ = s.deps.Store.UpdateSubtask(store.Subtask{
+					s.dbErr(sessionID, subID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 						ID: subID, Status: "failed",
 						StartedAt: &start, CompletedAt: &done,
-						ResultText:  truncate(result.Stdout, 8000),
+						ResultText:  Truncate(result.Stdout, 8000),
 						RawOutputRef: rawRef,
 						Error:       result.Err.Error(),
 						ErrorKind:   "tool",
-					})
+					}))
 					return
 				}
 
+				for i := range result.Findings {
+					result.Findings[i].SubtaskID = subID
+				}
 				perCriticMu.Lock()
 				perCritic[specCopy.ID] = result.Findings
 				perCriticMu.Unlock()
@@ -382,12 +389,12 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 					"exit":        result.ExitCode,
 					"duration_ms": result.Duration.Milliseconds(),
 				})
-				_ = s.deps.Store.UpdateSubtask(store.Subtask{
+				s.dbErr(sessionID, subID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 					ID: subID, Status: "completed",
 					StartedAt: &start, CompletedAt: &done,
-					ResultText:   truncate(result.Stdout, 8000),
+					ResultText:   Truncate(result.Stdout, 8000),
 					RawOutputRef: rawRef,
-				})
+				}))
 			}()
 		}
 
@@ -475,11 +482,11 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	findingsBlob, _ := json.MarshalIndent(report, "", "  ")
 	prompt := fmt.Sprintf(reviserPreambleTmpl, req.Goal, req.Workdir, string(findingsBlob), req.Reviser.Prompt)
 	promptRef, _ := s.deps.Blobs.Put([]byte(prompt), "txt")
-	_ = s.deps.Store.CreateSubtask(store.Subtask{
+	s.dbErr(sessionID, subtaskID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 		ID: subtaskID, SessionID: sessionID, Ord: *ord,
 		Title: fmt.Sprintf("iter %d · revise", iter),
 		PromptRef: promptRef, Worker: worker, Status: "running",
-	})
+	}))
 	s.emit(sessionID, subtaskID, trajectory.ReviseStarted, map[string]any{
 		"iteration": iter, "worker": worker, "findings_to_address": len(report.Findings),
 	})
@@ -505,12 +512,12 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 		s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"iteration": iter, "error": err.Error(), "kind": kind,
 		})
-		_ = s.deps.Store.UpdateSubtask(store.Subtask{
+		s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 			ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 			StartedAt: &start, CompletedAt: &done,
-			ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+			ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 			Error: err.Error(), ErrorKind: kind,
-		})
+		}))
 		return err
 	}
 
@@ -527,8 +534,8 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 		s.emit(sessionID, subtaskID, evKind, map[string]any{
 			"cmd": req.Reviser.Gate.Cmd, "exit": gr.ExitCode,
 			"duration_ms": gr.Duration.Milliseconds(),
-			"stdout_tail": truncate(gr.Stdout, 2000),
-			"stderr_tail": truncate(gr.Stderr, 2000),
+			"stdout_tail": Truncate(gr.Stdout, 2000),
+			"stderr_tail": Truncate(gr.Stderr, 2000),
 		})
 		if !gr.Passed() {
 			// Mark revise as failed if its post-gate didn't pass; the next
@@ -536,13 +543,13 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 			s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 				"iteration": iter, "kind": "revise_gate_failed",
 			})
-			_ = s.deps.Store.UpdateSubtask(store.Subtask{
+			s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 				ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 				StartedAt: &start, CompletedAt: &done,
-				ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+				ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 				Error: fmt.Sprintf("reviser gate %q failed (exit %d)", req.Reviser.Gate.Cmd, gr.ExitCode),
 				ErrorKind: "gate",
-			})
+			}))
 			return fmt.Errorf("reviser gate failed at iteration %d", iter)
 		}
 	}
@@ -550,11 +557,11 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	s.emit(sessionID, subtaskID, trajectory.ReviseCompleted, map[string]any{
 		"iteration": iter, "chars": len(result.FinalText),
 	})
-	_ = s.deps.Store.UpdateSubtask(store.Subtask{
+	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &start, CompletedAt: &done,
-		ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
-	})
+		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+	}))
 	return nil
 }
 
@@ -574,11 +581,11 @@ func (s *Supervisor) persistFindings(contextDir string, rep *FindingsReport) (st
 		return "", err
 	}
 	histPath := filepath.Join(contextDir, fmt.Sprintf("findings.%d.json", rep.Iteration))
-	if err := os.WriteFile(histPath, data, 0o644); err != nil {
+	if err := paths.WriteFileAtomic(histPath, data, 0o644); err != nil {
 		return "", err
 	}
 	latest := filepath.Join(contextDir, "findings.json")
-	if err := os.WriteFile(latest, data, 0o644); err != nil {
+	if err := paths.WriteFileAtomic(latest, data, 0o644); err != nil {
 		return histPath, err
 	}
 	return histPath, nil

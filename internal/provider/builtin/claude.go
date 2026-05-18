@@ -45,7 +45,11 @@ var claudeVersionRE = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
 func (c *Claude) Detect(ctx context.Context) provider.Detection {
 	path, err := c.resolvePath()
 	if err != nil {
-		return provider.Detection{Available: false, Notes: "binary 'claude' not found on PATH"}
+		return provider.Detection{
+			Available: false,
+			Notes:     "binary 'claude' not found on PATH",
+			Err:       fmt.Errorf("look path 'claude': %w", err),
+		}
 	}
 	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 	if err != nil {
@@ -53,6 +57,7 @@ func (c *Claude) Detect(ctx context.Context) provider.Detection {
 			Available:  false,
 			BinaryPath: path,
 			Notes:      fmt.Sprintf("'claude --version' failed: %v", err),
+			Err:        fmt.Errorf("claude --version: %w", err),
 		}
 	}
 	version := ""

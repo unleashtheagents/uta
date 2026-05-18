@@ -14,6 +14,7 @@ func newSessionsCmd() *cobra.Command {
 		asJSON       bool
 		statusFilter string
 		limit        int
+		offset       int
 	)
 	cmd := &cobra.Command{
 		Use:   "sessions",
@@ -25,7 +26,7 @@ func newSessionsCmd() *cobra.Command {
 			}
 			defer app.Close()
 
-			rows, err := app.Store.ListSessions(limit, statusFilter)
+			rows, err := app.Store.ListSessions(limit, offset, statusFilter)
 			if err != nil {
 				return err
 			}
@@ -48,7 +49,8 @@ func newSessionsCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	cmd.Flags().StringVar(&statusFilter, "status", "", "filter by status (running|completed|partial|failed|cancelled)")
-	cmd.Flags().IntVar(&limit, "limit", 50, "max rows to return")
+	cmd.Flags().IntVar(&limit, "limit", 50, "max rows to return (0 for unbounded)")
+	cmd.Flags().IntVar(&offset, "offset", 0, "rows to skip before returning results")
 	return cmd
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -62,23 +63,37 @@ sha256 hash of the body — uta import verifies all of these.`,
 			}
 
 			var w io.Writer = cmd.OutOrStdout()
+			var tmp *os.File
 			if outFile != "" {
-				f, err := os.Create(outFile)
+				dir := filepath.Dir(outFile)
+				base := filepath.Base(outFile)
+				tmp, err = os.CreateTemp(dir, "."+base+".*.tmp")
 				if err != nil {
 					return err
 				}
-				defer f.Close()
-				w = f
+				w = tmp
 			}
 			enc := json.NewEncoder(w)
 			if indented {
 				enc.SetIndent("", "  ")
 			}
 			if err := enc.Encode(exp); err != nil {
+				if tmp != nil {
+					tmp.Close()
+					os.Remove(tmp.Name())
+				}
 				return err
 			}
 
 			if outFile != "" {
+				if err := tmp.Close(); err != nil {
+					os.Remove(tmp.Name())
+					return err
+				}
+				if err := os.Rename(tmp.Name(), outFile); err != nil {
+					os.Remove(tmp.Name())
+					return err
+				}
 				rc := exp.Header.RowCounts
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"wrote %s (sessions=%d subtasks=%d events=%d blobs=%d body_sha256=%s)\n",

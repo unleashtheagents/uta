@@ -150,6 +150,13 @@ func (s *Server) RegisterTool(t Tool, h Handler) error {
 	return nil
 }
 
+// ToolCount returns the number of currently registered tools.
+func (s *Server) ToolCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tools)
+}
+
 // Serve reads JSON-RPC messages from r (one per line), dispatches them, and
 // writes responses to w. Returns when r is closed, ctx is done, or an
 // unrecoverable error occurs.
@@ -277,7 +284,7 @@ type toolCallParams struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func (s *Server) toolsCallResponse(ctx context.Context, id, paramsRaw json.RawMessage) *Message {
+func (s *Server) toolsCallResponse(ctx context.Context, id, paramsRaw json.RawMessage) (resp *Message) {
 	var p toolCallParams
 	if err := json.Unmarshal(paramsRaw, &p); err != nil {
 		return errorResponse(id, CodeInvalidParams, "tools/call: "+err.Error())
@@ -288,9 +295,16 @@ func (s *Server) toolsCallResponse(ctx context.Context, id, paramsRaw json.RawMe
 	if !ok {
 		return errorResponse(id, CodeMethodNotFound, "unknown tool: "+p.Name)
 	}
-	// Run the handler. Tool-level failures are returned as ToolResult.IsError
-	// rather than JSON-RPC errors, per MCP convention.
-	defer func() { recover() }() // last-resort: a panicking handler shouldn't kill the server
+	// Tool-level failures are returned as ToolResult.IsError rather than
+	// JSON-RPC errors, per MCP convention. A panicking handler shouldn't
+	// kill the server — and must not silently return nil either, since
+	// handle's caller treats a nil response as a notification and writes
+	// nothing, leaving the client hanging forever on its request id.
+	defer func() {
+		if r := recover(); r != nil {
+			resp = errorResponse(id, CodeInternalError, fmt.Sprintf("tool panicked: %v", r))
+		}
+	}()
 	args := p.Arguments
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)

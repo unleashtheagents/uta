@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -91,7 +92,9 @@ func LoadProviderDescriptor(path string) (*ProviderDescriptor, error) {
 		return nil, err
 	}
 	var d ProviderDescriptor
-	if err := yaml.Unmarshal(data, &d); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&d); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	d.Source = path

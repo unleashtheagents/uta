@@ -1,15 +1,20 @@
 package trajectory
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Bus is an in-process fan-out for trajectory events. Producers (the
 // supervisor) call Publish; consumers register via Subscribe. Each subscriber
 // gets its own buffered channel — a slow subscriber slows nobody else as long
 // as its buffer isn't full; if it is, Publish drops that subscriber's copy
-// and continues. The recorder is the canonical durable subscriber.
+// and increments the dropped counter so a slow consumer can be detected.
+// The recorder is the canonical durable subscriber.
 type Bus struct {
-	mu   sync.RWMutex
-	subs []chan Event
+	mu      sync.RWMutex
+	subs    []chan Event
+	dropped uint64 // count of events dropped due to full subscriber buffers
 }
 
 func NewBus() *Bus { return &Bus{} }
@@ -28,8 +33,9 @@ func (b *Bus) Subscribe(buffer int) <-chan Event {
 }
 
 // Publish fans the event out to every subscriber. Non-blocking per subscriber:
-// if a subscriber's buffer is full, that one copy is dropped (a future
-// "slowness watchdog" can detect chronic drops).
+// if a subscriber's buffer is full, that one copy is dropped and the bus's
+// dropped counter is incremented so a slowness watchdog (or `uta doctor`) can
+// detect chronic drops.
 func (b *Bus) Publish(ev Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -37,9 +43,14 @@ func (b *Bus) Publish(ev Event) {
 		select {
 		case ch <- ev:
 		default:
+			atomic.AddUint64(&b.dropped, 1)
 		}
 	}
 }
+
+// Dropped reports the total number of per-subscriber event copies that were
+// dropped because the subscriber's buffer was full. Never resets.
+func (b *Bus) Dropped() uint64 { return atomic.LoadUint64(&b.dropped) }
 
 // Shutdown closes every subscriber channel. Bus must not be used after.
 func (b *Bus) Shutdown() {

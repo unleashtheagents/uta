@@ -8,10 +8,12 @@ import (
 // SubtaskOutcome is what the supervisor feeds into the synthesis prompt for
 // one finished (or failed) subtask.
 type SubtaskOutcome struct {
-	ID     string
-	Title  string
-	Result string // worker FinalText, or an error stub if the subtask failed
-	Failed bool
+	ID      string
+	Title   string
+	Worker  string // name of the worker provider that ran (or would have run) the subtask
+	Result  string // worker FinalText, or an error/skip stub if the subtask did not complete
+	Failed  bool   // the subtask itself ran and errored
+	Skipped bool   // the subtask never ran (upstream dep failed, or fail-fast cascade)
 }
 
 const synthPromptHeader = `You are the synthesis step of an agent orchestrator called uta.
@@ -26,6 +28,22 @@ final answer as if you authored it yourself.
 
 `
 
+// joinOutcomes formats subtask outcomes as a single Markdown document. Used
+// when synthesis is skipped (SkipSynthesis) or when the synthesizer itself
+// fails and we fall back to a verbatim join. Including the worker name in
+// each header keeps multi-model workflows attributable in the final report.
+func joinOutcomes(outcomes []SubtaskOutcome) string {
+	var b strings.Builder
+	for _, o := range outcomes {
+		if o.Worker != "" {
+			fmt.Fprintf(&b, "## %s (%s) — worker: %s\n\n%s\n\n", o.Title, o.ID, o.Worker, o.Result)
+		} else {
+			fmt.Fprintf(&b, "## %s (%s)\n\n%s\n\n", o.Title, o.ID, o.Result)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // RenderSynthPrompt builds the synthesis prompt.
 func RenderSynthPrompt(goal string, outcomes []SubtaskOutcome) string {
 	var b strings.Builder
@@ -35,7 +53,10 @@ func RenderSynthPrompt(goal string, outcomes []SubtaskOutcome) string {
 	b.WriteString("\n\nSubtask outputs:\n")
 	for _, o := range outcomes {
 		marker := "ok"
-		if o.Failed {
+		switch {
+		case o.Skipped:
+			marker = "SKIPPED"
+		case o.Failed:
 			marker = "FAILED"
 		}
 		fmt.Fprintf(&b, "\n--- [%s] %s (%s) ---\n%s\n", o.ID, o.Title, marker, strings.TrimSpace(o.Result))

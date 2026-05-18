@@ -13,7 +13,11 @@ import (
 )
 
 func newTrajectoryCmd() *cobra.Command {
-	var format string
+	var (
+		format string
+		limit  int
+		offset int
+	)
 	cmd := &cobra.Command{
 		Use:   "trajectory <session-id>",
 		Short: "render the event timeline of a run",
@@ -33,7 +37,7 @@ func newTrajectoryCmd() *cobra.Command {
 				}
 				return err
 			}
-			events, err := app.Store.ListEvents(id)
+			events, err := app.Store.ListEvents(id, limit, offset)
 			if err != nil {
 				return err
 			}
@@ -57,6 +61,8 @@ func newTrajectoryCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&format, "format", "pretty", "output format: pretty|jsonl|json")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max events to return (0 for all)")
+	cmd.Flags().IntVar(&offset, "offset", 0, "events to skip before returning results")
 	return cmd
 }
 

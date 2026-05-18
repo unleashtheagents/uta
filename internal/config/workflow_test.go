@@ -174,6 +174,47 @@ subtasks:
 	}
 }
 
+func TestLoadWorkflow_SubtaskTimeout(t *testing.T) {
+	path := writeTempWorkflow(t, `
+version: 2
+goal: mixed workload
+defaults:
+  worker: claude
+  subtask_timeout: 30s
+subtasks:
+  - id: fast
+    prompt: quick llm call
+  - id: slow
+    prompt: long-running security scan
+    timeout: 30m
+`)
+	wf, err := LoadWorkflow(path)
+	if err != nil {
+		t.Fatalf("LoadWorkflow: %v", err)
+	}
+	if len(wf.Subtasks) != 2 {
+		t.Fatalf("subtasks: got %d", len(wf.Subtasks))
+	}
+	if wf.Subtasks[0].Timeout != 0 {
+		t.Errorf("subtask[0].timeout: want zero (fall back to default), got %v", wf.Subtasks[0].Timeout)
+	}
+	if wf.Subtasks[1].Timeout != 30*time.Minute {
+		t.Errorf("subtask[1].timeout: want 30m, got %v", wf.Subtasks[1].Timeout)
+	}
+}
+
+func TestValidate_SubtaskTimeoutNegative(t *testing.T) {
+	wf := &Workflow{
+		Goal:     "g",
+		Defaults: WorkflowDefaults{Worker: "claude"},
+		Subtasks: []WorkflowSubtask{{ID: "a", Prompt: "p", Timeout: -1 * time.Second}},
+	}
+	err := wf.Validate()
+	if err == nil || !strings.Contains(err.Error(), "timeout must be >= 0") {
+		t.Errorf("expected 'timeout must be >= 0', got: %v", err)
+	}
+}
+
 func TestLoadWorkflow_GateAbsentLeavesNil(t *testing.T) {
 	path := writeTempWorkflow(t, `
 version: 2
@@ -418,6 +459,58 @@ func TestInferStrategy_AutoFanout(t *testing.T) {
 	}}
 	if got := wf.InferStrategy(); got != "fanout" {
 		t.Errorf("got %q, want fanout", got)
+	}
+}
+
+func TestLoadWorkflow_Env(t *testing.T) {
+	path := writeTempWorkflow(t, `
+version: 2
+goal: do the thing
+defaults:
+  worker: claude
+env:
+  API_BASE_URL: https://staging.example.com
+  FEATURE_FLAGS: a,b
+`)
+	wf, err := LoadWorkflow(path)
+	if err != nil {
+		t.Fatalf("LoadWorkflow: %v", err)
+	}
+	if got := wf.Env["API_BASE_URL"]; got != "https://staging.example.com" {
+		t.Errorf("env[API_BASE_URL] = %q", got)
+	}
+	if got := wf.Env["FEATURE_FLAGS"]; got != "a,b" {
+		t.Errorf("env[FEATURE_FLAGS] = %q", got)
+	}
+}
+
+func TestValidate_EnvKeyRules(t *testing.T) {
+	base := func() *Workflow {
+		return &Workflow{Goal: "g", Defaults: WorkflowDefaults{Worker: "claude"}}
+	}
+
+	wf := base()
+	wf.Env = map[string]string{"": "v"}
+	if err := wf.Validate(); err == nil || !strings.Contains(err.Error(), "non-empty") {
+		t.Errorf("empty key: want non-empty error, got: %v", err)
+	}
+
+	wf = base()
+	wf.Env = map[string]string{"   ": "v"}
+	if err := wf.Validate(); err == nil || !strings.Contains(err.Error(), "non-empty") {
+		t.Errorf("whitespace key: want non-empty error, got: %v", err)
+	}
+
+	wf = base()
+	wf.Env = map[string]string{"FOO=BAR": "v"}
+	if err := wf.Validate(); err == nil || !strings.Contains(err.Error(), "'='") {
+		t.Errorf("'=' in key: want format error, got: %v", err)
+	}
+
+	wf = base()
+	wf.Env = map[string]string{"FOO": "bar"}
+	if err := wf.Validate(); err != nil {
+		t.Errorf("valid env: unexpected error: %v", err)
 	}
 }
 

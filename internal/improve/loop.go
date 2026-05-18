@@ -246,7 +246,7 @@ func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req 
 
 	subtask := engine.SubtaskSpec{
 		ID:     "impl-" + idea.ID,
-		Title:  fmt.Sprintf("idea %s: %s", idea.ID[:min(8, len(idea.ID))], truncate(idea.Title, 60)),
+		Title:  fmt.Sprintf("idea %s: %s", idea.ID[:min(8, len(idea.ID))], engine.TruncateWithMarker(idea.Title, 60, "…")),
 		Prompt: prompt,
 		Worker: req.Worker,
 		Gate:   gate,
@@ -297,7 +297,7 @@ func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req 
 
 	opts := SetStatusOpts{LastSession: result.SessionID}
 	if errMsg != "" {
-		opts.LastError = strPtr(truncate(errMsg, 4000))
+		opts.LastError = strPtr(engine.TruncateWithMarker(errMsg, 4000, "…"))
 	}
 	if summary != "" {
 		opts.Summary = strPtr(summary)
@@ -364,13 +364,6 @@ func stringifyDuration(end, startp interface{}) string {
 }
 
 func strPtr(s string) *string { return &s }
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
 
 func min(a, b int) int {
 	if a < b {

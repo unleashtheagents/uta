@@ -74,7 +74,7 @@ func runGate(parent context.Context, gate *Gate, workdir string) GateResult {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	runErr := runCommand(cmd)
 	res := GateResult{
 		Cmd:      gate.Cmd,
 		Stdout:   stdout.String(),

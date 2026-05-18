@@ -68,7 +68,31 @@ func SaveProject(root string, p *Project) error {
 		return err
 	}
 	target := filepath.Join(stateDir, "project.yaml")
-	if err := os.WriteFile(target, out, 0o644); err != nil {
+	tmp, err := os.CreateTemp(stateDir, "project-*.yaml.tmp")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		os.Remove(tmpName)
 		return fmt.Errorf("write %s: %w", target, err)
 	}
 	return nil

@@ -21,6 +21,7 @@ type Recorder struct {
 	mu      sync.Mutex
 	seqs    map[string]*int64 // session_id → next seq (atomic-incremented)
 	dropped uint64            // count of events we failed to persist
+	lastErr atomic.Pointer[error]
 }
 
 func NewRecorder(s *store.Store) *Recorder {
@@ -67,6 +68,17 @@ func (r *Recorder) AllocSeq(sessionID string) int64 {
 // by `uta doctor` and tests; never resets.
 func (r *Recorder) Dropped() uint64 { return atomic.LoadUint64(&r.dropped) }
 
+// LastError returns the most recent error encountered while persisting an
+// event, or nil if no error has occurred. Useful for surfacing SQL failures
+// (locked DB, corruption, schema drift) that would otherwise be hidden behind
+// the Dropped() counter.
+func (r *Recorder) LastError() error {
+	if p := r.lastErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 func (r *Recorder) persist(ev Event) {
 	if ev.SessionID == "" {
 		atomic.AddUint64(&r.dropped, 1)
@@ -81,5 +93,6 @@ func (r *Recorder) persist(ev Event) {
 	}
 	if err := r.store.InsertEvent(ev.SessionID, ev.SubtaskID, ev.Seq, ev.Ts, string(ev.Kind), payload); err != nil {
 		atomic.AddUint64(&r.dropped, 1)
+		r.lastErr.Store(&err)
 	}
 }

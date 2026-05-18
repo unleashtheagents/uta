@@ -61,7 +61,7 @@ of cooperation, not blanket trust.`,
 			registerMCPTools(server, app)
 
 			fmt.Fprintf(cmd.ErrOrStderr(), "uta MCP server ready · proto=%s · tools=%d · project=%s\n",
-				mcp.ProtocolVersion, mcpToolCount(server), mcpProjectLabel(app))
+				mcp.ProtocolVersion, server.ToolCount(), mcpProjectLabel(app))
 
 			ctx, cancel := signalContext(cmd.Context())
 			defer cancel()
@@ -70,14 +70,6 @@ of cooperation, not blanket trust.`,
 	}
 	cmd.Flags().BoolVar(&mcpMode, "mcp", false, "speak MCP (JSON-RPC 2.0) on stdin/stdout")
 	return cmd
-}
-
-func mcpToolCount(s *mcp.Server) int {
-	// Cheap reflection-free count via the listTools method? We don't expose
-	// the list, so just call tools/list via a dry handle… For simplicity,
-	// return 0 and let stderr be honest about counts. (This is a no-op
-	// helper for the welcome banner.)
-	return -1
 }
 
 func mcpProjectLabel(app *App) string {
@@ -109,14 +101,18 @@ func registerMCPTools(s *mcp.Server, app *App) {
 			for _, c := range d.Capabilities {
 				caps = append(caps, string(c))
 			}
-			out = append(out, map[string]any{
+			row := map[string]any{
 				"name":         name,
 				"available":    d.Available,
 				"version":      d.Version,
 				"binary_path":  d.BinaryPath,
 				"capabilities": caps,
 				"notes":        d.Notes,
-			})
+			}
+			if d.Err != nil {
+				row["error"] = d.Err.Error()
+			}
+			out = append(out, row)
 		}
 		return mcp.TextResult(jsonDump(out))
 	})
@@ -139,7 +135,9 @@ func registerMCPTools(s *mcp.Server, app *App) {
 			Severity string `json:"severity"`
 			Limit    int    `json:"limit"`
 		}
-		_ = json.Unmarshal(args, &p)
+		if err := json.Unmarshal(args, &p); err != nil {
+			return mcp.ArgError("%v", err)
+		}
 		board := improve.NewBoard(app.Store)
 		ideas, err := board.List(improve.ListOptions{
 			Status: p.Status, Severity: p.Severity, Limit: p.Limit,
@@ -219,6 +217,7 @@ func registerMCPTools(s *mcp.Server, app *App) {
 			"type":"object",
 			"properties":{
 				"limit":{"type":"integer","minimum":1,"maximum":500},
+				"offset":{"type":"integer","minimum":0},
 				"status":{"type":"string"}
 			},
 			"additionalProperties":false
@@ -226,10 +225,16 @@ func registerMCPTools(s *mcp.Server, app *App) {
 	}, func(ctx context.Context, args json.RawMessage) mcp.ToolResult {
 		var p struct {
 			Limit  int    `json:"limit"`
+			Offset int    `json:"offset"`
 			Status string `json:"status"`
 		}
-		_ = json.Unmarshal(args, &p)
-		sessions, err := app.Store.ListSessions(p.Limit, p.Status)
+		if err := json.Unmarshal(args, &p); err != nil {
+			return mcp.ArgError("%v", err)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 50
+		}
+		sessions, err := app.Store.ListSessions(p.Limit, p.Offset, p.Status)
 		if err != nil {
 			return mcp.ErrorResult("list: " + err.Error())
 		}
@@ -241,18 +246,24 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		Description: "Return every recorded event for one session, in order.",
 		InputSchema: json.RawMessage(`{
 			"type":"object",
-			"properties":{"session_id":{"type":"string"}},
+			"properties":{
+				"session_id":{"type":"string"},
+				"limit":{"type":"integer","minimum":1,"maximum":10000},
+				"offset":{"type":"integer","minimum":0}
+			},
 			"required":["session_id"],
 			"additionalProperties":false
 		}`),
 	}, func(ctx context.Context, args json.RawMessage) mcp.ToolResult {
 		var p struct {
 			SessionID string `json:"session_id"`
+			Limit     int    `json:"limit"`
+			Offset    int    `json:"offset"`
 		}
 		if err := json.Unmarshal(args, &p); err != nil {
 			return mcp.ArgError("%v", err)
 		}
-		events, err := app.Store.ListEvents(p.SessionID)
+		events, err := app.Store.ListEvents(p.SessionID, p.Limit, p.Offset)
 		if err != nil {
 			return mcp.ErrorResult("events: " + err.Error())
 		}

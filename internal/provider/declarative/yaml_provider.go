@@ -53,7 +53,11 @@ func (p *Provider) Name() string { return p.desc.Name }
 func (p *Provider) Detect(ctx context.Context) provider.Detection {
 	binPath, err := exec.LookPath(p.desc.Binary)
 	if err != nil {
-		return provider.Detection{Available: false, Notes: fmt.Sprintf("binary %q not found on PATH", p.desc.Binary)}
+		return provider.Detection{
+			Available: false,
+			Notes:     fmt.Sprintf("binary %q not found on PATH", p.desc.Binary),
+			Err:       fmt.Errorf("look path %q: %w", p.desc.Binary, err),
+		}
 	}
 	cmd := exec.CommandContext(ctx, binPath, p.desc.Detect.Args...)
 	out, err := cmd.CombinedOutput()
@@ -62,6 +66,7 @@ func (p *Provider) Detect(ctx context.Context) provider.Detection {
 			Available:  false,
 			BinaryPath: binPath,
 			Notes:      fmt.Sprintf("'%s %s' failed: %v", p.desc.Binary, strings.Join(p.desc.Detect.Args, " "), err),
+			Err:        fmt.Errorf("%s %s: %w", p.desc.Binary, strings.Join(p.desc.Detect.Args, " "), err),
 		}
 	}
 	version := ""

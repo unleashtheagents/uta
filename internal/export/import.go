@@ -151,13 +151,14 @@ func Restore(s *store.Store, blobsDir string, exp *Export, opts ImportOptions) (
 
 	for _, sub := range exp.Subtasks {
 		_, err := tx.Exec(
-			`INSERT INTO subtasks (id, session_id, ord, title, prompt_ref, worker, provider_session_id, status, started_at, completed_at, result_text, raw_output_ref, error, error_kind)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			sub.ID, sub.SessionID, sub.Ord, sub.Title, rewrite(sub.PromptRef),
+			`INSERT INTO subtasks (id, session_id, ord, spec_id, title, prompt_ref, worker, provider_session_id, status, started_at, completed_at, result_text, raw_output_ref, error, error_kind, meta_json)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sub.ID, sub.SessionID, sub.Ord, nullableStr(sub.SpecID), sub.Title, rewrite(sub.PromptRef),
 			sub.Worker, nullableStr(sub.ProviderSessionID), sub.Status,
 			nullableTime(sub.StartedAt), nullableTime(sub.CompletedAt),
 			nullableStr(sub.ResultText), nullableStr(rewrite(sub.RawOutputRef)),
 			nullableStr(sub.Error), nullableStr(sub.ErrorKind),
+			defaultStr(sub.MetaJSON, "{}"),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("insert subtask %s: %w", sub.ID, err)

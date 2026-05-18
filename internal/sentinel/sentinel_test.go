@@ -463,14 +463,3 @@ func TestIsErrorEvent(t *testing.T) {
 	}
 }
 
-func TestTruncateBytes(t *testing.T) {
-	if got := truncateBytes([]byte("hello"), 10); got != "hello" {
-		t.Errorf("short input: got %q want hello", got)
-	}
-	if got := truncateBytes([]byte("hello world"), 5); got != "hello" {
-		t.Errorf("long input: got %q want hello", got)
-	}
-	if got := truncateBytes(nil, 10); got != "" {
-		t.Errorf("nil input: got %q want empty", got)
-	}
-}

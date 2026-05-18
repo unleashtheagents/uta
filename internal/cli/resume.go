@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -80,13 +79,13 @@ func newResumeCmd() *cobra.Command {
 			<-renderDone
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					os.Exit(130)
+					return exitWith(130)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "resume failed: %v\n", err)
 				if result.SessionID != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "session: %s\n", result.SessionID)
 				}
-				os.Exit(4)
+				return exitWith(4)
 			}
 			if result.FinalAnswer != "" {
 				fmt.Fprintln(cmd.OutOrStdout(), result.FinalAnswer)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,6 +42,7 @@ func newRunCmd() *cobra.Command {
 		workdir        string
 		workflowFile   string
 		strategyFlag   string
+		maxWallSeconds int
 	)
 
 	cmd := &cobra.Command{
@@ -50,6 +52,7 @@ func newRunCmd() *cobra.Command {
 			var preSet []engine.SubtaskSpec
 			var skipSynth bool
 			var workflowGoal string
+			var workflowEnv []string
 
 			if workflowFile != "" {
 				wf, err := config.LoadWorkflow(workflowFile)
@@ -94,6 +97,19 @@ func newRunCmd() *cobra.Command {
 				if strategyFlag == "" {
 					strategyFlag = wf.InferStrategy()
 				}
+				if wf.Budget.MaxWallSeconds > 0 {
+					maxWallSeconds = wf.Budget.MaxWallSeconds
+				}
+				if len(wf.Env) > 0 {
+					keys := make([]string, 0, len(wf.Env))
+					for k := range wf.Env {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					for _, k := range keys {
+						workflowEnv = append(workflowEnv, k+"="+wf.Env[k])
+					}
+				}
 				for i, st := range wf.Subtasks {
 					id := st.ID
 					if id == "" {
@@ -105,6 +121,7 @@ func newRunCmd() *cobra.Command {
 					}
 					spec := engine.SubtaskSpec{
 						ID: id, Title: title, Prompt: st.Prompt, Worker: st.Worker, Needs: st.Needs,
+						Timeout: st.Timeout,
 					}
 					if st.Gate != nil {
 						spec.Gate = &engine.Gate{
@@ -138,7 +155,7 @@ func newRunCmd() *cobra.Command {
 			available := availableProviders(app.Registry.Names(), detections)
 			if len(available) == 0 {
 				fmt.Fprintln(cmd.ErrOrStderr(), "no provider is installed on PATH. Try installing 'claude' or 'gemini' first.")
-				os.Exit(3)
+				return exitWith(3)
 			}
 
 			if workerName == "" {
@@ -188,13 +205,16 @@ func newRunCmd() *cobra.Command {
 
 			// Project context: subtasks see the project's root + shared context
 			// dir as env vars, and the project root becomes the default workdir.
-			var subtaskEnv []string
+			// Workflow-declared env comes first so the project-context vars,
+			// appended last, win on duplicate keys (later entries override
+			// earlier ones in os/exec's env handling).
+			subtaskEnv := workflowEnv
 			if app.InProject() {
-				subtaskEnv = []string{
-					"UTA_PROJECT_ROOT=" + app.ProjectRoot,
-					"UTA_CONTEXT_DIR=" + app.ContextDir,
-					"UTA_PROJECT_NAME=" + app.ProjectName,
-				}
+				subtaskEnv = append(subtaskEnv,
+					"UTA_PROJECT_ROOT="+app.ProjectRoot,
+					"UTA_CONTEXT_DIR="+app.ContextDir,
+					"UTA_PROJECT_NAME="+app.ProjectName,
+				)
 				if workdir == "" {
 					workdir = app.ProjectRoot
 				}
@@ -217,6 +237,7 @@ func newRunCmd() *cobra.Command {
 				SkipSynthesis:   skipSynth,
 				Strategy:        strategyFlag,
 				Env:             subtaskEnv,
+				MaxWallSeconds:  maxWallSeconds,
 			})
 
 			bus.Shutdown()
@@ -230,14 +251,14 @@ func newRunCmd() *cobra.Command {
 			if runErr != nil {
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
-					os.Exit(130)
+					return exitWith(130)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "run failed: %v\n", runErr)
 				if result.SessionID != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "session: %s\n", result.SessionID)
 				}
 				if result.Status == "failed" {
-					os.Exit(4)
+					return exitWith(4)
 				}
 				return runErr
 			}
@@ -251,7 +272,7 @@ func newRunCmd() *cobra.Command {
 				result.SessionID, result.Status, len(result.Subtasks))
 
 			if result.Status == "partial" {
-				os.Exit(5)
+				return exitWith(5)
 			}
 			return nil
 		},

@@ -10,12 +10,13 @@ import (
 
 // SubtaskSpec is one decomposed unit of work.
 type SubtaskSpec struct {
-	ID     string   `json:"id"`
-	Title  string   `json:"title"`
-	Prompt string   `json:"prompt"`
-	Worker string   `json:"worker,omitempty"` // optional per-subtask override (YAML workflows)
-	Needs  []string `json:"needs,omitempty"`  // DAG dependencies — subtask IDs that must complete first
-	Gate   *Gate    `json:"gate,omitempty"`   // optional verification gate run after the subtask
+	ID      string        `json:"id"`
+	Title   string        `json:"title"`
+	Prompt  string        `json:"prompt"`
+	Worker  string        `json:"worker,omitempty"`  // optional per-subtask override (YAML workflows)
+	Needs   []string      `json:"needs,omitempty"`   // DAG dependencies — subtask IDs that must complete first
+	Gate    *Gate         `json:"gate,omitempty"`    // optional verification gate run after the subtask
+	Timeout time.Duration `json:"timeout,omitempty"` // per-subtask override of RunRequest.SubtaskTimeout
 }
 
 // Gate is a verification step that runs after a subtask completes. A non-zero
@@ -77,12 +78,15 @@ func RenderPlannerPrompt(goal string, maxSubtasks int) string {
 // json.Unmarshals. Returns an error wrapping ErrPlanUnparseable if no valid
 // shape can be recovered.
 func ParsePlan(text string) (Plan, error) {
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start < 0 || end <= start {
-		return Plan{}, fmt.Errorf("no JSON object found: %w", ErrPlanUnparseable)
+	candidate, ok := findJSONObjectByKey(text, "subtasks")
+	if !ok {
+		start := strings.Index(text, "{")
+		end := strings.LastIndex(text, "}")
+		if start < 0 || end <= start {
+			return Plan{}, fmt.Errorf("no JSON object found: %w", ErrPlanUnparseable)
+		}
+		candidate = text[start : end+1]
 	}
-	candidate := text[start : end+1]
 	var p Plan
 	if err := json.Unmarshal([]byte(candidate), &p); err != nil {
 		return Plan{}, fmt.Errorf("unmarshal plan: %w: %v", ErrPlanUnparseable, err)
@@ -98,11 +102,36 @@ func ParsePlan(text string) (Plan, error) {
 		if strings.TrimSpace(p.Subtasks[i].ID) == "" {
 			p.Subtasks[i].ID = fmt.Sprintf("s%d", i+1)
 		}
+		if !isValidSubtaskID(p.Subtasks[i].ID) {
+			return Plan{}, fmt.Errorf("subtask %d has invalid id %q (allowed: A-Z a-z 0-9 . _ -, max 64): %w", i, p.Subtasks[i].ID, ErrPlanUnparseable)
+		}
 		if strings.TrimSpace(p.Subtasks[i].Title) == "" {
 			p.Subtasks[i].Title = p.Subtasks[i].ID
 		}
 	}
 	return p, nil
+}
+
+// isValidSubtaskID restricts planner-supplied IDs to characters that are safe
+// across every downstream use (map keys, artifact filenames, JSON event
+// payloads, dependency references). Spaces and other punctuation are rejected
+// to keep the DAG robust. Auto-generated fallback IDs ("s1", "s2", ...) are
+// always valid by construction.
+func isValidSubtaskID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // FallbackPlan is what the supervisor uses when planning fails: a single

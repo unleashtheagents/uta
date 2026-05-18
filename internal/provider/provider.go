@@ -29,13 +29,17 @@ const (
 
 // Detection is what Detect() returns. Available=false means the binary isn't
 // on PATH or isn't usable; Notes carries human-readable hints (auth missing,
-// version too old, etc).
+// version too old, etc). Err carries the underlying error when detection
+// failed for an actionable reason (e.g., binary execution failure, permission
+// denied, detection timed out) so callers like `uta doctor` can surface
+// programmatic detail beyond the human-readable Notes string.
 type Detection struct {
 	Available    bool
 	BinaryPath   string
 	Version      string
 	Capabilities []Capability
 	Notes        string
+	Err          error
 }
 
 // RunOptions controls a single headless invocation.
@@ -45,6 +49,12 @@ type RunOptions struct {
 	Timeout         time.Duration // 0 = inherit ctx
 	PreApproveTools []string      // best-effort; ignored if provider lacks CapToolPreApprove
 	ExtraArgs       []string      // escape hatch
+
+	// MaxRetries is the maximum number of additional attempts on transport
+	// errors (ErrTransport), on top of the initial attempt. A value of 0
+	// disables retries (single attempt). Honored by the orchestrator's
+	// retry wrapper; providers themselves typically do not act on this.
+	MaxRetries int
 }
 
 // RunResult is the terminal value of one RunHeadless call. RawOutput holds

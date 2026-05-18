@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -18,6 +19,20 @@ import (
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/version"
 )
+
+// exitError signals that the program should terminate with a specific exit
+// code without further diagnostic output. Commands return this in place of
+// calling os.Exit directly so that deferred cleanup (store close, bus
+// shutdown, signal-context cancellation) runs before the process exits.
+// Execute unwraps it via errors.As and calls os.Exit with the carried code.
+type exitError struct{ code int }
+
+func (e *exitError) Error() string { return fmt.Sprintf("exit %d", e.code) }
+
+// exitWith returns a sentinel error that propagates a specific exit code up
+// to Execute. The caller is responsible for printing any user-facing
+// diagnostic before returning.
+func exitWith(code int) error { return &exitError{code: code} }
 
 // App is the per-invocation context: where uta is storing state, the open
 // DB, the blob store, and the provider registry. Built once per command via
@@ -151,7 +166,7 @@ func Execute() {
 		Short:         "unleash the agents — a CLI agent orchestrator",
 		Version:       version.String(),
 		SilenceUsage:  true,
-		SilenceErrors: false,
+		SilenceErrors: true,
 	}
 	root.PersistentFlags().String("log-level", "info", "log level: debug|info|warn|error")
 	root.PersistentFlags().Bool("no-color", false, "disable ANSI colors")
@@ -173,6 +188,10 @@ func Execute() {
 	root.AddCommand(newServeCmd())
 
 	if err := root.Execute(); err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

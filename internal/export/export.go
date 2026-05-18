@@ -80,6 +80,7 @@ type SubtaskRow struct {
 	ID                string     `json:"id"`
 	SessionID         string     `json:"session_id"`
 	Ord               int        `json:"ord"`
+	SpecID            string     `json:"spec_id,omitempty"`
 	Title             string     `json:"title"`
 	PromptRef         string     `json:"prompt_ref,omitempty"`
 	Worker            string     `json:"worker"`
@@ -91,6 +92,7 @@ type SubtaskRow struct {
 	RawOutputRef      string     `json:"raw_output_ref,omitempty"`
 	Error             string     `json:"error,omitempty"`
 	ErrorKind         string     `json:"error_kind,omitempty"`
+	MetaJSON          string     `json:"meta_json,omitempty"`
 }
 
 // EventRow is the serializable trajectory event record.
@@ -139,7 +141,7 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 		}
 		sessionIDs = []string{opts.SessionID}
 	} else {
-		rows, err := s.ListSessions(1_000_000, "")
+		rows, err := s.ListSessions(0, 0, "")
 		if err != nil {
 			return nil, err
 		}
@@ -178,7 +180,7 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 			MetaJSON:       sess.MetaJSON,
 		})
 
-		subs, err := s.SubtaskListBySession(sid)
+		subs, err := s.SubtaskListBySession(sid, 0, 0)
 		if err != nil {
 			return nil, fmt.Errorf("read subtasks for %s: %w", sid, err)
 		}
@@ -187,6 +189,7 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 				ID:                sub.ID,
 				SessionID:         sub.SessionID,
 				Ord:               sub.Ord,
+				SpecID:            sub.SpecID,
 				Title:             sub.Title,
 				PromptRef:         refToBlob(sub.PromptRef),
 				Worker:            sub.Worker,
@@ -198,10 +201,11 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 				RawOutputRef:      refToBlob(sub.RawOutputRef),
 				Error:             sub.Error,
 				ErrorKind:         sub.ErrorKind,
+				MetaJSON:          sub.MetaJSON,
 			})
 		}
 
-		events, err := s.ListEvents(sid)
+		events, err := s.ListEvents(sid, 0, 0)
 		if err != nil {
 			return nil, fmt.Errorf("read events for %s: %w", sid, err)
 		}

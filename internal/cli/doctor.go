@@ -96,6 +96,9 @@ func runDoctor(cmd *cobra.Command) error {
 				notes = "not detected"
 			}
 			fmt.Fprintf(out, "[--]   provider: %-9s %s\n", name, notes)
+			if d.Err != nil {
+				fmt.Fprintf(out, "       error:               %v\n", d.Err)
+			}
 		}
 	}
 	if !anyProvider {
@@ -123,7 +126,7 @@ func runDoctor(cmd *cobra.Command) error {
 		fmt.Fprintln(out, "All systems go. Try:  uta run -g \"summarize this repo\" -y")
 	} else {
 		fmt.Fprintln(out, "Some checks failed or no provider is installed. See lines above.")
-		os.Exit(2)
+		return exitWith(2)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -45,7 +46,11 @@ var geminiVersionRE = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
 func (g *Gemini) Detect(ctx context.Context) provider.Detection {
 	path, err := g.resolvePath()
 	if err != nil {
-		return provider.Detection{Available: false, Notes: "binary 'gemini' not found on PATH"}
+		return provider.Detection{
+			Available: false,
+			Notes:     "binary 'gemini' not found on PATH",
+			Err:       fmt.Errorf("look path 'gemini': %w", err),
+		}
 	}
 	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 	if err != nil {
@@ -53,6 +58,7 @@ func (g *Gemini) Detect(ctx context.Context) provider.Detection {
 			Available:  false,
 			BinaryPath: path,
 			Notes:      fmt.Sprintf("'gemini --version' failed: %v", err),
+			Err:        fmt.Errorf("gemini --version: %w", err),
 		}
 	}
 	version := ""
@@ -135,14 +141,12 @@ func (g *Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 		sessionID string
 		finalText strings.Builder
 	)
-	tee := &lockedWriter{mu: &rawMu, w: &rawBuf}
+	tee := io.TeeReader(stdout, &lockedWriter{mu: &rawMu, w: &rawBuf})
 
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(tee)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		// Tee the raw bytes plus the newline so the blob reproduces the stream verbatim.
-		_, _ = tee.Write(append(append([]byte{}, line...), '\n'))
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}

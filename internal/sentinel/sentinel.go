@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 )
 
@@ -170,7 +171,7 @@ func (s *Sentinel) process(ev trajectory.Event) {
 
 	// 1. Repeated tool-call loop detection.
 	if ev.Kind == trajectory.SubtaskToolCall {
-		key := truncateBytes(ev.Payload, 256)
+		key := engine.TruncateBytes(ev.Payload, 256)
 		s.mu.Lock()
 		s.recentTools = append(s.recentTools, key)
 		if len(s.recentTools) > s.cfg.RepeatedToolThreshold*2 {
@@ -320,9 +321,3 @@ func isErrorEventKind(k string) bool {
 	return strings.HasSuffix(k, "_failed") || k == "plan_fallback" || k == "run_failed"
 }
 
-func truncateBytes(b []byte, max int) string {
-	if len(b) <= max {
-		return string(b)
-	}
-	return string(b[:max])
-}

@@ -61,7 +61,10 @@ func (r *Registry) Names() []string {
 }
 
 // DetectAll runs Detect() on every registered provider, in parallel. Results
-// come back keyed by provider name.
+// come back keyed by provider name. If a provider's Detect() returns without
+// setting Detection.Err but the per-detection context deadline expired,
+// DetectAll annotates the result with a wrapped timeout error so callers like
+// `uta doctor` can show actionable feedback instead of silently swallowing it.
 func (r *Registry) DetectAll(ctx context.Context) map[string]Detection {
 	r.mu.RLock()
 	providers := make([]AgentProvider, 0, len(r.providers))
@@ -83,6 +86,12 @@ func (r *Registry) DetectAll(ctx context.Context) map[string]Detection {
 			dctx, cancel := context.WithTimeout(ctx, detectTimeout)
 			defer cancel()
 			d := p.Detect(dctx)
+			if d.Err == nil && dctx.Err() != nil && !d.Available {
+				d.Err = fmt.Errorf("detect %s: %w", p.Name(), dctx.Err())
+				if d.Notes == "" {
+					d.Notes = fmt.Sprintf("detection timed out after %s", detectTimeout)
+				}
+			}
 			mu.Lock()
 			out[p.Name()] = d
 			mu.Unlock()

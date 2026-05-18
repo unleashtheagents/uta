@@ -143,7 +143,7 @@ func TestCreateAndUpdateSubtask(t *testing.T) {
 
 	// Read it back via SubtaskListBySession and assert pending-state fields
 	// are zero-valued / nil as expected.
-	subs, err := s.SubtaskListBySession("sess-3")
+	subs, err := s.SubtaskListBySession("sess-3", 0, 0)
 	if err != nil {
 		t.Fatalf("SubtaskListBySession: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestCreateAndUpdateSubtask(t *testing.T) {
 		t.Fatalf("UpdateSubtask: %v", err)
 	}
 
-	subs, err = s.SubtaskListBySession("sess-3")
+	subs, err = s.SubtaskListBySession("sess-3", 0, 0)
 	if err != nil {
 		t.Fatalf("SubtaskListBySession after update: %v", err)
 	}

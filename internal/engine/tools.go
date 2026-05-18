@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -159,7 +160,7 @@ func runTool(parent context.Context, spec ToolSpec) ToolResult {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	runErr := runCommand(cmd)
 	res.Stdout = stdout.String()
 	res.Stderr = stderr.String()
 	res.Duration = time.Since(start)
@@ -251,20 +252,25 @@ func parseSlither(toolID, stdout, _ string) ([]Finding, error) {
 	}
 	out := make([]Finding, 0, len(root.Results.Detectors))
 	for i, d := range root.Results.Detectors {
-		f := Finding{
-			ID:       fmt.Sprintf("%s-%d", d.Check, i),
+		base := Finding{
 			Severity: NormalizeSeverity(d.Impact),
 			Title:    fmt.Sprintf("%s (%s)", d.Check, d.Confidence),
 			Body:     strings.TrimSpace(d.Description),
 		}
-		if len(d.Elements) > 0 {
-			el := d.Elements[0]
+		if len(d.Elements) == 0 {
+			base.ID = fmt.Sprintf("%s-%d", d.Check, i)
+			out = append(out, base)
+			continue
+		}
+		for j, el := range d.Elements {
+			f := base
+			f.ID = fmt.Sprintf("%s-%d-%d", d.Check, i, j)
 			f.File = el.SourceMapping.FilenameRelative
 			if len(el.SourceMapping.Lines) > 0 {
 				f.Line = el.SourceMapping.Lines[0]
 			}
+			out = append(out, f)
 		}
-		out = append(out, f)
 	}
 	return out, nil
 }
@@ -341,39 +347,17 @@ func parseForgeTest(toolID, stdout, _ string) ([]Finding, error) {
 			if body == "" {
 				body = "test failed: status=" + r.Status
 			}
+			base := filepath.Base(contract)
 			out = append(out, Finding{
 				ID:       fmt.Sprintf("forge-%d", idx),
 				Severity: SevHigh, // a failing invariant test is HIGH
-				Title:    fmt.Sprintf("forge: %s::%s failed", filenameOnly(contract), name),
+				Title:    fmt.Sprintf("forge: %s::%s failed", base, name),
 				Body:     body,
-				File:     filenameOnly(contract),
+				File:     base,
 			})
 		}
 	}
 	return out, nil
-}
-
-// extractJSONObject returns the substring from the first '{' to the last '}'
-// in s, trimmed. This mirrors the permissive extraction in ParseFindings so
-// tool adapters tolerate warnings, logs, or banners printed before/after the
-// JSON payload. Returns "" when no balanced shape is present.
-func extractJSONObject(s string) string {
-	start := strings.Index(s, "{")
-	if start < 0 {
-		return ""
-	}
-	end := strings.LastIndex(s, "}")
-	if end <= start {
-		return ""
-	}
-	return s[start : end+1]
-}
-
-func filenameOnly(s string) string {
-	if i := strings.LastIndexByte(s, '/'); i >= 0 {
-		return s[i+1:]
-	}
-	return s
 }
 
 // KnownBuiltinTools lists adapters baked into the binary, for `uta doctor`.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Blobs is a content-addressed file store under ~/.uta/blobs. Prompts, raw
@@ -59,4 +60,77 @@ func (b *Blobs) Get(path string, w io.Writer) error {
 	defer f.Close()
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// Delete removes a blob file. Missing files are not an error — the desired
+// post-state (absence) is already true, which matches the idempotent feel of
+// a content-addressed store.
+func (b *Blobs) Delete(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// BlobInfo describes a single stored blob: its absolute path, sha256 hex
+// digest (the filename without extension), optional extension, and size in
+// bytes.
+type BlobInfo struct {
+	Path string
+	Hash string
+	Ext  string
+	Size int64
+}
+
+// List enumerates all blobs in the store. Entries that don't look like
+// content-addressed blobs (e.g. leftover *.tmp files from interrupted Puts)
+// are skipped, as are subdirectories. A missing blobs dir returns an empty
+// slice rather than an error, mirroring the idempotent feel of Delete.
+func (b *Blobs) List() ([]BlobInfo, error) {
+	entries, err := os.ReadDir(b.Dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]BlobInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		hash, ext, _ := strings.Cut(name, ".")
+		if len(hash) != 64 || !isHex(hash) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, BlobInfo{
+			Path: filepath.Join(b.Dir, name),
+			Hash: hash,
+			Ext:  ext,
+			Size: info.Size(),
+		})
+	}
+	return out, nil
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }

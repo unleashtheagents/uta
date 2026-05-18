@@ -136,27 +136,27 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 	if callErr != nil {
 		kind := classifyError(callErr)
 		s.emit(newSession, subtaskID, trajectory.SubtaskFailed, map[string]any{"error": callErr.Error(), "kind": kind})
-		_ = s.deps.Store.UpdateSubtask(store.Subtask{
+		s.dbErr(newSession, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 			ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 			StartedAt: &startedAt, CompletedAt: &completedAt,
-			ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+			ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 			Error: callErr.Error(), ErrorKind: kind,
-		})
+		}))
 		s.emit(newSession, "", trajectory.RunFailed, map[string]any{"reason": callErr.Error()})
-		_ = s.deps.Store.MarkSession(newSession, "failed", "")
+		s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "failed", ""))
 		return RunResult{SessionID: newSession, Status: "failed"}, callErr
 	}
 
 	s.emit(newSession, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"chars": len(result.FinalText), "provider_session_id": result.SessionID,
 	})
-	_ = s.deps.Store.UpdateSubtask(store.Subtask{
+	s.dbErr(newSession, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
-		ResultText: truncate(result.FinalText, 8000), RawOutputRef: rawRef,
-	})
+		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+	}))
 	finalRef, _ := s.deps.Blobs.Put([]byte(result.FinalText), "txt")
-	_ = s.deps.Store.MarkSession(newSession, "completed", finalRef)
+	s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "completed", finalRef))
 	s.emit(newSession, "", trajectory.RunCompleted, map[string]any{"status": "completed", "subtasks": 1})
 
 	return RunResult{

@@ -26,16 +26,21 @@ func newProvidersCmd() *cobra.Command {
 
 			if asJSON {
 				type row struct {
-					Name         string                 `json:"name"`
-					Available    bool                   `json:"available"`
-					BinaryPath   string                 `json:"binary_path,omitempty"`
-					Version      string                 `json:"version,omitempty"`
-					Capabilities []provider.Capability  `json:"capabilities,omitempty"`
-					Notes        string                 `json:"notes,omitempty"`
+					Name         string                `json:"name"`
+					Available    bool                  `json:"available"`
+					BinaryPath   string                `json:"binary_path,omitempty"`
+					Version      string                `json:"version,omitempty"`
+					Capabilities []provider.Capability `json:"capabilities,omitempty"`
+					Notes        string                `json:"notes,omitempty"`
+					Error        string                `json:"error,omitempty"`
 				}
 				out := make([]row, 0, len(detections))
 				for _, name := range app.Registry.Names() {
 					d := detections[name]
+					errStr := ""
+					if d.Err != nil {
+						errStr = d.Err.Error()
+					}
 					out = append(out, row{
 						Name:         name,
 						Available:    d.Available,
@@ -43,6 +48,7 @@ func newProvidersCmd() *cobra.Command {
 						Version:      d.Version,
 						Capabilities: d.Capabilities,
 						Notes:        d.Notes,
+						Error:        errStr,
 					})
 				}
 				enc := json.NewEncoder(cmd.OutOrStdout())

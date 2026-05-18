@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -251,13 +252,13 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 			if runErr != nil {
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
-					os.Exit(130)
+					return exitWith(130)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "audit failed: %v\n", runErr)
 				if result.SessionID != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "session: %s\n", result.SessionID)
 				}
-				os.Exit(4)
+				return exitWith(4)
 			}
 
 			// Print summary to stdout. Either compact human form, or JSON when -o
@@ -301,7 +302,7 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 
 			// Exit non-zero when HIGH findings remain after all iterations.
 			if result.FinalFindings != nil && result.FinalFindings.HighestSeverity() == engine.SevHigh {
-				os.Exit(5)
+				return exitWith(5)
 			}
 			return nil
 		},
@@ -334,7 +335,7 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 	return cmd
 }
 
-func printPersonaList(w interface{ Write([]byte) (int, error) }, app *App) {
+func printPersonaList(w io.Writer, app *App) {
 	reg := resolvePersonas(app)
 	ids := make([]string, 0, len(reg))
 	for id := range reg {
@@ -345,7 +346,7 @@ func printPersonaList(w interface{ Write([]byte) (int, error) }, app *App) {
 	for _, up := range app.UserPersonas {
 		userIDs[up.ID] = true
 	}
-	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }), "Available critic personas:")
+	fmt.Fprintln(w, "Available critic personas:")
 	for _, id := range ids {
 		p := reg[id]
 		src := "built-in"
@@ -356,10 +357,10 @@ func printPersonaList(w interface{ Write([]byte) (int, error) }, app *App) {
 		if title == "" {
 			title = "(no title)"
 		}
-		fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "  %-22s %-8s %s\n", id, "["+src+"]", title)
+		fmt.Fprintf(w, "  %-22s %-8s %s\n", id, "["+src+"]", title)
 	}
-	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }))
-	fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }), "Add your own by dropping a YAML into ~/.uta/personas/ — see `uta persona example`.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Add your own by dropping a YAML into ~/.uta/personas/ — see `uta persona example`.")
 }
 
 // buildToolSpecs parses --tool flag values into ToolSpec structs.
@@ -473,24 +474,24 @@ func findingsCounts(r *engine.FindingsReport) map[string]int {
 	return r.Stats
 }
 
-func printFindings(w interface{ Write([]byte) (int, error) }, r *engine.FindingsReport) {
-	fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "iteration %d · %d finding(s)\n\n", r.Iteration, len(r.Findings))
+func printFindings(w io.Writer, r *engine.FindingsReport) {
+	fmt.Fprintf(w, "iteration %d · %d finding(s)\n\n", r.Iteration, len(r.Findings))
 	for _, f := range r.Findings {
-		fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "[%s] %s · %s\n", strings.ToUpper(string(f.Severity)), f.Critic, f.Title)
+		fmt.Fprintf(w, "[%s] %s · %s\n", strings.ToUpper(string(f.Severity)), f.Critic, f.Title)
 		if f.File != "" {
 			loc := f.File
 			if f.Line > 0 {
 				loc = fmt.Sprintf("%s:%d", f.File, f.Line)
 			}
-			fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "  at %s\n", loc)
+			fmt.Fprintf(w, "  at %s\n", loc)
 		}
 		if f.Body != "" {
 			body := strings.TrimSpace(f.Body)
 			if len(body) > 400 {
 				body = body[:400] + "…"
 			}
-			fmt.Fprintf(w.(interface{ Write([]byte) (int, error) }), "  %s\n", strings.ReplaceAll(body, "\n", "\n  "))
+			fmt.Fprintf(w, "  %s\n", strings.ReplaceAll(body, "\n", "\n  "))
 		}
-		fmt.Fprintln(w.(interface{ Write([]byte) (int, error) }))
+		fmt.Fprintln(w)
 	}
 }

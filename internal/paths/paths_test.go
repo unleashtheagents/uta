@@ -238,6 +238,40 @@ func TestFindProjectRoot_EmptyStartUsesCwd(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomic_WritesAndRenames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "final.json")
+	payload := []byte(`{"ok":true}`)
+	if err := WriteFileAtomic(path, payload, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("content mismatch: got %q want %q", string(got), string(payload))
+	}
+	// No leftover tmp files.
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected only the final file, got %v", names)
+	}
+}
+
+func TestWriteFileAtomic_RejectsMissingDir(t *testing.T) {
+	// Sanity check that the function bubbles up failures from the underlying
+	// filesystem rather than silently succeeding.
+	path := filepath.Join(t.TempDir(), "no", "such", "dir", "file.json")
+	if err := WriteFileAtomic(path, []byte("x"), 0o644); err == nil {
+		t.Fatalf("expected error writing to missing parent dir, got nil")
+	}
+}
+
 func TestFindProjectRoot_IgnoresDotUtaFile(t *testing.T) {
 	// .uta must be a *directory* — a regular file by that name should not
 	// trick the walker.

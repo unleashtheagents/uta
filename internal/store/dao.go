@@ -26,6 +26,10 @@ type Subtask struct {
 	ID                string
 	SessionID         string
 	Ord               int
+	// SpecID is the planner-assigned identifier (e.g. "s1") for plan-derived
+	// subtasks. Empty for rows the engine creates outside a Plan (resume
+	// turns, reflector critics/tools/reviser).
+	SpecID            string
 	Title             string
 	PromptRef         string
 	Worker            string
@@ -37,6 +41,7 @@ type Subtask struct {
 	RawOutputRef      string
 	Error             string
 	ErrorKind         string
+	MetaJSON          string
 }
 
 // CreateSession persists a freshly-started run row.
@@ -62,9 +67,10 @@ func (s *Store) MarkSession(id, status, finalAnswerRef string) error {
 // CreateSubtask inserts a pending subtask row.
 func (s *Store) CreateSubtask(t Subtask) error {
 	_, err := s.DB.Exec(
-		`INSERT INTO subtasks (id, session_id, ord, title, prompt_ref, worker, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.SessionID, t.Ord, t.Title, t.PromptRef, t.Worker, t.Status,
+		`INSERT INTO subtasks (id, session_id, ord, spec_id, title, prompt_ref, worker, status, meta_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.SessionID, t.Ord, nullable(t.SpecID), t.Title, t.PromptRef, t.Worker, t.Status,
+		nonEmpty(t.MetaJSON, "{}"),
 	)
 	return err
 }
@@ -80,9 +86,10 @@ func (s *Store) UpdateSubtask(t Subtask) error {
 	}
 	_, err := s.DB.Exec(
 		`UPDATE subtasks SET provider_session_id = ?, status = ?, started_at = ?, completed_at = ?,
-		 result_text = ?, raw_output_ref = ?, error = ?, error_kind = ? WHERE id = ?`,
+		 result_text = ?, raw_output_ref = ?, error = ?, error_kind = ?, meta_json = ? WHERE id = ?`,
 		nullable(t.ProviderSessionID), t.Status, started, completed,
 		nullable(t.ResultText), nullable(t.RawOutputRef), nullable(t.Error), nullable(t.ErrorKind),
+		nonEmpty(t.MetaJSON, "{}"),
 		t.ID,
 	)
 	return err
@@ -102,19 +109,20 @@ func (s *Store) InsertEvent(sessionID, subtaskID string, seq int64, ts time.Time
 	return err
 }
 
-// ListSessions returns recent sessions newest-first, capped at limit (default 50).
-func (s *Store) ListSessions(limit int, statusFilter string) ([]Session, error) {
-	if limit <= 0 {
-		limit = 50
-	}
+// ListSessions returns sessions newest-first. limit<=0 means no row cap;
+// offset<=0 means start at the first row. Callers that want a default
+// page size (e.g. the CLI) supply it themselves.
+func (s *Store) ListSessions(limit, offset int, statusFilter string) ([]Session, error) {
 	q := `SELECT id, goal, worker, COALESCE(planner, ''), status, created_at, completed_at, COALESCE(final_answer_ref, ''), COALESCE(workflow_path, ''), meta_json FROM sessions`
 	args := []any{}
 	if statusFilter != "" {
 		q += ` WHERE status = ?`
 		args = append(args, statusFilter)
 	}
-	q += ` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, limit)
+	q += ` ORDER BY created_at DESC`
+	pageSQL, pageArgs := paginationSQL(limit, offset)
+	q += pageSQL
+	args = append(args, pageArgs...)
 
 	rows, err := s.DB.Query(q, args...)
 	if err != nil {
@@ -165,11 +173,15 @@ type EventRow struct {
 	Payload   json.RawMessage
 }
 
-// ListEvents returns every event for a session in seq order.
-func (s *Store) ListEvents(sessionID string) ([]EventRow, error) {
-	rows, err := s.DB.Query(
-		`SELECT id, session_id, COALESCE(subtask_id, ''), seq, ts, kind, payload_json FROM trajectory_events WHERE session_id = ? ORDER BY seq ASC`, sessionID,
-	)
+// ListEvents returns events for a session in seq order. limit<=0 means no
+// row cap; offset<=0 means start at the first row.
+func (s *Store) ListEvents(sessionID string, limit, offset int) ([]EventRow, error) {
+	q := `SELECT id, session_id, COALESCE(subtask_id, ''), seq, ts, kind, payload_json FROM trajectory_events WHERE session_id = ? ORDER BY seq ASC`
+	args := []any{sessionID}
+	pageSQL, pageArgs := paginationSQL(limit, offset)
+	q += pageSQL
+	args = append(args, pageArgs...)
+	rows, err := s.DB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -195,9 +207,9 @@ func (s *Store) LastSubtask(sessionID string) (Subtask, error) {
 	var t Subtask
 	var started, completed sql.NullInt64
 	err := s.DB.QueryRow(
-		`SELECT id, session_id, ord, title, prompt_ref, worker, COALESCE(provider_session_id, ''), status, started_at, completed_at, COALESCE(result_text, ''), COALESCE(raw_output_ref, ''), COALESCE(error, ''), COALESCE(error_kind, '') FROM subtasks WHERE session_id = ? ORDER BY ord DESC LIMIT 1`, sessionID,
-	).Scan(&t.ID, &t.SessionID, &t.Ord, &t.Title, &t.PromptRef, &t.Worker, &t.ProviderSessionID, &t.Status,
-		&started, &completed, &t.ResultText, &t.RawOutputRef, &t.Error, &t.ErrorKind)
+		`SELECT id, session_id, ord, COALESCE(spec_id, ''), title, prompt_ref, worker, COALESCE(provider_session_id, ''), status, started_at, completed_at, COALESCE(result_text, ''), COALESCE(raw_output_ref, ''), COALESCE(error, ''), COALESCE(error_kind, ''), meta_json FROM subtasks WHERE session_id = ? ORDER BY ord DESC LIMIT 1`, sessionID,
+	).Scan(&t.ID, &t.SessionID, &t.Ord, &t.SpecID, &t.Title, &t.PromptRef, &t.Worker, &t.ProviderSessionID, &t.Status,
+		&started, &completed, &t.ResultText, &t.RawOutputRef, &t.Error, &t.ErrorKind, &t.MetaJSON)
 	if err != nil {
 		return t, err
 	}
@@ -236,6 +248,22 @@ func nullTime(ns sql.NullInt64) *time.Time {
 	return &t
 }
 
+// paginationSQL builds the trailing " LIMIT ?[ OFFSET ?]" fragment and the
+// matching positional args. SQLite treats LIMIT -1 as no row cap, which lets
+// us express "offset only, unbounded" without conditional joining.
+func paginationSQL(limit, offset int) (string, []any) {
+	switch {
+	case limit > 0 && offset > 0:
+		return " LIMIT ? OFFSET ?", []any{limit, offset}
+	case limit > 0:
+		return " LIMIT ?", []any{limit}
+	case offset > 0:
+		return " LIMIT -1 OFFSET ?", []any{offset}
+	default:
+		return "", nil
+	}
+}
+
 func nonEmpty(s, fallback string) string {
 	if s == "" {
 		return fallback
@@ -243,11 +271,15 @@ func nonEmpty(s, fallback string) string {
 	return s
 }
 
-// SubtaskListBySession returns subtasks ordered by ord.
-func (s *Store) SubtaskListBySession(sessionID string) ([]Subtask, error) {
-	rows, err := s.DB.Query(
-		`SELECT id, session_id, ord, title, prompt_ref, worker, COALESCE(provider_session_id, ''), status, started_at, completed_at, COALESCE(result_text, ''), COALESCE(raw_output_ref, ''), COALESCE(error, ''), COALESCE(error_kind, '') FROM subtasks WHERE session_id = ? ORDER BY ord ASC`, sessionID,
-	)
+// SubtaskListBySession returns subtasks ordered by ord. limit<=0 means no
+// row cap; offset<=0 means start at the first row.
+func (s *Store) SubtaskListBySession(sessionID string, limit, offset int) ([]Subtask, error) {
+	q := `SELECT id, session_id, ord, COALESCE(spec_id, ''), title, prompt_ref, worker, COALESCE(provider_session_id, ''), status, started_at, completed_at, COALESCE(result_text, ''), COALESCE(raw_output_ref, ''), COALESCE(error, ''), COALESCE(error_kind, ''), meta_json FROM subtasks WHERE session_id = ? ORDER BY ord ASC`
+	args := []any{sessionID}
+	pageSQL, pageArgs := paginationSQL(limit, offset)
+	q += pageSQL
+	args = append(args, pageArgs...)
+	rows, err := s.DB.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -256,9 +288,9 @@ func (s *Store) SubtaskListBySession(sessionID string) ([]Subtask, error) {
 	for rows.Next() {
 		var t Subtask
 		var started, completed sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.SessionID, &t.Ord, &t.Title, &t.PromptRef, &t.Worker,
+		if err := rows.Scan(&t.ID, &t.SessionID, &t.Ord, &t.SpecID, &t.Title, &t.PromptRef, &t.Worker,
 			&t.ProviderSessionID, &t.Status, &started, &completed,
-			&t.ResultText, &t.RawOutputRef, &t.Error, &t.ErrorKind); err != nil {
+			&t.ResultText, &t.RawOutputRef, &t.Error, &t.ErrorKind, &t.MetaJSON); err != nil {
 			return nil, err
 		}
 		t.StartedAt = nullTime(started)

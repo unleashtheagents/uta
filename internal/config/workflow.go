@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,10 @@ type Workflow struct {
 	Synthesis WorkflowSynthesis `yaml:"synthesis"`
 	Subtasks  []WorkflowSubtask `yaml:"subtasks"`
 	Budget    WorkflowBudget    `yaml:"budget"`
+	// Env is a map of environment variables appended to os.Environ() for every
+	// provider invocation in this run. Useful for project-specific config or
+	// secrets sourced via shell expansion at YAML render time.
+	Env map[string]string `yaml:"env"`
 }
 
 type WorkflowDefaults struct {
@@ -43,12 +48,13 @@ type WorkflowSynthesis struct {
 }
 
 type WorkflowSubtask struct {
-	ID     string           `yaml:"id"`
-	Title  string           `yaml:"title"`
-	Prompt string           `yaml:"prompt"`
-	Worker string           `yaml:"worker"`
-	Needs  []string         `yaml:"needs"`
-	Gate   *WorkflowGate    `yaml:"gate"`
+	ID      string        `yaml:"id"`
+	Title   string        `yaml:"title"`
+	Prompt  string        `yaml:"prompt"`
+	Worker  string        `yaml:"worker"`
+	Needs   []string      `yaml:"needs"`
+	Gate    *WorkflowGate `yaml:"gate"`
+	Timeout time.Duration `yaml:"timeout"` // optional per-subtask override of defaults.subtask_timeout
 }
 
 // WorkflowGate is a verification step run after the subtask. Supports two
@@ -95,7 +101,9 @@ func LoadWorkflow(path string) (*Workflow, error) {
 		return nil, fmt.Errorf("read workflow %s: %w", path, err)
 	}
 	var wf Workflow
-	if err := yaml.Unmarshal(data, &wf); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&wf); err != nil {
 		return nil, fmt.Errorf("parse workflow %s: %w", path, err)
 	}
 	if err := wf.Validate(); err != nil {
@@ -133,6 +141,9 @@ func (w *Workflow) Validate() error {
 		if st.Gate != nil && strings.TrimSpace(st.Gate.Cmd) == "" {
 			return fmt.Errorf("subtask %d (id=%q): gate.cmd is required when gate is set", i, st.ID)
 		}
+		if st.Timeout < 0 {
+			return fmt.Errorf("subtask %d (id=%q): timeout must be >= 0", i, st.ID)
+		}
 	}
 	// Validate that every `needs` reference points at a real subtask id.
 	for i, st := range w.Subtasks {
@@ -140,6 +151,14 @@ func (w *Workflow) Validate() error {
 			if !ids[dep] {
 				return fmt.Errorf("subtask %d (id=%q): needs %q but no subtask with that id exists", i, st.ID, dep)
 			}
+		}
+	}
+	for k := range w.Env {
+		if strings.TrimSpace(k) == "" {
+			return errors.New("env: variable name must be non-empty")
+		}
+		if strings.ContainsRune(k, '=') {
+			return fmt.Errorf("env: variable name %q must not contain '='", k)
 		}
 	}
 	return nil
@@ -185,6 +204,8 @@ synthesis:
 # subtasks (OPTIONAL): if present, the planner step is skipped and these run
 # as-is. Mix workers per subtask; declare 'needs' for ordering; attach a
 # verification 'gate' command that must exit 0 before downstream tasks run.
+# Per-subtask 'timeout' overrides defaults.subtask_timeout — useful for
+# mixed-workload DAGs (fast LLM call alongside a long-running security scan).
 #
 # subtasks:
 #   - id: build
@@ -195,6 +216,7 @@ synthesis:
 #     needs: [build]
 #     prompt: "Build a Next.js app using the ABIs in ./contracts/out"
 #     worker: claude
+#     timeout: 30m            # this subtask gets 30 min; others use the default
 #     gate:
 #       cmd: npm run typecheck && npm run build
 #       timeout: 10m
@@ -202,5 +224,13 @@ synthesis:
 #       max_retries: 2
 
 budget:
-  max_wall_seconds: 1800   # placeholder — not enforced yet
+  max_wall_seconds: 1800   # hard wall-clock ceiling; cancels the run if exceeded
+
+# env (OPTIONAL): KEY=VALUE pairs appended to the environment of every
+# provider invocation. Useful for injecting project-specific config or
+# secrets (sourced via shell expansion when this file is rendered).
+#
+# env:
+#   API_BASE_URL: https://staging.example.com
+#   FEATURE_FLAGS: experiment_a,experiment_b
 `

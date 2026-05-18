@@ -67,6 +67,17 @@ type RunRequest struct {
 	// during this run. Used to inject UTA_PROJECT_ROOT / UTA_CONTEXT_DIR
 	// when the run is project-scoped.
 	Env []string
+
+	// MaxWallSeconds, if > 0, is a hard wall-clock budget enforced in
+	// Supervisor.Run via a timer that cancels the run context when
+	// exceeded. Sourced from workflow YAML budget.max_wall_seconds.
+	MaxWallSeconds int
+
+	// TransportMaxRetries is the maximum number of additional attempts on
+	// transport-level errors (ErrTransport) inside callProvider, on top of
+	// the initial attempt. 0 or negative means "use default" (1 retry,
+	// preserving the original v0.1.0 behavior).
+	TransportMaxRetries int
 }
 
 // RunResult is what the supervisor returns once a run is done (success or not).
@@ -137,6 +148,25 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		return RunResult{}, fmt.Errorf("create session: %w", err)
 	}
 
+	// Hard wall-clock budget: when the workflow specifies budget.max_wall_seconds,
+	// a timer cancels the run context once the budget elapses. This is a
+	// safety ceiling distinct from RunTimeout — it can be shorter (e.g.
+	// 30m RunTimeout, 10m budget) to bound resource use independent of
+	// the per-call timeout.
+	if req.MaxWallSeconds > 0 {
+		budgetDuration := time.Duration(req.MaxWallSeconds) * time.Second
+		timer := time.AfterFunc(budgetDuration, func() {
+			s.emit(sessionID, "", trajectory.SentinelAlert, map[string]any{
+				"rule":           "budget_exhausted",
+				"severity":       "critical",
+				"message":        fmt.Sprintf("wall-clock budget of %ds exceeded — cancelling run", req.MaxWallSeconds),
+				"budget_seconds": req.MaxWallSeconds,
+			})
+			cancel()
+		})
+		defer timer.Stop()
+	}
+
 	s.emit(sessionID, "", trajectory.GoalReceived, map[string]any{
 		"goal": req.Goal, "worker": req.WorkerName, "planner": plannerName, "synth": synthName,
 		"max_parallel": req.MaxParallel, "strategy": pickStrategy(req.Strategy, Plan{Subtasks: req.PreSetSubtasks}),
@@ -183,7 +213,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if stratErr != nil {
 		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": stratErr.Error()})
 		s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
-		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID, 0, 0)
 		s.dbErr(sessionID, "", "subtask_list", listErr)
 		return RunResult{SessionID: sessionID, Status: "failed", Subtasks: subs}, stratErr
 	}
@@ -198,7 +228,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if anyFailed && (req.FailFast || abortedFF) {
 		s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": "fail-fast: a subtask failed"})
 		s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
-		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+		subs, listErr := s.deps.Store.SubtaskListBySession(sessionID, 0, 0)
 		s.dbErr(sessionID, "", "subtask_list", listErr)
 		return RunResult{SessionID: sessionID, Status: "failed", Subtasks: subs}, errors.New("a subtask failed (fail-fast)")
 	}
@@ -207,11 +237,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	finalText := ""
 	finalRef := ""
 	if req.SkipSynthesis {
-		var b strings.Builder
-		for _, o := range outcomes {
-			fmt.Fprintf(&b, "## %s (%s)\n\n%s\n\n", o.Title, o.ID, o.Result)
-		}
-		finalText = strings.TrimSpace(b.String())
+		finalText = joinOutcomes(outcomes)
 		ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
 		finalRef = ref
 		s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"mode": "skip", "chars": len(finalText)})
@@ -227,11 +253,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 			finalRef = ref
 			s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"chars": len(finalText)})
 		} else {
-			var b strings.Builder
-			for _, o := range outcomes {
-				fmt.Fprintf(&b, "## %s (%s)\n\n%s\n\n", o.Title, o.ID, o.Result)
-			}
-			finalText = strings.TrimSpace(b.String())
+			finalText = joinOutcomes(outcomes)
 			ref, _ := s.deps.Blobs.Put([]byte(finalText), "txt")
 			finalRef = ref
 			s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"error": synthErr.Error(), "fallback": "joined"})
@@ -245,7 +267,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, status, finalRef))
 	s.emit(sessionID, "", trajectory.RunCompleted, map[string]any{"status": status, "subtasks": len(plan.Subtasks)})
 
-	subs, listErr := s.deps.Store.SubtaskListBySession(sessionID)
+	subs, listErr := s.deps.Store.SubtaskListBySession(sessionID, 0, 0)
 	s.dbErr(sessionID, "", "subtask_list", listErr)
 	return RunResult{SessionID: sessionID, Status: status, FinalAnswer: finalText, Subtasks: subs}, nil
 }
@@ -278,7 +300,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 		"spec_id": spec.ID, "title": spec.Title, "worker": workerName,
 	})
 
-	subCtx, cancel := context.WithTimeout(ctx, req.SubtaskTimeout)
+	subCtx, cancel := context.WithTimeout(ctx, subtaskTimeout(spec, req))
 	defer cancel()
 
 	result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, spec.Prompt, req)
@@ -302,7 +324,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 			Status:            "failed",
 			StartedAt:         &startedAt,
 			CompletedAt:       &completedAt,
-			ResultText:        truncate(result.FinalText, 8000),
+			ResultText:        Truncate(result.FinalText, 8000),
 			RawOutputRef:      rawRef,
 			Error:             err.Error(),
 			ErrorKind:         kind,
@@ -310,6 +332,7 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 		return SubtaskOutcome{
 			ID:     spec.ID,
 			Title:  spec.Title,
+			Worker: workerName,
 			Result: fmt.Sprintf("subtask failed (%s): %v", kind, err),
 			Failed: true,
 		}
@@ -324,28 +347,38 @@ func (s *Supervisor) runSubtask(ctx context.Context, sessionID, subtaskID string
 		Status:            "completed",
 		StartedAt:         &startedAt,
 		CompletedAt:       &completedAt,
-		ResultText:        truncate(result.FinalText, 8000),
+		ResultText:        Truncate(result.FinalText, 8000),
 		RawOutputRef:      rawRef,
 	}))
 	return SubtaskOutcome{
 		ID:     spec.ID,
 		Title:  spec.Title,
+		Worker: workerName,
 		Result: result.FinalText,
 	}
 }
 
-// callProvider runs a provider once with a single retry on ErrTransport.
-// While the call is in flight, an internal goroutine drains the provider's
-// event channel into uta's trajectory bus, tagging each event with the
-// current session_id / subtask_id.
+// callProvider runs a provider with retries on ErrTransport. The retry budget
+// comes from req.TransportMaxRetries (default 1, preserving original
+// behavior); the value is also propagated onto RunOptions so providers can
+// observe it if they choose to. Retries use exponential backoff
+// (transportBackoff) so a rate-limited or flapping upstream gets progressively
+// more breathing room. While the call is in flight, an internal goroutine
+// drains the provider's event channel into uta's trajectory bus, tagging each
+// event with the current session_id / subtask_id.
 func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID string, prov provider.AgentProvider, prompt string, req RunRequest) (provider.RunResult, error) {
+	maxRetries := req.TransportMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
 	opts := provider.RunOptions{
 		Workdir:         req.Workdir,
 		Env:             req.Env,
 		Timeout:         req.SubtaskTimeout,
 		PreApproveTools: req.PreApproveTools,
+		MaxRetries:      maxRetries,
 	}
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		events := make(chan provider.Event, 64)
 		drainDone := make(chan struct{})
 		go func() {
@@ -362,14 +395,17 @@ func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID stri
 		if err == nil {
 			return result, nil
 		}
-		if errors.Is(err, provider.ErrTransport) && attempt == 0 {
+		if errors.Is(err, provider.ErrTransport) && attempt < maxRetries {
+			delay := transportBackoff(attempt)
 			s.emit(sessionID, subtaskID, trajectory.SubtaskStdout, map[string]any{
 				"retry_after_transport_error": err.Error(),
+				"retry_delay_ms":              delay.Milliseconds(),
+				"retry_attempt":               attempt + 1,
 			})
 			select {
 			case <-ctx.Done():
 				return result, ctx.Err()
-			case <-time.After(2 * time.Second):
+			case <-time.After(delay):
 			}
 			continue
 		}
@@ -451,6 +487,28 @@ func (s *Supervisor) dbErr(sessionID, subtaskID, op string, err error) {
 	})
 }
 
+// transportBackoff returns the delay to wait before the (attempt+1)-th retry
+// of an ErrTransport failure. It doubles from a 1s base — 1s, 2s, 4s, 8s …
+// capped at 30s — so a struggling upstream gets progressively more breathing
+// room without making the run wait forever.
+func transportBackoff(attempt int) time.Duration {
+	const (
+		base    = 1 * time.Second
+		ceiling = 30 * time.Second
+	)
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt >= 30 {
+		return ceiling
+	}
+	d := base << attempt
+	if d <= 0 || d > ceiling {
+		return ceiling
+	}
+	return d
+}
+
 func classifyError(err error) string {
 	switch {
 	case errors.Is(err, provider.ErrAuth):
@@ -479,18 +537,22 @@ func providerBlobExt(workerName string) string {
 	return "txt"
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "\n... [truncated]"
-}
-
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a
 	}
 	return b
+}
+
+// subtaskTimeout returns the effective per-subtask timeout: the spec's
+// explicit override when set, otherwise the run-wide default. Lets mixed
+// workloads (a fast LLM call alongside a long-running security scan) coexist
+// in one DAG without having to widen the global timeout.
+func subtaskTimeout(spec SubtaskSpec, req RunRequest) time.Duration {
+	if spec.Timeout > 0 {
+		return spec.Timeout
+	}
+	return req.SubtaskTimeout
 }
 
 // pickStrategy resolves the orchestration strategy. Explicit value wins; on
@@ -518,8 +580,8 @@ func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan,
 	anyFailed := false
 	var mu sync.Mutex
 
-	subCtx, cancelSubs := context.WithCancel(ctx)
-	defer cancelSubs()
+	subCtx, cancelSubs := context.WithCancelCause(ctx)
+	defer cancelSubs(nil)
 
 	for i, spec := range plan.Subtasks {
 		i, spec := i, spec
@@ -544,12 +606,13 @@ func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan,
 			ID:        subtaskID,
 			SessionID: sessionID,
 			Ord:       i,
+			SpecID:    spec.ID,
 			Title:     spec.Title,
 			PromptRef: promptRef,
 			Worker:    subtaskWorkerName,
 			Status:    "pending",
 		}); err != nil {
-			outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "subtask create failed: " + err.Error(), Failed: true}
+			outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: subtaskWorkerName, Result: "subtask create failed: " + err.Error(), Failed: true}
 			continue
 		}
 
@@ -559,7 +622,11 @@ func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan,
 			select {
 			case sem <- struct{}{}:
 			case <-subCtx.Done():
-				outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Result: "cancelled before start", Failed: true}
+				result := "cancelled before start"
+				if cause := context.Cause(subCtx); cause != nil && !errors.Is(cause, context.Canceled) && !errors.Is(cause, context.DeadlineExceeded) {
+					result = "cancelled before start: " + cause.Error()
+				}
+				outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: subtaskWorkerName, Result: result, Failed: true}
 				return
 			}
 			defer func() { <-sem }()
@@ -570,7 +637,7 @@ func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan,
 			if outcome.Failed {
 				anyFailed = true
 				if req.FailFast {
-					cancelSubs()
+					cancelSubs(fmt.Errorf("fail-fast: subtask %q failed: %s", spec.ID, outcome.Result))
 				}
 			}
 			mu.Unlock()

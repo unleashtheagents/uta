@@ -53,12 +53,27 @@ func newProjectInitCmd() *cobra.Command {
 				return err
 			}
 			stateDir := paths.ProjectStateDir(cwd)
-			if _, err := os.Stat(stateDir); err == nil && !force {
-				return fmt.Errorf("%s already exists; pass --force to re-initialize", stateDir)
+			preExisted := false
+			if _, err := os.Stat(stateDir); err == nil {
+				if !force {
+					return fmt.Errorf("%s already exists; pass --force to re-initialize", stateDir)
+				}
+				preExisted = true
 			}
 			if err := os.MkdirAll(stateDir, 0o755); err != nil {
 				return err
 			}
+			// If the state dir did not exist before this command, remove it on
+			// any subsequent error so the project tree is not left half-built.
+			// When --force re-initializes an existing dir we leave it alone:
+			// the user's pre-existing state is theirs, not ours to delete.
+			success := false
+			defer func() {
+				if !success && !preExisted {
+					os.RemoveAll(stateDir)
+				}
+			}()
+
 			if _, err := paths.Blobs(stateDir); err != nil {
 				return err
 			}
@@ -76,6 +91,7 @@ func newProjectInitCmd() *cobra.Command {
 				return fmt.Errorf("open project db: %w", err)
 			}
 			st.Close()
+			success = true
 
 			// Record the project in the global index so `uta project list`
 			// can find it later. Best-effort; failure is non-fatal.

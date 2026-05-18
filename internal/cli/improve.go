@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
@@ -152,10 +153,10 @@ means running the command again).`,
 			if runErr != nil {
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
-					os.Exit(130)
+					return exitWith(130)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "improve failed: %v\n", runErr)
-				os.Exit(4)
+				return exitWith(4)
 			}
 
 			stats, _ := board.Stats()
@@ -197,9 +198,5 @@ func isTTY(w interface{}) bool {
 	if !ok {
 		return false
 	}
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
+	return isatty.IsTerminal(f.Fd())
 }
