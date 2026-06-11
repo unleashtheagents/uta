@@ -71,7 +71,11 @@ ratio above 1.0.
 	return cmd
 }
 
-func runPerfSession(cmd *cobra.Command, app *App, id, format string) error {
+func runPerfSession(cmd *cobra.Command, app *App, idArg, format string) error {
+	id, err := app.Store.ResolveSessionID(idArg)
+	if err != nil {
+		return err
+	}
 	sess, err := app.Store.GetSession(id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

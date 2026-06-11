@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -534,8 +536,66 @@ func (s *Store) ListSentinelAlertsSince(since time.Time, limit int) ([]SentinelA
 	return out, rows.Err()
 }
 
-// SubtaskListBySession returns subtasks ordered by ord. limit<=0 means no
-// row cap; offset<=0 means start at the first row.
+// ResolveSessionID expands a session-id prefix to the full id. The CLI
+// prints 8-char short ids everywhere (`uta sessions`, dash, the hello
+// tour), so every command that accepts a session id must accept what
+// those surfaces display. Resolution rules:
+//
+//   - exact match wins immediately (full UUIDs never get prefix-scanned)
+//   - a unique prefix resolves to its full id
+//   - an ambiguous prefix errors and lists the candidates
+//   - no match errors with "session not found"
+func (s *Store) ResolveSessionID(idOrPrefix string) (string, error) {
+	idOrPrefix = strings.TrimSpace(idOrPrefix)
+	if idOrPrefix == "" {
+		return "", errors.New("session id is empty")
+	}
+	var exact string
+	err := s.DB.QueryRow(`SELECT id FROM sessions WHERE id = ?`, idOrPrefix).Scan(&exact)
+	if err == nil {
+		return exact, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	// ESCAPE so a prefix containing % or _ can't widen the scan.
+	pattern := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(idOrPrefix) + "%"
+	rows, err := s.DB.Query(
+		`SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\' ORDER BY created_at DESC LIMIT 5`, pattern)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var matches []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		matches = append(matches, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("session not found: %s", idOrPrefix)
+	case 1:
+		return matches[0], nil
+	default:
+		short := make([]string, len(matches))
+		for i, m := range matches {
+			if len(m) > 8 {
+				short[i] = m[:8]
+			} else {
+				short[i] = m
+			}
+		}
+		return "", fmt.Errorf("session id prefix %q is ambiguous (matches %s…) — use more characters",
+			idOrPrefix, strings.Join(short, "…, "))
+	}
+}
+
 // CostBucket is one row of the cost rollup `uta perf --cost` renders.
 // Mode/Provider/Day are the three rollup dimensions; counts are summed
 // across every subtask that completed within the time window with a
@@ -599,6 +659,8 @@ ORDER BY day DESC, mode_name ASC, provider ASC`
 	return out, rows.Err()
 }
 
+// SubtaskListBySession returns subtasks ordered by ord. limit<=0 means no
+// row cap; offset<=0 means start at the first row.
 func (s *Store) SubtaskListBySession(sessionID string, limit, offset int) ([]Subtask, error) {
 	q := `SELECT id, session_id, ord, COALESCE(spec_id, ''), title, prompt_ref, worker, COALESCE(provider_session_id, ''), status, started_at, completed_at, COALESCE(result_text, ''), COALESCE(raw_output_ref, ''), COALESCE(error, ''), COALESCE(error_kind, ''), meta_json FROM subtasks WHERE session_id = ? ORDER BY ord ASC`
 	args := []any{sessionID}

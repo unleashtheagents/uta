@@ -48,6 +48,11 @@ the follow-up instructions.`,
 			if err != nil {
 				return err
 			}
+			// Accept the short ids `uta sessions` prints.
+			sessionID, err = app.Store.ResolveSessionID(sessionID)
+			if err != nil {
+				return err
+			}
 			if threadName != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"[uta] resuming active thread %q session %s\n",

@@ -182,6 +182,12 @@ func newRunCmd() *cobra.Command {
 			// a fresh run.
 			var priorOutcomes []engine.SubtaskOutcome
 			if resumeSession != "" {
+				// Accept the short ids `uta sessions` prints.
+				resolved, rerr := app.Store.ResolveSessionID(resumeSession)
+				if rerr != nil {
+					return rerr
+				}
+				resumeSession = resolved
 				recovered, info, rerr := engine.BuildResumeRunRequest(app.Store, app.Blobs, resumeSession)
 				if rerr != nil {
 					return rerr

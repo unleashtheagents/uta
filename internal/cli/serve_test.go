@@ -346,16 +346,21 @@ func TestSessionsListTool_EmptyStore(t *testing.T) {
 	}
 }
 
-// TestTrajectoryGetTool_EmptySession covers the no-events path. The
-// session_id is required — that's enforced by the schema (not the handler
-// body) so we additionally test the missing-arg behavior below.
-func TestTrajectoryGetTool_EmptySession(t *testing.T) {
+// TestTrajectoryGetTool_UnknownSession covers the bad-id path. Since
+// short-id resolution landed, an unknown session id is an explicit
+// IsError "session not found" — strictly more useful to an agent client
+// than the previous behavior of silently returning zero events for an
+// id that never existed.
+func TestTrajectoryGetTool_UnknownSession(t *testing.T) {
 	app := newServeTestApp(t)
 	srv := newServeTestServer(t, app)
 	resp := callTool(t, srv, "uta_trajectory_get", map[string]any{"session_id": "missing"})
 	tr := toolResultFrom(t, "uta_trajectory_get", resp)
-	if tr.IsError {
-		t.Fatalf("unexpected IsError=true: %+v", tr)
+	if !tr.IsError {
+		t.Fatalf("expected IsError for unknown session, got %+v", tr)
+	}
+	if len(tr.Content) == 0 || !strings.Contains(tr.Content[0].Text, "session not found") {
+		t.Fatalf("expected 'session not found' message, got %+v", tr)
 	}
 }
 

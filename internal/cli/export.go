@@ -63,7 +63,12 @@ share.`,
 				NoRedact:     noRedact,
 			}
 			if !all {
-				opts.SessionID = args[0]
+				// Accept the short ids `uta sessions` prints.
+				resolved, rerr := app.Store.ResolveSessionID(args[0])
+				if rerr != nil {
+					return rerr
+				}
+				opts.SessionID = resolved
 			}
 
 			exp, err := export.Run(app.Store, app.Blobs.Dir, opts)
