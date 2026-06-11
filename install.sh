@@ -93,5 +93,29 @@ if ! echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
   note "add this to your shell profile:"
   note "  export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
+
+# PATH-shadowing check: if `uta` already resolves to a DIFFERENT
+# executable (a conda/pip entry point from an old prototype, a stale
+# symlink, ...), typing `uta` will not run what we just installed.
+# This is the #1 "it doesn't work on my machine" failure mode, so be
+# loud and specific.
+RESOLVED="$(command -v uta 2>/dev/null || true)"
+if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_DIR/uta" ]; then
+  note ""
+  note "WARNING: 'uta' on your PATH resolves to a different executable:"
+  note "    $RESOLVED"
+  note "  which shadows the binary just installed at:"
+  note "    $INSTALL_DIR/uta"
+  if head -c 100 "$RESOLVED" 2>/dev/null | grep -q "python"; then
+    note "  The shadowing file is a Python entry point (likely an old 'uta'"
+    note "  package installed with pip/conda). Remove it with:"
+    note "    pip uninstall uta        # or: rm \"$RESOLVED\""
+  else
+    note "  Remove it, or put $INSTALL_DIR earlier in your PATH:"
+    note "    export PATH=\"$INSTALL_DIR:\$PATH\""
+  fi
+  note "  Then verify with:  command -v uta && uta --version"
+fi
+
 note ""
 note "next: uta doctor"

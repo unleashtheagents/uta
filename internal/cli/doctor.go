@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,6 +33,23 @@ func runDoctor(cmd *cobra.Command) error {
 	fmt.Fprintf(out, "uta %s\n\n", version.String())
 
 	allOK := true
+
+	// PATH-shadowing check: when `uta` on PATH is NOT the binary
+	// currently running, the user's shell will execute something else
+	// than what they think they installed — typically a stale pip/conda
+	// entry point from an old prototype, or a leftover dev symlink.
+	// That failure mode presents as "uta is broken" with errors that
+	// have nothing to do with this binary, so surface it first and
+	// loudly.
+	if self, resolved, shadowed := pathShadowCheck(); shadowed {
+		allOK = false
+		fmt.Fprintf(out, "[fail] PATH                'uta' resolves to %s\n", resolved)
+		fmt.Fprintf(out, "                           but this binary is  %s\n", self)
+		fmt.Fprintf(out, "                           remove the shadowing file (pip uninstall uta / rm it)\n")
+		fmt.Fprintf(out, "                           or put this binary's directory earlier in PATH\n")
+	} else if self != "" {
+		fmt.Fprintf(out, "[ok]   PATH                %s\n", self)
+	}
 
 	home, err := paths.Home()
 	if err != nil {
@@ -131,6 +149,36 @@ func runDoctor(cmd *cobra.Command) error {
 		return exitWith(2)
 	}
 	return nil
+}
+
+// pathShadowCheck compares the running binary's path with what `uta`
+// resolves to on PATH. Returns (selfPath, resolvedPath, shadowed).
+// Symlinks are followed on both sides so a brew Cellar binary reached
+// via /opt/homebrew/bin/uta does not count as shadowed. Resolution
+// failures (no `uta` on PATH at all — e.g. running via ./uta) are not
+// shadowing; they report shadowed=false with resolved="".
+func pathShadowCheck() (self, resolved string, shadowed bool) {
+	selfRaw, err := os.Executable()
+	if err != nil {
+		return "", "", false
+	}
+	self = evalSymlinks(selfRaw)
+	resolvedRaw, err := execLookPath("uta")
+	if err != nil {
+		return self, "", false
+	}
+	resolved = evalSymlinks(resolvedRaw)
+	return self, resolved, resolved != self
+}
+
+// evalSymlinks resolves a path fully, falling back to the input when
+// resolution fails (dangling link, permission) — the comparison then
+// happens on raw paths, which is still meaningful.
+func evalSymlinks(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
 
 func writableCheck(dir string) error {
