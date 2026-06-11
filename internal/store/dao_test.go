@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -363,4 +364,66 @@ func TestCreateSubtask_OrphanFailsFK(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected FK violation, got nil")
 	}
+}
+
+// TestResolveSessionID pins the prefix-resolution contract behind every
+// CLI surface that accepts the 8-char short ids `uta sessions` prints.
+// This was the hello-tour startup bug: step 2 printed short ids that
+// step 3 (uta trajectory <id>) rejected.
+func TestResolveSessionID(t *testing.T) {
+	s := newTestStore(t)
+	mk := func(id string) {
+		t.Helper()
+		if err := s.CreateSession(Session{
+			ID: id, Goal: "g", Worker: "w", Status: "completed", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("CreateSession(%s): %v", id, err)
+		}
+	}
+	mk("aabbccdd-1111-2222-3333-444455556666")
+	mk("aabbffff-1111-2222-3333-444455556666")
+	mk("zz99zz99-1111-2222-3333-444455556666")
+
+	t.Run("exact-match", func(t *testing.T) {
+		got, err := s.ResolveSessionID("zz99zz99-1111-2222-3333-444455556666")
+		if err != nil || got != "zz99zz99-1111-2222-3333-444455556666" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("unique-prefix", func(t *testing.T) {
+		got, err := s.ResolveSessionID("zz99")
+		if err != nil || got != "zz99zz99-1111-2222-3333-444455556666" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("short-id-8-chars", func(t *testing.T) {
+		got, err := s.ResolveSessionID("aabbccdd")
+		if err != nil || got != "aabbccdd-1111-2222-3333-444455556666" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("ambiguous-prefix", func(t *testing.T) {
+		_, err := s.ResolveSessionID("aabb")
+		if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("want ambiguous error, got %v", err)
+		}
+	})
+	t.Run("not-found", func(t *testing.T) {
+		_, err := s.ResolveSessionID("ffff")
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("want not-found error, got %v", err)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		if _, err := s.ResolveSessionID("  "); err == nil {
+			t.Fatal("want error for empty id")
+		}
+	})
+	t.Run("like-metachar-escaped", func(t *testing.T) {
+		// A % in the input must not act as a wildcard and match everything.
+		_, err := s.ResolveSessionID("%")
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("LIKE metachars must be escaped, got %v", err)
+		}
+	})
 }

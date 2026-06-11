@@ -333,7 +333,12 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		if err := json.Unmarshal(args, &p); err != nil {
 			return mcp.ArgError("%v", err)
 		}
-		events, err := app.Store.ListEvents(p.SessionID, p.Limit, p.Offset)
+		// Accept the short ids uta_sessions_list output displays.
+		sid, rerr := app.Store.ResolveSessionID(p.SessionID)
+		if rerr != nil {
+			return mcp.ErrorResult(rerr.Error())
+		}
+		events, err := app.Store.ListEvents(sid, p.Limit, p.Offset)
 		if err != nil {
 			return mcp.ErrorResult("events: " + err.Error())
 		}

@@ -47,7 +47,10 @@ the collector.`,
 			}
 			defer app.Close()
 
-			id := args[0]
+			id, err := app.Store.ResolveSessionID(args[0])
+			if err != nil {
+				return err
+			}
 			sess, err := app.Store.GetSession(id)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
