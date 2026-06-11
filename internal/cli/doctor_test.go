@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -98,5 +99,75 @@ func TestCountEntries_MissingDir(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("countEntries(missing) count = %d; want 0 on error", n)
+	}
+}
+
+// TestPathShadowCheck_DetectsForeignExecutable simulates the conda/pip
+// shadowing failure mode: `uta` on PATH resolves to a different file
+// than the running binary. The check must flag it.
+func TestPathShadowCheck_DetectsForeignExecutable(t *testing.T) {
+	dir := t.TempDir()
+	foreign := filepath.Join(dir, "uta")
+	if err := os.WriteFile(foreign, []byte("#!/usr/bin/env python3\nprint('old prototype')\n"), 0o755); err != nil {
+		t.Fatalf("write foreign shim: %v", err)
+	}
+	orig := execLookPath
+	execLookPath = func(name string) (string, error) {
+		if name == "uta" {
+			return foreign, nil
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { execLookPath = orig })
+
+	self, resolved, shadowed := pathShadowCheck()
+	if !shadowed {
+		t.Fatalf("expected shadowed=true (self=%s resolved=%s)", self, resolved)
+	}
+	if resolved != foreign && resolved != evalSymlinks(foreign) {
+		t.Errorf("resolved = %q, want the foreign shim %q", resolved, foreign)
+	}
+}
+
+// TestPathShadowCheck_SelfViaSymlinkIsNotShadowed: a symlink chain to
+// the SAME binary (the brew /opt/homebrew/bin/uta -> Cellar layout)
+// must not be reported as shadowing.
+func TestPathShadowCheck_SelfViaSymlinkIsNotShadowed(t *testing.T) {
+	selfRaw, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
+	dir := t.TempDir()
+	link := filepath.Join(dir, "uta")
+	if err := os.Symlink(selfRaw, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	orig := execLookPath
+	execLookPath = func(name string) (string, error) {
+		if name == "uta" {
+			return link, nil
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { execLookPath = orig })
+
+	self, resolved, shadowed := pathShadowCheck()
+	if shadowed {
+		t.Errorf("symlink to self flagged as shadowed (self=%s resolved=%s)", self, resolved)
+	}
+}
+
+// TestPathShadowCheck_NoUtaOnPath: running via ./uta with nothing on
+// PATH is not shadowing.
+func TestPathShadowCheck_NoUtaOnPath(t *testing.T) {
+	orig := execLookPath
+	execLookPath = func(name string) (string, error) {
+		return "", exec.ErrNotFound
+	}
+	t.Cleanup(func() { execLookPath = orig })
+
+	_, resolved, shadowed := pathShadowCheck()
+	if shadowed || resolved != "" {
+		t.Errorf("no uta on PATH must not shadow (resolved=%q shadowed=%v)", resolved, shadowed)
 	}
 }
