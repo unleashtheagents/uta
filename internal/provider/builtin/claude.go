@@ -20,7 +20,9 @@ import (
 // Claude is the Claude Code provider (the `claude` CLI from Anthropic).
 //
 // Invocation:  claude -p --output-format stream-json --verbose [--resume <id>]
-//              [--allowedTools ...] [--add-dir <workdir>]
+//
+//	[--allowedTools ...] [--add-dir <workdir>]
+//
 // Prompt is fed via stdin (avoids argv length and quoting bugs).
 type Claude struct {
 	pathOnce sync.Once
@@ -88,7 +90,11 @@ func (c *Claude) ResumeHeadless(ctx context.Context, sessionID, prompt string, o
 	return c.runHeadless(ctx, prompt, sessionID, opts, events)
 }
 
-func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+// buildClaudeArgs renders the argv claude is invoked with for one turn. It
+// is split out of runHeadless so unit tests can lock in the order in which
+// flags (resume, allowedTools, mcp-config, add-dir, extras) are emitted
+// without having to spawn the binary.
+func buildClaudeArgs(opts provider.RunOptions, resumeID string) []string {
 	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if resumeID != "" {
 		args = append(args, "--resume", resumeID)
@@ -96,10 +102,18 @@ func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 	if len(opts.PreApproveTools) > 0 {
 		args = append(args, "--allowedTools", strings.Join(opts.PreApproveTools, ","))
 	}
+	if opts.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", opts.MCPConfigPath)
+	}
 	if opts.Workdir != "" {
 		args = append(args, "--add-dir", opts.Workdir)
 	}
 	args = append(args, opts.ExtraArgs...)
+	return args
+}
+
+func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+	args := buildClaudeArgs(opts, resumeID)
 
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -134,17 +148,26 @@ func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 		return provider.RunResult{}, fmt.Errorf("claude start: %w: %v", provider.ErrTransport, err)
 	}
 
-	// Feed prompt and close stdin so claude knows we're done.
+	// Feed prompt and close stdin so claude knows we're done. The write
+	// error (if any) is surfaced via stdinErrCh and inspected after
+	// cmd.Wait so a truncated prompt fails fast instead of letting the
+	// model respond to half a question.
+	stdinErrCh := make(chan error, 1)
 	go func() {
-		_, _ = io.WriteString(stdin, prompt)
-		_ = stdin.Close()
+		_, werr := io.WriteString(stdin, prompt)
+		cerr := stdin.Close()
+		if werr == nil {
+			werr = cerr
+		}
+		stdinErrCh <- werr
 	}()
 
 	var (
-		rawBuf      bytes.Buffer
-		rawMu       sync.Mutex
-		sessionID   string
-		finalText   string
+		rawBuf    bytes.Buffer
+		rawMu     sync.Mutex
+		sessionID string
+		finalText string
+		usage     claudeUsage
 	)
 	tee := io.TeeReader(stdout, &lockedWriter{mu: &rawMu, w: &rawBuf})
 
@@ -155,13 +178,14 @@ func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		sid, finalChunk := parseClaudeLine(line, events)
+		sid, finalChunk, u := parseClaudeLine(line, events)
 		if sid != "" {
 			sessionID = sid
 		}
 		if finalChunk != "" {
 			finalText = finalChunk
 		}
+		usage.merge(u)
 	}
 	scanErr := scanner.Err()
 
@@ -170,12 +194,16 @@ func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 	if exitErr, ok := waitErr.(*exec.ExitError); ok {
 		exit = exitErr.ExitCode()
 	}
+	stdinErr := <-stdinErrCh
 
 	result := provider.RunResult{
-		SessionID: sessionID,
-		FinalText: finalText,
-		RawOutput: rawBuf.Bytes(),
-		ExitCode:  exit,
+		SessionID:      sessionID,
+		FinalText:      finalText,
+		RawOutput:      rawBuf.Bytes(),
+		ExitCode:       exit,
+		TokensIn:       usage.tokensIn,
+		TokensOut:      usage.tokensOut,
+		ApproxUSDCents: usage.usdCents,
 	}
 
 	if waitErr != nil {
@@ -214,19 +242,55 @@ func (c *Claude) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 	if scanErr != nil {
 		return result, fmt.Errorf("claude stream parse: %w: %v", provider.ErrTransport, scanErr)
 	}
+	if stdinErr != nil {
+		return result, fmt.Errorf("claude stdin write: %w: %v", provider.ErrTransport, stdinErr)
+	}
 	return result, nil
 }
 
+// claudeUsage accumulates token + dollar usage observed across a stream.
+// The supervisor charges these to the run budget. We prefer the result
+// envelope's totals (claude emits them at end-of-stream) and fall back to
+// per-message usage blocks when the result envelope is missing.
+type claudeUsage struct {
+	tokensIn       int64
+	tokensOut      int64
+	usdCents       int64
+	gotResultTotal bool // result envelope has authoritative totals
+}
+
+// merge folds an incremental usage observation into the running total.
+// The result envelope, when present, replaces token totals (it aggregates
+// every turn); per-message usages accumulate before that, then are ignored
+// once a result envelope arrives. Dollar cost only appears on the result
+// envelope so a single assignment is sufficient.
+func (u *claudeUsage) merge(o claudeUsage) {
+	if o.gotResultTotal {
+		u.tokensIn = o.tokensIn
+		u.tokensOut = o.tokensOut
+		u.usdCents = o.usdCents
+		u.gotResultTotal = true
+		return
+	}
+	if u.gotResultTotal {
+		return
+	}
+	u.tokensIn += o.tokensIn
+	u.tokensOut += o.tokensOut
+}
+
 // parseClaudeLine decodes one stream-json line and emits the corresponding
-// uta events. It returns (sessionID, finalText) extracted from system-init
-// and result envelopes.
-func parseClaudeLine(line []byte, events chan<- provider.Event) (string, string) {
+// uta events. It returns (sessionID, finalText, usage) extracted from
+// system-init, assistant message, and result envelopes.
+func parseClaudeLine(line []byte, events chan<- provider.Event) (string, string, claudeUsage) {
 	var env struct {
-		Type    string          `json:"type"`
-		Subtype string          `json:"subtype,omitempty"`
-		Session string          `json:"session_id,omitempty"`
-		Result  string          `json:"result,omitempty"`
-		Message json.RawMessage `json:"message,omitempty"`
+		Type         string           `json:"type"`
+		Subtype      string           `json:"subtype,omitempty"`
+		Session      string           `json:"session_id,omitempty"`
+		Result       string           `json:"result,omitempty"`
+		Message      json.RawMessage  `json:"message,omitempty"`
+		Usage        *claudeUsageJSON `json:"usage,omitempty"`
+		TotalCostUSD *float64         `json:"total_cost_usd,omitempty"`
 	}
 	if err := json.Unmarshal(line, &env); err != nil {
 		// Not parseable — emit as opaque stdout chunk.
@@ -235,7 +299,7 @@ func parseClaudeLine(line []byte, events chan<- provider.Event) (string, string)
 			Timestamp: time.Now(),
 			Payload:   json.RawMessage(line),
 		})
-		return "", ""
+		return "", "", claudeUsage{}
 	}
 	switch env.Type {
 	case "system":
@@ -246,18 +310,73 @@ func parseClaudeLine(line []byte, events chan<- provider.Event) (string, string)
 				Timestamp: time.Now(),
 				Payload:   payload,
 			})
-			return env.Session, ""
+			return env.Session, "", claudeUsage{}
 		}
 	case "assistant":
 		emitClaudeMessage(env.Message, events, false)
+		return "", "", usageFromMessage(env.Message)
 	case "user":
 		emitClaudeMessage(env.Message, events, true)
 	case "result":
-		if env.Session != "" || env.Result != "" {
-			return env.Session, env.Result
+		u := claudeUsage{gotResultTotal: true}
+		if env.Usage != nil {
+			u.tokensIn = env.Usage.totalInputTokens()
+			u.tokensOut = int64(env.Usage.OutputTokens)
 		}
+		if env.TotalCostUSD != nil {
+			// 1¢ rounding: cap at 100,000,000 to stay int64-safe.
+			cents := *env.TotalCostUSD * 100
+			if cents > 0 {
+				u.usdCents = int64(cents + 0.5)
+			}
+		}
+		if env.Session != "" || env.Result != "" {
+			return env.Session, env.Result, u
+		}
+		return "", "", u
 	}
-	return "", ""
+	return "", "", claudeUsage{}
+}
+
+// claudeUsageJSON mirrors the shape of the `usage` object claude emits on
+// assistant messages and on the result envelope. Field names match the CLI
+// output verbatim; missing fields decode as zero.
+type claudeUsageJSON struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// totalInputTokens sums fresh + cache-creation + cache-read input tokens so
+// the budget reflects what was actually billed. Cache reads are charged at
+// a discount upstream, but for a hard ceiling we count them in full —
+// accidentally over-budgeting is preferable to silently under-counting.
+func (u *claudeUsageJSON) totalInputTokens() int64 {
+	if u == nil {
+		return 0
+	}
+	return int64(u.InputTokens) + int64(u.CacheCreationInputTokens) + int64(u.CacheReadInputTokens)
+}
+
+// usageFromMessage extracts the usage block from an assistant message. The
+// claude CLI nests it inside the message envelope:
+//
+//	{"type":"assistant","message":{"id":"...","usage":{"input_tokens":N,...}}}
+func usageFromMessage(msg json.RawMessage) claudeUsage {
+	if len(msg) == 0 {
+		return claudeUsage{}
+	}
+	var m struct {
+		Usage *claudeUsageJSON `json:"usage,omitempty"`
+	}
+	if err := json.Unmarshal(msg, &m); err != nil || m.Usage == nil {
+		return claudeUsage{}
+	}
+	return claudeUsage{
+		tokensIn:  m.Usage.totalInputTokens(),
+		tokensOut: int64(m.Usage.OutputTokens),
+	}
 }
 
 func emitClaudeMessage(msg json.RawMessage, events chan<- provider.Event, isUser bool) {
@@ -310,4 +429,3 @@ func emitClaudeMessage(msg json.RawMessage, events chan<- provider.Event, isUser
 		}
 	}
 }
-

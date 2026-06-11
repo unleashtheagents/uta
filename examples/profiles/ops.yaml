@@ -1,0 +1,83 @@
+# examples/profiles/ops.yaml — the "ops" MissionProfile.
+#
+# Wires the chief-of-staff + comms personas to external MCP servers
+# (Gmail + a CMS in this iter). When --mode ops is active, uta probes
+# each server during run startup, lists its tools, and pre-approves
+# them by adding "mcp__<server>__<tool>" patterns to claude's
+# --allowedTools.
+#
+# Prerequisites for the Gmail entry below:
+#   - UTA_OPS_GMAIL_OAUTH must point at a file containing the OAuth
+#     credentials @modelcontextprotocol/server-gmail expects.
+#
+# uta synthesizes a `.mcp.json` from the entries below and passes it to
+# claude via `--mcp-config`, so you do NOT need to maintain a parallel
+# workdir/.mcp.json by hand — the worker sees exactly the same set of
+# servers uta probed at run start.
+#
+# CMS write-side (iter 4): pick one of "wordpress" or "ghost" and set
+# UTA_OPS_CMS to that value to declare which target the comms persona
+# is drafting to. Then populate the matching connection env vars
+# (UTA_OPS_WORDPRESS_URL / UTA_OPS_WORDPRESS_USER /
+# UTA_OPS_WORDPRESS_APP_PASSWORD, or UTA_OPS_GHOST_URL /
+# UTA_OPS_GHOST_ADMIN_KEY). The unused server probe fails cleanly and
+# leaves the other CMS operational — see internal/engine/mcp_tool_bridge.go.
+#
+# Drop a copy under ~/.uta/profiles/ to make it user-wide, or under
+# <project>/.uta/profiles/ to make it project-local.
+
+name: ops
+description: |
+  Operational mode for inbox/agenda triage and news publishing. Pulls in
+  chief-of-staff + comms personas, exposes Gmail tools, and adds a CMS
+  write-side (WordPress or Ghost, chosen via UTA_OPS_CMS) so the comms
+  agent can stage draft posts. HITL fires on any medium-or-higher action
+  so a worker can't auto-publish unsupervised.
+
+personas:
+  - chief-of-staff
+  - comms-agent
+
+allowed_tools: []
+denied_tools: []
+env: {}
+
+policies:
+  hitl_severity: medium
+  token_budget: 0
+  per_call_budget: 0
+
+mcp_servers:
+  - name: gmail
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-gmail"
+    env:
+      GMAIL_OAUTH_PATH: "${UTA_OPS_GMAIL_OAUTH}"
+
+  # WordPress write-side. Active when UTA_OPS_CMS=wordpress and the
+  # UTA_OPS_WORDPRESS_* env vars are set. The persona charter restricts
+  # this to DRAFT posts only — see examples/personas/comms-agent.yaml.
+  - name: wordpress
+    command: npx
+    args:
+      - "-y"
+      - "@automattic/mcp-wordpress-remote"
+    env:
+      WORDPRESS_API_URL: "${UTA_OPS_WORDPRESS_URL}"
+      WORDPRESS_USERNAME: "${UTA_OPS_WORDPRESS_USER}"
+      WORDPRESS_APP_PASSWORD: "${UTA_OPS_WORDPRESS_APP_PASSWORD}"
+      UTA_OPS_CMS: "${UTA_OPS_CMS}"
+
+  # Ghost write-side. Active when UTA_OPS_CMS=ghost and the
+  # UTA_OPS_GHOST_* env vars are set. Same draft-only charter applies.
+  - name: ghost
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-ghost"
+    env:
+      GHOST_API_URL: "${UTA_OPS_GHOST_URL}"
+      GHOST_ADMIN_API_KEY: "${UTA_OPS_GHOST_ADMIN_KEY}"
+      UTA_OPS_CMS: "${UTA_OPS_CMS}"

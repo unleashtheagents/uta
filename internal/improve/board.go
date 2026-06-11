@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -284,8 +285,22 @@ func scanIdea(s scanner) (*Idea, error) {
 	}
 	idea.CreatedAt = time.Unix(0, createdNs)
 	idea.UpdatedAt = time.Unix(0, updatedNs)
-	_ = json.Unmarshal([]byte(tags), &idea.Tags)
-	_ = json.Unmarshal([]byte(meta), &idea.Meta)
+	if tags != "" {
+		if err := json.Unmarshal([]byte(tags), &idea.Tags); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[uta improve] warning: corrupt tags_json for idea %q (%v); treating as empty\n",
+				idea.ID, err)
+			idea.Tags = nil
+		}
+	}
+	if meta != "" {
+		if err := json.Unmarshal([]byte(meta), &idea.Meta); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[uta improve] warning: corrupt meta_json for idea %q (%v); treating as empty\n",
+				idea.ID, err)
+			idea.Meta = nil
+		}
+	}
 	if idea.Meta == nil {
 		idea.Meta = map[string]any{}
 	}

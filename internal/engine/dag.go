@@ -255,12 +255,12 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 			evKind = trajectory.GatePassed
 		}
 		s.emit(sessionID, subtaskID, evKind, map[string]any{
-			"cmd":          spec.Gate.Cmd,
-			"exit":         gateRes.ExitCode,
-			"duration_ms":  gateRes.Duration.Milliseconds(),
-			"stdout_tail":  Truncate(gateRes.Stdout, 2000),
-			"stderr_tail":  Truncate(gateRes.Stderr, 2000),
-			"err":          errString(gateRes.Err),
+			"cmd":         spec.Gate.Cmd,
+			"exit":        gateRes.ExitCode,
+			"duration_ms": gateRes.Duration.Milliseconds(),
+			"stdout_tail": Truncate(gateRes.Stdout, 2000),
+			"stderr_tail": Truncate(gateRes.Stderr, 2000),
+			"err":         errString(gateRes.Err),
 		})
 
 		if gateRes.Passed() {
@@ -284,7 +284,7 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 	}
 
 	if lastErr != nil {
-		kind := classifyError(lastErr)
+		kind := classifyError(lastErr, ctx)
 		s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"spec_id": spec.ID, "error": lastErr.Error(), "kind": kind,
 		})

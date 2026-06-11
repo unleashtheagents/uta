@@ -376,6 +376,43 @@ func TestValidate_DuplicateSubtaskID(t *testing.T) {
 	}
 }
 
+func TestValidate_SubtaskIDCharset(t *testing.T) {
+	cases := []struct {
+		id      string
+		wantErr bool
+	}{
+		{"build", false},
+		{"build-1", false},
+		{"build_1", false},
+		{"build.1", false},
+		{"Build-1.x_y", false},
+		{"", false}, // empty id is allowed; validator only checks non-empty IDs
+		{"build 1", true},
+		{"build/1", true},
+		{"build:1", true},
+		{"build$1", true},
+		{"build;rm -rf", true},
+		{strings.Repeat("a", 65), true},
+	}
+	for _, c := range cases {
+		wf := &Workflow{
+			Goal:     "g",
+			Defaults: WorkflowDefaults{Worker: "claude"},
+			Subtasks: []WorkflowSubtask{{ID: c.id, Prompt: "p"}},
+		}
+		err := wf.Validate()
+		if c.wantErr && err == nil {
+			t.Errorf("id=%q: want error, got nil", c.id)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("id=%q: unexpected error: %v", c.id, err)
+		}
+		if c.wantErr && err != nil && !strings.Contains(err.Error(), "invalid id") {
+			t.Errorf("id=%q: want 'invalid id' in error, got: %v", c.id, err)
+		}
+	}
+}
+
 func TestValidate_GateCmdRequiredWhenGateSet(t *testing.T) {
 	wf := &Workflow{
 		Goal:     "g",

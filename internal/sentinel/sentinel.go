@@ -63,6 +63,13 @@ type Config struct {
 	// reasonable list if nil.
 	SensitivePathSubstrings []string
 
+	// CapabilityDenyThreshold + CapabilityDenyWindow control the
+	// "agent is probing edges of its sandbox" rule: when the trailing
+	// CapabilityDenyWindow events contain at least CapabilityDenyThreshold
+	// capability_gate_denied events, raise a warn alert. Defaults: 3 in 10.
+	CapabilityDenyThreshold int
+	CapabilityDenyWindow    int
+
 	// Cancel is the hook invoked when a critical alert fires. If nil, the
 	// alert is published but the run is allowed to continue.
 	Cancel context.CancelFunc
@@ -86,6 +93,7 @@ type Sentinel struct {
 	mu             sync.Mutex
 	recentTools    []string
 	recentEventLog []string // kinds, capped at ErrorRateWindow
+	recentAllKinds []string // kinds of every event, capped at CapabilityDenyWindow
 	sessionID      string   // bound at Watch() start
 
 	subs   []chan Alert
@@ -105,6 +113,12 @@ func NewSentinel(cfg Config) *Sentinel {
 	}
 	if cfg.SensitivePathSubstrings == nil {
 		cfg.SensitivePathSubstrings = DefaultSensitivePaths
+	}
+	if cfg.CapabilityDenyThreshold <= 0 {
+		cfg.CapabilityDenyThreshold = 3
+	}
+	if cfg.CapabilityDenyWindow <= 0 {
+		cfg.CapabilityDenyWindow = 10
 	}
 	return &Sentinel{cfg: cfg, startedAt: time.Now()}
 }
@@ -221,6 +235,37 @@ func (s *Sentinel) process(ev trajectory.Event) {
 		}
 	}
 
+	// 3a. Capability-gate probing: window over recent events, count
+	// capability_gate_denied entries. Ignore SentinelAlert events to keep
+	// the sentinel's own publishes from skewing the window.
+	if ev.Kind != trajectory.SentinelAlert {
+		s.mu.Lock()
+		s.recentAllKinds = append(s.recentAllKinds, string(ev.Kind))
+		if len(s.recentAllKinds) > s.cfg.CapabilityDenyWindow {
+			s.recentAllKinds = s.recentAllKinds[len(s.recentAllKinds)-s.cfg.CapabilityDenyWindow:]
+		}
+		denyCount := 0
+		for _, k := range s.recentAllKinds {
+			if k == string(trajectory.CapabilityGateDenied) {
+				denyCount++
+			}
+		}
+		s.mu.Unlock()
+		if ev.Kind == trajectory.CapabilityGateDenied && denyCount >= s.cfg.CapabilityDenyThreshold {
+			s.fire(Alert{
+				Rule:     "capability_gate_probing",
+				Severity: "warn",
+				Message: fmt.Sprintf(
+					"%d capability-gate denials in the last %d events — agent may be probing sandbox edges",
+					denyCount, s.cfg.CapabilityDenyWindow),
+				Context: map[string]any{
+					"denials": denyCount,
+					"window":  s.cfg.CapabilityDenyWindow,
+				},
+			})
+		}
+	}
+
 	// 3. Sensitive-path heuristic on tool_call/tool_result payloads.
 	if ev.Kind == trajectory.SubtaskToolCall || ev.Kind == trajectory.SubtaskToolResult {
 		payload := string(ev.Payload)
@@ -320,4 +365,3 @@ func isErrorEvent(k trajectory.Kind) bool {
 func isErrorEventKind(k string) bool {
 	return strings.HasSuffix(k, "_failed") || k == "plan_fallback" || k == "run_failed"
 }
-

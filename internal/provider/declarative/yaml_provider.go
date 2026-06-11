@@ -99,22 +99,47 @@ func (p *Provider) ResumeHeadless(ctx context.Context, sessionID, prompt string,
 	return p.run(ctx, prompt, sessionID, opts, events)
 }
 
-func (p *Provider) run(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+// renderArgv builds the full argv for one invocation. Split out of run() so
+// unit tests can lock in the ordering rules (base/resume argv → mcp_config
+// argv → caller's ExtraArgs) without having to actually spawn a process.
+func (p *Provider) renderArgv(prompt, resumeID string, opts provider.RunOptions) []string {
 	vars := map[string]string{
 		"prompt":        prompt,
 		"session_id":    resumeID,
 		"output_format": p.desc.Output.Format,
 		"workdir":       opts.Workdir,
+		"mcp_config":    opts.MCPConfigPath,
 	}
 	argv := p.desc.Invocation.Argv
 	if resumeID != "" {
 		argv = p.desc.Invocation.ResumeArgv
 	}
-	rendered := make([]string, 0, len(argv))
+	rendered := make([]string, 0, len(argv)+len(p.desc.Invocation.MCPConfigArgv)+len(opts.ExtraArgs))
 	for _, a := range argv {
 		rendered = append(rendered, substitute(a, vars))
 	}
+	// Append the MCP-config argv only when the engine actually materialized
+	// a config for this run AND the descriptor declared a flag shape for it.
+	// Anything else would either inject an empty arg or rewrite a literal
+	// "{{mcp_config}}" into "" in the middle of the command line.
+	if opts.MCPConfigPath != "" && len(p.desc.Invocation.MCPConfigArgv) > 0 {
+		for _, a := range p.desc.Invocation.MCPConfigArgv {
+			rendered = append(rendered, substitute(a, vars))
+		}
+	}
 	rendered = append(rendered, opts.ExtraArgs...)
+	return rendered
+}
+
+func (p *Provider) run(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+	rendered := p.renderArgv(prompt, resumeID, opts)
+	vars := map[string]string{
+		"prompt":        prompt,
+		"session_id":    resumeID,
+		"output_format": p.desc.Output.Format,
+		"workdir":       opts.Workdir,
+		"mcp_config":    opts.MCPConfigPath,
+	}
 
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -133,17 +158,25 @@ func (p *Provider) run(ctx context.Context, prompt, resumeID string, opts provid
 	env = append(env, opts.Env...)
 	cmd.Env = env
 
-	var stdinPiped bool
+	// stdinErrCh is buffered so the writer goroutine never blocks even when
+	// no stdin pipe is wired up (the empty-prompt path below sends nil so
+	// the receive after cmd.Wait still resolves cleanly).
+	stdinErrCh := make(chan error, 1)
 	if p.desc.Invocation.Stdin != "" {
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
 			return provider.RunResult{}, fmt.Errorf("stdin pipe: %w", provider.ErrTransport)
 		}
-		stdinPiped = true
 		go func() {
-			_, _ = io.WriteString(stdin, substitute(p.desc.Invocation.Stdin, vars))
-			_ = stdin.Close()
+			_, werr := io.WriteString(stdin, substitute(p.desc.Invocation.Stdin, vars))
+			cerr := stdin.Close()
+			if werr == nil {
+				werr = cerr
+			}
+			stdinErrCh <- werr
 		}()
+	} else {
+		stdinErrCh <- nil
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -182,8 +215,7 @@ func (p *Provider) run(ctx context.Context, prompt, resumeID string, opts provid
 	if exitErr, ok := waitErr.(*exec.ExitError); ok {
 		exit = exitErr.ExitCode()
 	}
-
-	_ = stdinPiped
+	stdinErr := <-stdinErrCh
 
 	result := provider.RunResult{
 		SessionID: sessionID,
@@ -211,6 +243,9 @@ func (p *Provider) run(ctx context.Context, prompt, resumeID string, opts provid
 		default:
 			return result, fmt.Errorf("%s: %w: %v: %s", p.desc.Name, provider.ErrTransport, waitErr, stderr)
 		}
+	}
+	if stdinErr != nil {
+		return result, fmt.Errorf("%s stdin write: %w: %v", p.desc.Name, provider.ErrTransport, stdinErr)
 	}
 	return result, nil
 }

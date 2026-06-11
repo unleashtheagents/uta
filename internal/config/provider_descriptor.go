@@ -37,21 +37,30 @@ type ProviderDescriptorDetect struct {
 }
 
 type ProviderDescriptorInvocation struct {
-	Argv       []string          `yaml:"argv"`        // template strings with {{prompt}}, {{output_format}}, {{workdir}}
-	Stdin      string            `yaml:"stdin"`       // optional; if non-empty, prompt is fed via stdin (template)
-	ResumeArgv []string          `yaml:"resume_argv"` // optional; presence implies the provider supports resume
-	Env        map[string]string `yaml:"env"`
+	Argv       []string `yaml:"argv"`        // template strings with {{prompt}}, {{output_format}}, {{workdir}}
+	Stdin      string   `yaml:"stdin"`       // optional; if non-empty, prompt is fed via stdin (template)
+	ResumeArgv []string `yaml:"resume_argv"` // optional; presence implies the provider supports resume
+	// MCPConfigArgv is appended to the final argv only when the engine has
+	// materialized an MCP config file for this run (opts.MCPConfigPath
+	// non-empty). Use the {{mcp_config}} template var to interpolate the
+	// path — e.g. ["--mcp-config", "{{mcp_config}}"]. Empty means the
+	// provider has no per-invocation MCP flag, so the bridge's config path
+	// is dropped on the floor for this provider (which is the right call
+	// when the underlying CLI ingests MCP servers from its own user
+	// config rather than from a CLI flag).
+	MCPConfigArgv []string          `yaml:"mcp_config_argv"`
+	Env           map[string]string `yaml:"env"`
 }
 
 type ProviderDescriptorOutput struct {
 	// Format is "stream-json" or "text". stream-json: each stdout line is a
 	// JSON object; uta extracts SessionIDField and FinalTextField when found.
 	// text: stdout is captured verbatim as the final answer.
-	Format          string            `yaml:"format"`
-	SessionIDField  string            `yaml:"session_id_field"`
-	FinalTextField  string            `yaml:"final_text_field"`
-	TextField       string            `yaml:"text_field"` // field within message blocks that holds assistant text; default "text"
-	EventDispatch   map[string]string `yaml:"event_dispatch"`
+	Format         string            `yaml:"format"`
+	SessionIDField string            `yaml:"session_id_field"`
+	FinalTextField string            `yaml:"final_text_field"`
+	TextField      string            `yaml:"text_field"` // field within message blocks that holds assistant text; default "text"
+	EventDispatch  map[string]string `yaml:"event_dispatch"`
 }
 
 // LoadProvidersDir scans dir for *.yaml descriptors and returns the parsed list.

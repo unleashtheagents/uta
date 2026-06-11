@@ -26,26 +26,59 @@ func (g *GateResult) Passed() bool { return g.Err == nil && g.ExitCode == 0 }
 // CombinedOutputTail returns up to maxBytes from the end of stdout/stderr
 // concatenated, suitable for feeding back to the producer agent on retry.
 func (g *GateResult) CombinedOutputTail(maxBytes int) string {
+	const (
+		stdoutHdr   = "--- stdout ---\n"
+		stderrHdr   = "--- stderr ---\n"
+		truncMarker = "...[truncated]...\n"
+	)
+
+	// Assemble the ordered list of chunks once so we can both size the
+	// Builder and, if truncating, skip the prefix that would be discarded.
+	var chunks [6]string
+	n := 0
+	total := 0
+	addSection := func(hdr, body string) {
+		if body == "" {
+			return
+		}
+		chunks[n] = hdr
+		total += len(hdr)
+		n++
+		chunks[n] = body
+		total += len(body)
+		n++
+		if body[len(body)-1] != '\n' {
+			chunks[n] = "\n"
+			total++
+			n++
+		}
+	}
+	addSection(stdoutHdr, g.Stdout)
+	addSection(stderrHdr, g.Stderr)
+
+	if maxBytes > 0 && total > maxBytes {
+		var b strings.Builder
+		b.Grow(len(truncMarker) + maxBytes)
+		b.WriteString(truncMarker)
+		skip := total - maxBytes
+		for i := 0; i < n; i++ {
+			c := chunks[i]
+			if skip >= len(c) {
+				skip -= len(c)
+				continue
+			}
+			b.WriteString(c[skip:])
+			skip = 0
+		}
+		return b.String()
+	}
+
 	var b strings.Builder
-	if g.Stdout != "" {
-		b.WriteString("--- stdout ---\n")
-		b.WriteString(g.Stdout)
-		if g.Stdout[len(g.Stdout)-1] != '\n' {
-			b.WriteByte('\n')
-		}
+	b.Grow(total)
+	for i := 0; i < n; i++ {
+		b.WriteString(chunks[i])
 	}
-	if g.Stderr != "" {
-		b.WriteString("--- stderr ---\n")
-		b.WriteString(g.Stderr)
-		if g.Stderr[len(g.Stderr)-1] != '\n' {
-			b.WriteByte('\n')
-		}
-	}
-	out := b.String()
-	if maxBytes > 0 && len(out) > maxBytes {
-		out = "...[truncated]...\n" + out[len(out)-maxBytes:]
-	}
-	return out
+	return b.String()
 }
 
 // runGate executes the gate's shell command in workdir with the supplied

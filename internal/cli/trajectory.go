@@ -1,27 +1,45 @@
 package cli
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/unleashtheagents/uta/internal/otel"
 	"github.com/unleashtheagents/uta/internal/store"
 )
 
 func newTrajectoryCmd() *cobra.Command {
 	var (
-		format string
-		limit  int
-		offset int
+		format       string
+		limit        int
+		offset       int
+		otlpEndpoint string
 	)
 	cmd := &cobra.Command{
 		Use:   "trajectory <session-id>",
 		Short: "render the event timeline of a run",
-		Args:  cobra.ExactArgs(1),
+		Long: `Render the recorded trajectory of one session.
+
+Formats:
+  pretty   human-readable timeline (default)
+  jsonl    one event per line
+  json     full event array
+  otlp     OpenTelemetry trace (OTLP/JSON, GenAI semantic conventions) —
+           pipe to a file or POST straight to a collector with
+           --otlp-endpoint http://localhost:4318
+
+The OTLP trace has deterministic ids (derived from session/subtask ids)
+so re-exporting the same session updates rather than duplicates it in
+the collector.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {
@@ -42,17 +60,35 @@ func newTrajectoryCmd() *cobra.Command {
 				return err
 			}
 
+			if otlpEndpoint != "" && format != "otlp" {
+				return errors.New("--otlp-endpoint requires --format otlp")
+			}
+
 			switch format {
 			case "jsonl":
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				for _, ev := range events {
-					_ = enc.Encode(ev)
+					if err := enc.Encode(ev); err != nil {
+						return err
+					}
 				}
 				return nil
 			case "json":
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(events)
+			case "otlp":
+				subtasks, err := app.Store.SubtaskListBySession(id, 0, 0)
+				if err != nil {
+					return err
+				}
+				trace := otel.BuildTrace(sess, subtasks, events)
+				if otlpEndpoint != "" {
+					return pushOTLP(cmd, otlpEndpoint, trace)
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(trace)
 			case "pretty", "":
 				return prettyPrintTrajectory(cmd.OutOrStdout(), sess, events)
 			default:
@@ -60,10 +96,48 @@ func newTrajectoryCmd() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVar(&format, "format", "pretty", "output format: pretty|jsonl|json")
+	cmd.Flags().StringVar(&format, "format", "pretty", "output format: pretty|jsonl|json|otlp")
 	cmd.Flags().IntVar(&limit, "limit", 0, "max events to return (0 for all)")
 	cmd.Flags().IntVar(&offset, "offset", 0, "events to skip before returning results")
+	cmd.Flags().StringVar(&otlpEndpoint, "otlp-endpoint", "", "POST the OTLP trace to this collector base URL (e.g. http://localhost:4318); requires --format otlp")
 	return cmd
+}
+
+// pushOTLP POSTs the trace to <endpoint>/v1/traces per the OTLP/HTTP
+// spec. Accepts a base URL or a full /v1/traces URL — both work, so
+// copy-pasted collector addresses don't trip people up.
+func pushOTLP(cmd *cobra.Command, endpoint string, trace otel.ExportTraceServiceRequest) error {
+	url := strings.TrimRight(endpoint, "/")
+	if !strings.HasSuffix(url, "/v1/traces") {
+		url += "/v1/traces"
+	}
+	body, err := json.Marshal(trace)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("push OTLP: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(resp.Body)
+		return fmt.Errorf("push OTLP: collector returned HTTP %d: %s", resp.StatusCode, truncateLine(buf.String(), 200))
+	}
+	spanCount := 0
+	for _, rs := range trace.ResourceSpans {
+		for _, ss := range rs.ScopeSpans {
+			spanCount += len(ss.Spans)
+		}
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "pushed %d span(s) to %s\n", spanCount, url)
+	return nil
 }
 
 func prettyPrintTrajectory(w interface{ Write([]byte) (int, error) }, sess store.Session, events []store.EventRow) error {

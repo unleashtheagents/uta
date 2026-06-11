@@ -15,8 +15,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/memory"
+	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/sentinel"
 	"github.com/unleashtheagents/uta/internal/trajectory"
+	"github.com/unleashtheagents/uta/internal/whiteboard"
 )
 
 // resolvePersonas merges engine.BuiltinPersonas with any user-defined personas
@@ -44,26 +47,26 @@ func resolvePersonas(app *App) map[string]engine.CriticSpec {
 
 func newAuditCmd() *cobra.Command {
 	var (
-		critics        []string
-		iter           int
-		stopWhen       string
-		fix            bool
-		extraTools     []string
-		postGate       string
-		toolsOnly      bool
-		worker         string
-		fileFlag       string
-		workdir        string
-		criticTimeout  time.Duration
-		toolTimeout    time.Duration
-		reviseTimeout  time.Duration
-		runTimeout     time.Duration
-		budgetTime     time.Duration
-		preApprove     []string
-		printJSONL     bool
-		outputJSON     string
-		outputSARIF    string
-		listPersonas   bool
+		critics       []string
+		iter          int
+		stopWhen      string
+		fix           bool
+		extraTools    []string
+		postGate      string
+		toolsOnly     bool
+		worker        string
+		fileFlag      string
+		workdir       string
+		criticTimeout time.Duration
+		toolTimeout   time.Duration
+		reviseTimeout time.Duration
+		runTimeout    time.Duration
+		budgetTime    time.Duration
+		preApprove    []string
+		printJSONL    bool
+		outputJSON    string
+		outputSARIF   string
+		listPersonas  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "audit [path]",
@@ -109,8 +112,14 @@ your own workflow YAML and using 'uta run -f' instead.`,
 			if err != nil {
 				return fmt.Errorf("audit target: %w", err)
 			}
-			if !st.IsDir() {
-				return fmt.Errorf("audit target must be a directory: %s", absPath)
+			// targetDir is the directory the auditor agents see as their
+			// workdir. When the user passes a single contract file (e.g.
+			// `uta audit ./Token.sol`) we audit its containing directory
+			// and surface the file path via the UTA_AUDIT_FILE env var.
+			targetDir := absPath
+			isFileTarget := !st.IsDir()
+			if isFileTarget {
+				targetDir = filepath.Dir(absPath)
 			}
 
 			app, err := newApp(cmd.Context())
@@ -119,6 +128,18 @@ your own workflow YAML and using 'uta run -f' instead.`,
 			}
 			defer app.Close()
 
+			mode, err := resolveActiveMode(cmd, app)
+			if err != nil {
+				return err
+			}
+			// When --mode is set and the user did not pass --critic, the
+			// profile's personas become the critic list. This matches the
+			// "lets users override personas without rewriting flags"
+			// behavior the audit profile is designed for.
+			if len(critics) == 0 && mode != nil && len(mode.Personas) > 0 {
+				critics = mode.Personas
+			}
+
 			selected, err := resolveCritics(app, critics)
 			if err != nil {
 				return err
@@ -126,7 +147,19 @@ your own workflow YAML and using 'uta run -f' instead.`,
 			if toolsOnly {
 				selected = nil
 			}
+			if mode != nil && app.InProject() {
+				selected, err = applyVibeToCritics(app.ProjectRoot, mode.Name, selected)
+				if err != nil {
+					return err
+				}
+			}
 			tools := buildToolSpecs(extraTools, toolTimeout)
+			// Profile-declared tools are appended after --tool flags so a
+			// user can still extend the audit profile's bundle without
+			// having to override it wholesale.
+			if mode != nil && len(mode.Tools) > 0 {
+				tools = append(tools, buildToolSpecs(mode.Tools, toolTimeout)...)
+			}
 			if !toolsOnly && len(selected) == 0 && len(tools) == 0 {
 				return errors.New("nothing to run: pass --critic, --tool, or omit --tools-only")
 			}
@@ -164,13 +197,16 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 				if app.InProject() {
 					workdir = app.ProjectRoot
 				} else {
-					workdir = absPath
+					workdir = targetDir
 				}
 			}
 
 			// Build env vars (project + audit target paths).
 			env := []string{
 				"UTA_AUDIT_TARGET=" + absPath,
+			}
+			if isFileTarget {
+				env = append(env, "UTA_AUDIT_FILE="+absPath)
 			}
 			if app.InProject() {
 				env = append(env,
@@ -180,28 +216,55 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 				)
 			}
 
+			inputSummary := "the codebase rooted at " + absPath
+			if isFileTarget {
+				inputSummary = "the contract at " + absPath
+			}
 			req := engine.ReflectorRequest{
-				Goal:           "Audit " + absPath + " for security and correctness issues.",
-				InputSummary:   "the codebase rooted at " + absPath,
-				Critics:        selected,
-				Tools:          tools,
-				ToolsOnly:      toolsOnly,
-				Reviser:        reviser,
-				MaxIterations:  iter,
-				StopWhen:       cond,
-				DefaultWorker:  worker,
-				CriticTimeout:  criticTimeout,
-				ReviseTimeout:  reviseTimeout,
-				RunTimeout:     runTimeout,
+				Goal:            "Audit " + absPath + " for security and correctness issues.",
+				InputSummary:    inputSummary,
+				Critics:         selected,
+				Tools:           tools,
+				ToolsOnly:       toolsOnly,
+				Reviser:         reviser,
+				MaxIterations:   iter,
+				StopWhen:        cond,
+				DefaultWorker:   worker,
+				CriticTimeout:   criticTimeout,
+				ReviseTimeout:   reviseTimeout,
+				RunTimeout:      runTimeout,
 				PreApproveTools: preApprove,
 				Workdir:         workdir,
 				Env:             env,
 				WorkflowPath:    fileFlag,
 				ContextDir:      app.ContextDir,
 			}
+			// Apply the active MissionProfile's policies: env merge,
+			// capability gates, HITL triggers, budget caps, memory
+			// consolidation, mode name. Identical preamble shape to
+			// `uta run --mode` and `uta resume --mode`. Replaces the
+			// previous ad-hoc env-merge + intersection that only
+			// covered two of the policy axes.
+			engine.ApplyProfileToReflector(&req, mode)
 
 			ctx, cancel := signalContext(cmd.Context())
 			defer cancel()
+
+			// MCP bridge: probe each MCP server declared on the active
+			// mode and write a synthesized config the provider can
+			// consume via --mcp-config. Mirrors `uta run` so critics see
+			// the same toolset the mode profile advertises.
+			if mode != nil && len(mode.MCPServers) > 0 {
+				probes := engine.ApplyMCPBridgeToReflector(ctx, &req, mode)
+				for _, p := range probes {
+					if diag := engine.FormatMCPProbeError(p); diag != "" {
+						fmt.Fprintln(cmd.ErrOrStderr(), "warn:", diag)
+					}
+				}
+				if req.MCPConfigPath != "" {
+					defer os.Remove(req.MCPConfigPath)
+				}
+			}
 
 			bus := trajectory.NewBus()
 			defer bus.Shutdown()
@@ -221,11 +284,13 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 
 			recorder := trajectory.NewRecorder(app.Store)
 			sup := engine.New(engine.Deps{
-				Store:    app.Store,
-				Blobs:    app.Blobs,
-				Recorder: recorder,
-				Bus:      bus,
-				Registry: app.Registry,
+				Store:      app.Store,
+				Blobs:      app.Blobs,
+				Recorder:   recorder,
+				Bus:        bus,
+				Registry:   app.Registry,
+				Memory:     memory.NewFromEnv(app.Store.DB),
+				Whiteboard: whiteboard.New(app.Store.DB),
 			})
 
 			// Sentinel: watcher subscribes to the trajectory bus, can cancel
@@ -314,7 +379,8 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "enable the reviser step (otherwise audit-only, one pass)")
 	cmd.Flags().StringArrayVar(&extraTools, "tool", nil,
 		"external analysis tool to run each iteration; produces findings in the same report.\n"+
-			"Built-in adapters when name matches: 'slither', 'mythril', 'forge-test'. Otherwise\n"+
+			"Built-in adapters when name matches: 'slither', 'mythril', 'forge-test', 'aderyn'.\n"+
+			"Otherwise "+
 			"the value is run as a raw shell command (use id=cmd to set an id, e.g. 'lint=npm run lint').\n"+
 			"Each --tool is one verbatim string; safe for commas/quotes — repeat the flag for multiple tools.")
 	cmd.Flags().StringVar(&postGate, "post-gate", "", "shell command run after each reviser revision; nonzero exit aborts the audit (replaces v0.4.0's tools-as-gates)")
@@ -366,9 +432,9 @@ func printPersonaList(w io.Writer, app *App) {
 // buildToolSpecs parses --tool flag values into ToolSpec structs.
 // Forms accepted:
 //
-//	slither                       -> built-in adapter, default args
-//	mythril                       -> built-in adapter, default args
-//	forge-test  /  forge          -> built-in adapter
+//	<known-id>                    -> built-in adapter, default args (any name
+//	                                 returned by engine.KnownBuiltinTools, plus
+//	                                 the "forge" alias for "forge-test")
 //	any-other-string              -> raw shell command, id derived from binary name
 //	id=cmd args...                -> raw shell command with explicit id
 func buildToolSpecs(values []string, timeout time.Duration) []engine.ToolSpec {
@@ -388,11 +454,10 @@ func buildToolSpecs(values []string, timeout time.Duration) []engine.ToolSpec {
 		spec := engine.ToolSpec{ID: id, Timeout: timeout}
 		// If the cmd is exactly one of the built-in adapter IDs (and no
 		// explicit id= prefix), let ResolveToolSpec fill in defaults.
-		switch strings.ToLower(cmd) {
-		case "slither", "mythril", "forge-test", "forge":
+		if id == "" && isBuiltinToolID(cmd) {
 			spec.ID = strings.ToLower(cmd)
 			// Cmd, Args, Adapter filled by ResolveToolSpec
-		default:
+		} else {
 			// Run as a shell command. Default to the "findings" adapter so
 			// any tool whose stdout contains {"findings":[...]} (the same
 			// shape critics produce) gets its findings parsed automatically.
@@ -411,6 +476,52 @@ func buildToolSpecs(values []string, timeout time.Duration) []engine.ToolSpec {
 		out = append(out, spec)
 	}
 	return out
+}
+
+// isBuiltinToolID reports whether name matches one of the engine's built-in
+// tool adapter IDs (slither, mythril, forge-test, aderyn, ...) or the
+// "forge" alias. Compared case-insensitively so user input like "Slither"
+// still resolves to the built-in adapter.
+func isBuiltinToolID(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	if name == "forge" {
+		// alias for forge-test; both are recognized by ResolveToolSpec.
+		return true
+	}
+	for _, known := range engine.KnownBuiltinTools() {
+		if name == known {
+			return true
+		}
+	}
+	return false
+}
+
+// applyVibeToCritics reads <project>/.uta/profiles/<mode>.vibe.md when
+// present and appends its contents as a `## Current vibe` section to
+// every critic's Prompt. Returns the (possibly-mutated) slice unchanged
+// when no vibe file exists, so callers can call this unconditionally.
+func applyVibeToCritics(projectRoot, modeName string, in []engine.CriticSpec) ([]engine.CriticSpec, error) {
+	if len(in) == 0 || projectRoot == "" || modeName == "" {
+		return in, nil
+	}
+	body, err := profile.ReadVibe(projectRoot, modeName)
+	if err != nil {
+		return in, err
+	}
+	section := profile.VibePromptSection(body)
+	if section == "" {
+		return in, nil
+	}
+	out := make([]engine.CriticSpec, len(in))
+	for i, c := range in {
+		prompt := strings.TrimRight(c.Prompt, "\n")
+		c.Prompt = prompt + "\n\n" + section
+		out[i] = c
+	}
+	return out, nil
 }
 
 func resolveCritics(app *App, ids []string) ([]engine.CriticSpec, error) {

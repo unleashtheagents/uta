@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/unleashtheagents/uta/internal/profile"
 )
 
 func TestRenderImplementPrompt_IncludesAllFields(t *testing.T) {
@@ -103,4 +105,48 @@ func TestMin(t *testing.T) {
 	if got := min(4, 4); got != 4 {
 		t.Errorf("min(4,4)=%d want 4", got)
 	}
+}
+
+func TestApplyProfile_PopulatesLoopFields(t *testing.T) {
+	p := &profile.MissionProfile{
+		Name:         "audit",
+		Env:          map[string]string{"AUDITOR": "trail-of-bits"},
+		AllowedTools: []string{"Read", "Bash(slither *)"},
+		DeniedTools:  []string{"Bash(rm *)"},
+		Policies: profile.Policies{
+			TokenBudget:        100_000,
+			PerCallBudget:      10_000,
+			DollarBudgetCents:  500,
+			HITLTriggers:       []string{"Bash(* push *)"},
+			HITLTokenThreshold: 80,
+			HITLSeverity:       "high",
+		},
+	}
+	req := &LoopRequest{PreApproveTools: []string{"Read", "Bash(rm *)"}}
+	ApplyProfile(req, p)
+
+	if req.ModeName != "audit" {
+		t.Errorf("ModeName = %q, want audit", req.ModeName)
+	}
+	if len(req.AllowedTools) == 0 {
+		t.Errorf("AllowedTools should be copied from profile")
+	}
+	if req.MaxTokens != 100_000 || req.MaxUSDCents != 500 {
+		t.Errorf("budget caps not copied: tokens=%d cents=%d", req.MaxTokens, req.MaxUSDCents)
+	}
+	if len(req.HITLTriggers) != 1 || req.HITLTriggers[0] != "Bash(* push *)" {
+		t.Errorf("HITLTriggers = %v", req.HITLTriggers)
+	}
+	// Pre-approve must drop denied entries — Bash(rm *) is in DeniedTools
+	// exactly, so SubtractDeniedTools removes it from PreApproveTools.
+	for _, tool := range req.PreApproveTools {
+		if tool == "Bash(rm *)" {
+			t.Errorf("DeniedTools entry leaked into PreApproveTools: %v", req.PreApproveTools)
+		}
+	}
+}
+
+func TestApplyProfile_NilSafe(t *testing.T) {
+	ApplyProfile(nil, nil)
+	ApplyProfile(&LoopRequest{}, nil)
 }

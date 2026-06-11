@@ -148,10 +148,10 @@ func TestNormalizeSeverity(t *testing.T) {
 		{"note", SevInfo},
 		{"nit", SevInfo},
 		{"i", SevInfo},
-		{"  HIGH  ", SevHigh},        // surrounding whitespace
-		{"", SevMedium},              // empty falls back to medium
-		{"garbage", SevMedium},       // unknown falls back to medium
-		{"P0", SevMedium},            // unknown taxonomy falls back to medium
+		{"  HIGH  ", SevHigh},  // surrounding whitespace
+		{"", SevMedium},        // empty falls back to medium
+		{"garbage", SevMedium}, // unknown falls back to medium
+		{"P0", SevMedium},      // unknown taxonomy falls back to medium
 	}
 	for _, tc := range cases {
 		got := normalizeSeverity(tc.in)

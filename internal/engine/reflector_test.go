@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/unleashtheagents/uta/internal/budget"
 	"github.com/unleashtheagents/uta/internal/provider"
 )
 
@@ -373,5 +375,62 @@ func TestPreambleTemplates_FormatCleanly(t *testing.T) {
 		!strings.Contains(got, "FINDINGS") ||
 		!strings.Contains(got, "charter") {
 		t.Fatalf("reviser preamble missing expected segments: %s", got)
+	}
+}
+
+// TestReflector_BudgetExhausted_AbortsCleanly proves the budget enforcement
+// wired on the reflector path (callProvider → withBudget(ctx)) trips
+// correctly when a critic's call exceeds MaxTokens. The session must end
+// with status="budget_exhausted" and a RunFailed trajectory event must
+// carry "budget exhausted" in the reason.
+//
+// This is the supervisor-side enforcement of STATUS-AGENTIC-OS.md
+// Theme A's deferred piece (item 14 "budget enforcement missing in uta
+// audit").
+func TestReflector_BudgetExhausted_AbortsCleanly(t *testing.T) {
+	deps := newTestDeps(t)
+	worker := &fakeProvider{
+		name: "worker",
+		run: func(ctx context.Context, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+			// Each critic call reports 150 tokens — the first one will
+			// push the cumulative total past MaxTokens=100.
+			return provider.RunResult{
+				FinalText: `{"findings":[]}`,
+				TokensIn:  100,
+				TokensOut: 50,
+			}, nil
+		},
+	}
+	if err := deps.Registry.Register(worker, false); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	res, err := New(deps).RunReflector(context.Background(), ReflectorRequest{
+		InputSummary:  "code",
+		DefaultWorker: "worker",
+		Critics:       []CriticSpec{{ID: "c1", Prompt: "audit X"}},
+		MaxIterations: 3,
+		MaxTokens:     100, // tighter than the single 150-token call
+	})
+	if err == nil {
+		t.Fatalf("expected ErrBudgetExceeded, got nil")
+	}
+	if !errors.Is(err, budget.ErrBudgetExceeded) {
+		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
+	}
+	if res.Status != "budget_exhausted" {
+		t.Fatalf("Status: got %q want budget_exhausted", res.Status)
+	}
+	if res.StoppedBecause != "budget_exhausted" {
+		t.Fatalf("StoppedBecause: got %q want budget_exhausted", res.StoppedBecause)
+	}
+
+	// Session must be marked accordingly.
+	sess, gerr := deps.Store.GetSession(res.SessionID)
+	if gerr != nil {
+		t.Fatalf("GetSession: %v", gerr)
+	}
+	if sess.Status != "budget_exhausted" {
+		t.Fatalf("persisted session status: got %q want budget_exhausted", sess.Status)
 	}
 }

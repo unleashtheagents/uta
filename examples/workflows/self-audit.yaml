@@ -1,0 +1,156 @@
+# examples/workflows/self-audit.yaml — Reflector-style self-audit.
+#
+# The unleashed final step of uta's self-improvement loop: uta audits its
+# own evolution and proposes the next 20-iteration roadmap.
+#
+# Run it with the bundled audit profile so the auditor critics' tool
+# allow-list is enforced and a single source of truth governs severity
+# escalation:
+#
+#   uta run -f examples/workflows/self-audit.yaml --mode audit
+#
+# Inputs (read-only, every subtask resolves these relative to the project
+# root via UTA_PROJECT_ROOT):
+#   - git log / CHANGELOG.md for the v0.9.x -> v0.10.x range
+#   - examples/profiles/*.yaml  (mode profiles)
+#   - examples/personas/*.yaml  (persona library)
+#   - .uta/context/retrospectives/*.md  (output of the retrospective hook)
+#
+# Output:
+#   - $UTA_PROJECT_ROOT/ROADMAP-V2.md — project-scoped (NOT repo-relative;
+#     when invoked outside a uta project the path falls back to the
+#     worker's cwd, which is uta's default behavior for ad-hoc runs).
+#     20 proposed iterations with severity, owner-mode hint, and
+#     acceptance bullet(s).
+#   - findings.json with cross-mode architecture / completeness /
+#     regression-risk findings (one of them MUST flag a cross-mode gap).
+#
+# Critic charters: the three auditor critics below (architecture,
+# completeness, regression-risk) are workflow-scoped and live INLINE in
+# this YAML, not under examples/personas/. Rationale: persona files are
+# for cross-workflow reuse (the smart-contract auditors in
+# examples/profiles/audit.yaml are an example); these three exist only to
+# review uta's own evolution and have no other caller, so promoting them
+# to standalone personas would just add indirection.
+#
+# Out of scope: actually adopting the proposed roadmap. That's a human
+# decision; uta just writes the markdown.
+
+version: 2
+strategy: dag
+
+goal: |
+  Self-audit uta's evolution from v0.9.x through v0.10.x and propose the
+  next 20-iteration roadmap. Produce ROADMAP-V2.md at the project root
+  with 20 numbered iterations, each annotated with severity (low|medium|
+  high) and the mode that would own it. The synthesis MUST cite at least
+  one cross-mode gap — a capability that no mode has implemented yet —
+  surfaced by the auditor critics.
+
+defaults:
+  worker: claude
+  planner: claude
+  max_parallel: 3
+  max_subtasks: 8
+  subtask_timeout: 15m
+  timeout: 1h
+  pre_approve:
+    - Read
+    - Bash(git log *)
+    - Bash(git diff *)
+    - Bash(git show *)
+    - Bash(ls *)
+    - Bash(find *)
+    - Bash(cat *)
+    - Write(ROADMAP-V2.md)
+    - Edit(ROADMAP-V2.md)
+
+synthesis:
+  worker: claude
+  mode: merge
+
+subtasks:
+  - id: gather-history
+    title: Gather version history (git log + CHANGELOG)
+    prompt: |
+      Summarize uta's evolution from v0.9.0 to HEAD. Use `git log
+      --oneline v0.9.0..HEAD` against $UTA_PROJECT_ROOT, then read
+      CHANGELOG.md if present. Produce a chronological bullet list of
+      capabilities added per minor version (one bullet per commit
+      cluster). Do NOT propose changes here — this subtask only gathers
+      facts the auditors will reason over.
+
+  - id: gather-modes
+    title: Gather mode profiles + persona library
+    prompt: |
+      Read every file under $UTA_PROJECT_ROOT/examples/profiles/ and
+      $UTA_PROJECT_ROOT/examples/personas/. For each mode profile,
+      summarize: name, personas attached, MCP servers wired in, tool
+      allow-list shape, and any policy fields (hitl_severity,
+      token_budget, retrospective_every). Output a structured markdown
+      table so downstream critics can spot cross-mode gaps at a glance.
+      Do NOT propose changes here.
+
+  - id: gather-retrospectives
+    title: Gather recent retrospectives
+    prompt: |
+      Read every markdown file under
+      $UTA_PROJECT_ROOT/.uta/context/retrospectives/ (if the directory
+      exists — it is created lazily by the retrospective hook and may be
+      empty on a fresh checkout). Extract the recurring themes and the
+      open questions each retrospective flagged. When the directory is
+      missing or empty, output a single bullet noting that fact so the
+      auditors know they cannot lean on retrospective signal.
+
+  - id: critic-architecture
+    title: Architecture critic
+    needs: [gather-history, gather-modes, gather-retrospectives]
+    prompt: |
+      You are an architecture critic. Read the three gather-* subtask
+      outputs and identify architectural gaps in uta's current shape:
+      missing abstractions, layering violations, cross-cutting concerns
+      (telemetry, auth, capability) that one mode handles but another
+      ignores. Produce a findings.json fragment (the same shape uta's
+      FindingsReport uses: array of {critic, title, severity, body,
+      file?}). At least one finding MUST be a cross-mode gap of the form
+      "no mode has implemented X yet".
+
+  - id: critic-completeness
+    title: Completeness critic
+    needs: [gather-history, gather-modes, gather-retrospectives]
+    prompt: |
+      You are a completeness critic. Cross-reference the version history
+      against the mode/persona inventory. Flag features that landed in
+      one mode but were never propagated to the modes that would
+      reasonably need them (e.g. retrospective cadence in audit but not
+      ops). Produce a findings.json fragment with one finding per gap.
+
+  - id: critic-regression
+    title: Regression-risk critic
+    needs: [gather-history, gather-modes, gather-retrospectives]
+    prompt: |
+      You are a regression-risk critic. Identify recent changes that
+      lack a corresponding test, places where the trajectory bus or
+      whiteboard could leak state across sessions, and any feature
+      flagged "partial" in the most recent commits. Produce a
+      findings.json fragment.
+
+  - id: roadmap
+    title: Synthesize ROADMAP-V2.md
+    needs: [critic-architecture, critic-completeness, critic-regression]
+    prompt: |
+      Synthesize the three critic findings into ROADMAP-V2.md at
+      $UTA_PROJECT_ROOT/ROADMAP-V2.md. The file MUST contain 20 numbered
+      proposed iterations. Each iteration entry includes:
+        - One-line title
+        - Severity tag: low | medium | high
+        - Owner mode hint (which existing mode would adopt it)
+        - One or two acceptance bullets
+      Begin the file with a short paragraph naming the cross-mode gap
+      that the architecture critic flagged. End the file with an
+      explicit "Out of scope: actually adopting this roadmap. A human
+      decides what ships." line.
+      The file MUST be non-empty (>= 20 numbered list items).
+
+budget:
+  max_wall_seconds: 3600

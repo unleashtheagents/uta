@@ -1,0 +1,31 @@
+# examples/evals/smoke.yaml — minimal eval suite.
+#
+# Run with:   uta eval -f examples/evals/smoke.yaml
+#
+# Grades two cheap goals against whichever provider is installed. Add a
+# worker matrix (workers: [claude, gemini]) to compare providers side
+# by side, or pin per-case via the case-level `workers` key.
+#
+# Use evals to regression-test profile / prompt / provider changes: run
+# the suite before and after, diff the reports (`--format json`).
+
+version: 1
+name: smoke
+
+defaults:
+  timeout: 5m
+
+cases:
+  - name: arithmetic-sanity
+    goal: "What is 17 * 23? Reply with the number."
+    assert:
+      contains: ["391"]
+      min_chars: 3
+      max_tokens: 50000
+
+  - name: instruction-following
+    goal: "List exactly three primary colors, one per line, no other text."
+    assert:
+      contains: ["red", "blue"]
+      not_contains: ["sorry", "cannot"]
+      min_chars: 10

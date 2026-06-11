@@ -31,7 +31,7 @@ SQLite database (so they persist across runs) with a status lifecycle:
   failed     execution or gate failed; LastError carries the reason
   rejected   manually dismissed
 
-uta works on this backlog via `+"`uta improve`"+`. Subcommands here are for
+uta works on this backlog via ` + "`uta improve`" + `. Subcommands here are for
 inspection + manual curation.`,
 	}
 	cmd.AddCommand(
@@ -224,7 +224,7 @@ duplicating ideas already on the backlog, and return up to --max ideas as
 JSON. Parses + persists the ideas with status=proposed.
 
 This is the entry point of the self-improvement loop. Run it once to seed
-the board, then either call it again periodically or let `+"`uta improve --gather-when-empty`"+`
+the board, then either call it again periodically or let ` + "`uta improve --gather-when-empty`" + `
 do it for you automatically.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())

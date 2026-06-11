@@ -79,4 +79,3 @@ func singleLine(s string) string {
 	}
 	return string(out)
 }
-

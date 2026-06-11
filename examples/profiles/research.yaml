@@ -1,0 +1,75 @@
+# examples/profiles/research.yaml — the "research" MissionProfile.
+#
+# Long-form synthesis from external sources. Pulls in the deep-researcher
+# (breadth-first multi-source synthesis) and citation-curator (refuses to
+# emit a claim without a URL + retrieval timestamp) personas, exposes a
+# Tavily search MCP server plus the canonical fetch MCP server, and uses
+# Claude's built-in WebFetch for ad-hoc page reads. Writes are
+# restricted to the project context directory so the agent can update
+# RESEARCH_DATABASE.md but cannot mutate the working tree.
+#
+# Prerequisites:
+#   - TAVILY_API_KEY in the environment for the search server. The
+#     server probe fails cleanly without it and the run falls back to
+#     plain WebFetch + whatever live URLs the user pastes in.
+#   - uvx (uv) on PATH for the fetch MCP server. If unavailable the
+#     fetch entry is dropped during MCP bridging and WebFetch covers the
+#     same ground at lower fidelity (no markdown extraction).
+#
+# Drop a copy under ~/.uta/profiles/ to make it user-wide, or under
+# <project>/.uta/profiles/ to make it project-local.
+
+name: research
+description: |
+  Long-form research mode. Deep-researcher + citation-curator personas
+  drive breadth-first source gathering via Tavily search and the fetch
+  MCP server, with Claude's built-in WebFetch as a fallback. Every claim
+  the agent records in RESEARCH_DATABASE.md must carry a URL and a
+  retrieval timestamp — the citation-curator's charter is the gate. HITL
+  fires on any high-severity action so a worker can't auto-overwrite
+  unrelated files when the profile is misconfigured.
+
+personas:
+  - deep-researcher
+  - citation-curator
+
+# allowed_tools: strict allow-list. Read across the whole tree, WebFetch
+# for live URLs, and Write/Edit ONLY against the project context dir
+# (.uta/context/) where RESEARCH_DATABASE.md lives. Anything outside
+# that — Bash, package installs, mass edits — is dropped from
+# --pre-approve before the provider is invoked. MCP tool patterns are
+# appended at probe time as mcp__tavily__* / mcp__fetch__*.
+allowed_tools:
+  - Read
+  - WebFetch
+  - Write(.uta/context/**)
+  - Edit(.uta/context/**)
+
+denied_tools: []
+
+env: {}
+
+policies:
+  hitl_severity: high
+  token_budget: 0
+  per_call_budget: 0
+
+mcp_servers:
+  # Tavily search. Returns ranked search results with snippets and
+  # optional content extraction. The deep-researcher uses this as the
+  # primary discovery channel.
+  - name: tavily
+    command: npx
+    args:
+      - "-y"
+      - "tavily-mcp"
+    env:
+      TAVILY_API_KEY: "${TAVILY_API_KEY}"
+
+  # Canonical fetch MCP server (Python; uvx runs it without a local
+  # install). Pulls a URL and returns markdown — higher fidelity than
+  # WebFetch for long-form articles. Disabled cleanly if uvx is absent.
+  - name: fetch
+    command: uvx
+    args:
+      - mcp-server-fetch

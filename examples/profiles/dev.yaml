@@ -1,0 +1,38 @@
+# examples/profiles/dev.yaml — the "dev" MissionProfile.
+#
+# Suited to inner-loop coding work: edit files, run the Go toolchain, peek at
+# git state. Network access (curl, wget) and destructive git commands are
+# intentionally NOT in allowed_tools so they cannot be slipped in via
+# --pre-approve when this mode is active.
+#
+# Drop a copy under ~/.uta/profiles/ to make it user-wide, or under
+# <project>/.uta/profiles/ to make it project-local (the project copy wins
+# on name collision).
+
+name: dev
+description: |
+  Inner-loop development mode. Architect + engineer personas, read/write/edit
+  plus the Go toolchain and read-only git inspection pre-approved. Anything
+  outside that list (e.g. curl, npm publish, git push) is dropped from
+  --pre-approve before the provider is invoked.
+
+personas:
+  - architect
+  - engineer
+
+allowed_tools:
+  - Read
+  - Edit
+  - Write
+  - Bash(go *)
+  - Bash(git status)
+  - Bash(git diff)
+
+denied_tools: []
+
+env: {}
+
+policies:
+  hitl_severity: high
+  token_budget: 0
+  per_call_budget: 0

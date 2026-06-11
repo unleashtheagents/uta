@@ -11,6 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/unleashtheagents/uta/internal/budget"
+	"github.com/unleashtheagents/uta/internal/engine/capability"
+	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -20,6 +23,11 @@ import (
 // but the underlying worker call goes to Resumable.ResumeHeadless against the
 // provider session id captured on the prior run's last subtask. There is no
 // planner step and no synthesis — this is one-shot follow-up.
+//
+// Policy enforcement (HITL, capability gates, budget caps) follows the same
+// rules as RunRequest. Set via ApplyProfileToResume from the active
+// MissionProfile; supervisor.Resume honors HITLTriggers, MaxTokens,
+// MaxUSDCents, and PerCallMaxTokens identically to Run.
 type ResumeRequest struct {
 	PriorSessionID  string
 	Goal            string
@@ -29,6 +37,42 @@ type ResumeRequest struct {
 	PreApproveTools []string
 	Workdir         string
 	Env             []string // additional env vars for the provider call
+
+	// AllowedTools / DeniedTools are the capability-gate lists active for
+	// the resumed turn. Same semantics as RunRequest's fields. Both empty
+	// disables enforcement.
+	AllowedTools []string
+	DeniedTools  []string
+
+	// ModeName is the active MissionProfile's name. Persisted on the new
+	// session row so `uta mode list` and `uta dash` can attribute usage
+	// per mode. Empty when the resume ran without a profile attached.
+	ModeName string
+
+	// HITL is the human-in-the-loop approver for tool-call gating during
+	// the resumed turn. Nil disables HITL entirely (the gate is a no-op).
+	// Mirrors RunRequest.HITL.
+	HITL hitl.Approver
+
+	// HITLTriggers, HITLTokenThreshold, HITLSeverity mirror RunRequest's
+	// HITL config. Set by ApplyProfileToResume from the active profile.
+	HITLTriggers       []string
+	HITLTokenThreshold int
+	HITLSeverity       string
+
+	// MaxTokens / PerCallMaxTokens / MaxUSDCents mirror RunRequest. 0
+	// disables the corresponding cap. ErrBudgetExceeded fires the same
+	// way it does in Run when any cap is exceeded.
+	MaxTokens        int64
+	PerCallMaxTokens int64
+	MaxUSDCents      int64
+
+	// MCPConfigPath is an absolute path to a synthesized `.mcp.json`-style
+	// file describing the MCP servers the resumed turn should see. Set by
+	// ApplyProfileToResume from the active MissionProfile after probing,
+	// or empty when no servers are wired. Forwarded onto RunOptions so
+	// providers with CapMCP (claude, gemini) can pass it as --mcp-config.
+	MCPConfigPath string
 }
 
 // Resume executes a follow-up turn. Returns the new session's RunResult.
@@ -83,6 +127,7 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 		Status:    "running",
 		CreatedAt: time.Now(),
 		MetaJSON:  string(meta),
+		ModeName:  req.ModeName,
 	}); err != nil {
 		return RunResult{}, err
 	}
@@ -112,12 +157,55 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 		Env:             req.Env,
 		Timeout:         req.SubtaskTimeout,
 		PreApproveTools: req.PreApproveTools,
+		MCPConfigPath:   req.MCPConfigPath,
 	}
+	gate := capability.NewGate(req.AllowedTools, req.DeniedTools)
+	// HITL state mirrors what Supervisor.Run installs: the approver,
+	// trigger patterns, severity, and token threshold flow from the
+	// request (which was populated from the active MissionProfile via
+	// ApplyProfileToResume). Nil approver keeps the gate inert without
+	// the caller having to know that detail.
+	hState := &hitlState{
+		approver:       req.HITL,
+		triggers:       capability.NewGate(nil, req.HITLTriggers),
+		severity:       req.HITLSeverity,
+		tokenThreshold: req.HITLTokenThreshold,
+		maxTokens:      req.MaxTokens,
+	}
+	subCtx = withHitlState(subCtx, hState)
+
+	// Resource budget mirrors Supervisor.Run. Resume is a single provider
+	// call, so the budget tracker only sees one charge — but the same
+	// CheckPreCall / AddOutcome pair fires, the same trajectory events
+	// are emitted (budget_warning at 80%, budget_exhausted at 100%), and
+	// the resulting RunResult carries status="budget_exhausted" so the
+	// CLI exits with the same code as a Run hitting the same cap.
+	runBudget := &budget.Budget{
+		MaxTokens:        req.MaxTokens,
+		MaxUSDCents:      req.MaxUSDCents,
+		PerCallMaxTokens: req.PerCallMaxTokens,
+	}
+	subCtx = withBudget(subCtx, runBudget)
+	if preErr := runBudget.CheckPreCall(); preErr != nil {
+		// A pre-call trip on resume means the budget arrived already
+		// over the limit (only possible if the caller passed values
+		// that don't make sense; defensive). Emit the event and abort
+		// before we charge the provider.
+		s.emitBudgetExhausted(newSession, subtaskID, runBudget, preErr)
+		preErrTime := time.Now()
+		s.dbErr(newSession, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
+			ID: subtaskID, Status: "failed",
+			StartedAt: &startedAt, CompletedAt: &preErrTime,
+			Error: preErr.Error(), ErrorKind: "budget_exhausted",
+		}))
+		return s.terminateBudgetExhausted(newSession, preErr)
+	}
+
 	events := make(chan provider.Event, 64)
 	drainDone := make(chan struct{})
 	go func() {
 		for ev := range events {
-			s.publishProviderEvent(newSession, subtaskID, ev)
+			s.publishProviderEvent(subCtx, newSession, subtaskID, ev, gate, hState)
 		}
 		close(drainDone)
 	}()
@@ -125,6 +213,24 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 	close(events)
 	<-drainDone
 	completedAt := time.Now()
+
+	// Charge the call to the budget regardless of error. The provider may
+	// have racked up tokens even on a partial failure. AddOutcome returns
+	// (warning, cap-exceeded). On cap-exceeded, the budget sentinel
+	// replaces callErr so the supervisor short-circuits to the
+	// budget_exhausted terminator instead of the generic failed path.
+	warn, capErr := runBudget.AddOutcome(budget.Usage{
+		TokensIn:       result.TokensIn,
+		TokensOut:      result.TokensOut,
+		ApproxUSDCents: result.ApproxUSDCents,
+	})
+	if warn != nil {
+		s.emitBudgetWarning(newSession, subtaskID, runBudget, warn)
+	}
+	if capErr != nil {
+		s.emitBudgetExhausted(newSession, subtaskID, runBudget, capErr)
+		callErr = capErr
+	}
 
 	rawRef := ""
 	if len(result.RawOutput) > 0 {
@@ -134,7 +240,7 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 	}
 
 	if callErr != nil {
-		kind := classifyError(callErr)
+		kind := classifyError(callErr, ctx)
 		s.emit(newSession, subtaskID, trajectory.SubtaskFailed, map[string]any{"error": callErr.Error(), "kind": kind})
 		s.dbErr(newSession, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 			ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
@@ -142,6 +248,9 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 			ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
 			Error: callErr.Error(), ErrorKind: kind,
 		}))
+		if errors.Is(callErr, budget.ErrBudgetExceeded) {
+			return s.terminateBudgetExhausted(newSession, callErr)
+		}
 		s.emit(newSession, "", trajectory.RunFailed, map[string]any{"reason": callErr.Error()})
 		s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "failed", ""))
 		return RunResult{SessionID: newSession, Status: "failed"}, callErr
@@ -149,11 +258,13 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 
 	s.emit(newSession, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"chars": len(result.FinalText), "provider_session_id": result.SessionID,
+		"tokens_in": result.TokensIn, "tokens_out": result.TokensOut, "usd_cents": result.ApproxUSDCents,
 	})
 	s.dbErr(newSession, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
 		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+		MetaJSON: subtaskUsageMeta(result.TokensIn, result.TokensOut, result.ApproxUSDCents),
 	}))
 	finalRef, _ := s.deps.Blobs.Put([]byte(result.FinalText), "txt")
 	s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "completed", finalRef))

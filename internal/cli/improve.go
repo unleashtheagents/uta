@@ -12,8 +12,11 @@ import (
 
 	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/improve"
+	"github.com/unleashtheagents/uta/internal/memory"
 	"github.com/unleashtheagents/uta/internal/sentinel"
+	"github.com/unleashtheagents/uta/internal/state"
 	"github.com/unleashtheagents/uta/internal/trajectory"
+	"github.com/unleashtheagents/uta/internal/whiteboard"
 )
 
 func newImproveCmd() *cobra.Command {
@@ -90,11 +93,13 @@ means running the command again).`,
 
 			recorder := trajectory.NewRecorder(app.Store)
 			sup := engine.New(engine.Deps{
-				Store:    app.Store,
-				Blobs:    app.Blobs,
-				Recorder: recorder,
-				Bus:      bus,
-				Registry: app.Registry,
+				Store:      app.Store,
+				Blobs:      app.Blobs,
+				Recorder:   recorder,
+				Bus:        bus,
+				Registry:   app.Registry,
+				Memory:     memory.NewFromEnv(app.Store.DB),
+				Whiteboard: whiteboard.New(app.Store.DB),
 			})
 
 			// Sentinel watches the WHOLE loop's trajectory bus — every
@@ -121,13 +126,18 @@ means running the command again).`,
 				}
 			}
 
+			mode, err := resolveActiveMode(cmd, app)
+			if err != nil {
+				return err
+			}
+
 			board := improve.NewBoard(app.Store)
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"improve loop · worker=%s · gather-worker=%s · verify=%q · budget=%s · gather-when-empty=%t\n",
 				worker, gatherWorker, verifyCmd, budgetStr(budget), gatherWhenEmpty)
 
 			start := time.Now()
-			res, runErr := improve.Loop(ctx, sup, board, app.Registry, improve.LoopRequest{
+			loopReq := improve.LoopRequest{
 				Worker:          worker,
 				GatherWorker:    gatherWorker,
 				Workdir:         workdir,
@@ -143,7 +153,61 @@ means running the command again).`,
 				DryRun:          dryRun,
 				MaxRetries:      maxRetries,
 				PreApproveTools: preApprove,
-			})
+				OnIterationSession: func(sessionID string) {
+					if terr := state.TouchActiveSession(app.StateDir, sessionID); terr != nil {
+						fmt.Fprintln(cmd.ErrOrStderr(), "warn: update active thread:", terr)
+					}
+					if mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
+						res, rerr := improve.MaybeRetrospective(ctx, improve.RetroDeps{
+							Store:    app.Store,
+							Registry: app.Registry,
+							Recorder: recorder,
+							Bus:      bus,
+						}, improve.RetroRequest{
+							ModeName:       mode.Name,
+							ProjectRoot:    app.ProjectRoot,
+							WorkerName:     worker,
+							Every:          mode.RetrospectiveEvery,
+							PromptTemplate: mode.RetrospectivePrompt,
+							Workdir:        workdir,
+							Env:            env,
+							Timeout:        perIdeaTimeout,
+							PriorSessionID: sessionID,
+						})
+						if rerr != nil {
+							fmt.Fprintln(cmd.ErrOrStderr(), "warn: retrospective:", rerr)
+						} else if res != nil && res.Triggered && res.Path != "" {
+							fmt.Fprintf(cmd.ErrOrStderr(),
+								"[uta] retrospective for %q written to %s (after %d sessions)\n",
+								mode.Name, res.Path, res.SessionCount)
+						}
+					}
+				},
+			}
+			// Apply the active MissionProfile's policies to the loop
+			// request. Each iteration's inner RunRequest inherits these,
+			// so capability gates / HITL triggers / budget caps fire on
+			// every picked idea — identical preamble to `uta run --mode`.
+			improve.ApplyProfile(&loopReq, mode)
+			// MCP bridge: probe each MCP server declared on the active
+			// mode and forward the materialized config path onto every
+			// iteration's inner RunRequest. Mirrors `uta run --mode`
+			// behavior so the improve loop's worker sees the same
+			// toolset a one-shot run would.
+			if mode != nil && len(mode.MCPServers) > 0 {
+				cfgPath, patterns, probes := engine.ProbeAndWriteMCPConfig(ctx, mode)
+				for _, p := range probes {
+					if diag := engine.FormatMCPProbeError(p); diag != "" {
+						fmt.Fprintln(cmd.ErrOrStderr(), "warn:", diag)
+					}
+				}
+				loopReq.MCPConfigPath = cfgPath
+				loopReq.PreApproveTools = append(loopReq.PreApproveTools, patterns...)
+				if cfgPath != "" {
+					defer os.Remove(cfgPath)
+				}
+			}
+			res, runErr := improve.Loop(ctx, sup, board, app.Registry, loopReq)
 			elapsed := time.Since(start)
 			bus.Shutdown()
 			if renderDone != nil {

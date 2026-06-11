@@ -241,6 +241,70 @@ func TestSentinel_ErrorRateSpike_NonErrorKindsIgnored(t *testing.T) {
 	expectNoAlert(t, sub, 50*time.Millisecond)
 }
 
+func TestSentinel_CapabilityDeny_FiresAtThreshold(t *testing.T) {
+	s := NewSentinel(Config{CapabilityDenyThreshold: 3, CapabilityDenyWindow: 10})
+	sub := s.Subscribe(8)
+	ev := trajectory.Event{
+		SessionID: "sess-1",
+		Kind:      trajectory.CapabilityGateDenied,
+		Payload:   json.RawMessage(`{"tool":"Bash","pattern":"Bash(curl *)"}`),
+	}
+	// First two denials don't trip the threshold.
+	s.process(ev)
+	s.process(ev)
+	expectNoAlert(t, sub, 50*time.Millisecond)
+
+	// Third pushes count to 3 and fires a warn alert.
+	s.process(ev)
+	a := waitAlert(t, sub)
+	if a.Rule != "capability_gate_probing" {
+		t.Errorf("rule: got %q want capability_gate_probing", a.Rule)
+	}
+	if a.Severity != "warn" {
+		t.Errorf("severity: got %q want warn", a.Severity)
+	}
+	if got, _ := a.Context["denials"].(int); got != 3 {
+		t.Errorf("denials context: got %v want 3", a.Context["denials"])
+	}
+}
+
+func TestSentinel_CapabilityDeny_DoesNotFireOnUnrelatedEvents(t *testing.T) {
+	s := NewSentinel(Config{CapabilityDenyThreshold: 3, CapabilityDenyWindow: 10})
+	sub := s.Subscribe(8)
+	for i := 0; i < 10; i++ {
+		s.process(trajectory.Event{
+			SessionID: "sess-1",
+			Kind:      trajectory.SubtaskCompleted,
+			Payload:   json.RawMessage(`{}`),
+		})
+	}
+	expectNoAlert(t, sub, 50*time.Millisecond)
+}
+
+func TestSentinel_CapabilityDeny_WindowEvictsOldDenials(t *testing.T) {
+	s := NewSentinel(Config{CapabilityDenyThreshold: 3, CapabilityDenyWindow: 5})
+	sub := s.Subscribe(8)
+	deny := trajectory.Event{
+		SessionID: "sess-1",
+		Kind:      trajectory.CapabilityGateDenied,
+		Payload:   json.RawMessage(`{}`),
+	}
+	noise := trajectory.Event{
+		SessionID: "sess-1",
+		Kind:      trajectory.SubtaskCompleted,
+		Payload:   json.RawMessage(`{}`),
+	}
+	// 2 denies then 5 unrelated events — denies fall out of the window.
+	s.process(deny)
+	s.process(deny)
+	for i := 0; i < 5; i++ {
+		s.process(noise)
+	}
+	// A single fresh deny should NOT trip the threshold (only 1 in window).
+	s.process(deny)
+	expectNoAlert(t, sub, 50*time.Millisecond)
+}
+
 func TestSentinel_SensitivePath_FiresOnSshKey(t *testing.T) {
 	s := NewSentinel(Config{})
 	sub := s.Subscribe(8)
@@ -462,4 +526,3 @@ func TestIsErrorEvent(t *testing.T) {
 		}
 	}
 }
-

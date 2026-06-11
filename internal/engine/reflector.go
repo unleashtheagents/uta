@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/unleashtheagents/uta/internal/budget"
+	"github.com/unleashtheagents/uta/internal/engine/capability"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -54,11 +56,11 @@ type ReflectorRequest struct {
 	StopWhen      StopCondition // default StopAtNoHigh
 	ToolsOnly     bool          // when true, skip critics and run only tools each iter
 
-	DefaultWorker  string
-	MaxParallel    int           // critic parallelism within an iteration
-	CriticTimeout  time.Duration
-	ReviseTimeout  time.Duration
-	RunTimeout     time.Duration
+	DefaultWorker string
+	MaxParallel   int // critic parallelism within an iteration
+	CriticTimeout time.Duration
+	ReviseTimeout time.Duration
+	RunTimeout    time.Duration
 
 	PreApproveTools []string
 	Workdir         string
@@ -69,6 +71,46 @@ type ReflectorRequest struct {
 	// running inside a project — findings are then only available via the
 	// trajectory.
 	ContextDir string
+
+	// ModeName is the active MissionProfile's name. Persisted on the
+	// session row so `uta mode list` and `uta dash` can attribute usage
+	// per mode. Empty when the audit ran without a profile attached.
+	ModeName string
+
+	// MemoryConsolidate mirrors RunRequest.MemoryConsolidate. When true
+	// and the supervisor's Memory dep is non-nil, a final session_outcome
+	// fact is written after the reflector terminates. HIGH findings are
+	// always written as lint_rule facts regardless of this flag — the
+	// idea is that severe audit findings belong in cross-mode memory
+	// without requiring extra opt-in.
+	MemoryConsolidate bool
+
+	// AllowedTools / DeniedTools mirror RunRequest. Set by
+	// ApplyProfileToReflector. Enforcement at the supervisor level lands
+	// in a follow-up commit; the fields are here so the call sites can
+	// be wired now and the supervisor change is local later.
+	AllowedTools []string
+	DeniedTools  []string
+
+	// HITLTriggers / HITLTokenThreshold / HITLSeverity / HITL mirror
+	// RunRequest. See AllowedTools comment re: enforcement timing.
+	HITLTriggers       []string
+	HITLTokenThreshold int
+	HITLSeverity       string
+
+	// MaxTokens / PerCallMaxTokens / MaxUSDCents mirror RunRequest. See
+	// AllowedTools comment re: enforcement timing.
+	MaxTokens        int64
+	PerCallMaxTokens int64
+	MaxUSDCents      int64
+
+	// MCPConfigPath is an absolute path to a synthesized `.mcp.json`-style
+	// file describing the MCP servers critics (and the reviser, when set)
+	// should see. Set by ApplyMCPBridgeToReflector from the active
+	// MissionProfile after probing. Empty when no servers are wired.
+	// Forwarded onto RunOptions so providers with CapMCP (claude, gemini)
+	// can pass it as --mcp-config.
+	MCPConfigPath string
 }
 
 // ReflectorResult summarizes the run.
@@ -168,6 +210,31 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 	ctx, cancel := context.WithTimeout(ctx, req.RunTimeout)
 	defer cancel()
 
+	// Per-run resource budget. Installed on ctx so every callProvider
+	// inside critics + reviser sees the same shared accumulator. Mirrors
+	// what Supervisor.Run does. When a cap is reached, callProvider
+	// returns budget.ErrBudgetExceeded; the loop below short-circuits to
+	// terminateBudgetExhausted instead of letting it bubble up as a
+	// generic "failed" run.
+	runBudget := &budget.Budget{
+		MaxTokens:        req.MaxTokens,
+		MaxUSDCents:      req.MaxUSDCents,
+		PerCallMaxTokens: req.PerCallMaxTokens,
+	}
+	ctx = withBudget(ctx, runBudget)
+
+	// Per-run HITL state. Same shape as Run / Resume — built from the
+	// MissionProfile policies that ApplyProfileToReflector copied onto
+	// the request. callProvider reads via hitlStateFromContext on every
+	// tool_call event. Nil approver leaves the gate inert.
+	ctx = withHitlState(ctx, &hitlState{
+		approver:       nil, // CLI wiring for an audit approver lands later
+		triggers:       capability.NewGate(nil, req.HITLTriggers),
+		severity:       req.HITLSeverity,
+		tokenThreshold: req.HITLTokenThreshold,
+		maxTokens:      req.MaxTokens,
+	})
+
 	sessionID := uuid.NewString()
 	if err := s.deps.Store.CreateSession(store.Session{
 		ID:           sessionID,
@@ -177,6 +244,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 		CreatedAt:    time.Now(),
 		WorkflowPath: req.WorkflowPath,
 		MetaJSON:     reflectorMeta(req),
+		ModeName:     req.ModeName,
 	}); err != nil {
 		return ReflectorResult{}, fmt.Errorf("create session: %w", err)
 	}
@@ -203,6 +271,14 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 		sem := make(chan struct{}, req.MaxParallel)
 		var wg sync.WaitGroup
 		anyCriticErr := false
+		// firstBudgetErr captures the first ErrBudgetExceeded surfaced by
+		// any critic's callProvider in this iteration. Guarded by
+		// perCriticMu. When set, the outer loop terminates the run
+		// cleanly via terminateBudgetExhausted instead of treating it as
+		// a generic critic failure. Other in-flight critics will trip
+		// CheckPreCall and exit cheaply on their own — no need to cancel
+		// the ctx explicitly.
+		var firstBudgetErr error
 
 		// Critics first (unless we're in tools-only mode).
 		critics := req.Critics
@@ -229,7 +305,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 			promptRef, _ := s.deps.Blobs.Put([]byte(prompt), "txt")
 			s.dbErr(sessionID, subtaskID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 				ID: subtaskID, SessionID: sessionID, Ord: ord,
-				Title: fmt.Sprintf("iter %d · critic %s", iter, c.ID),
+				Title:     fmt.Sprintf("iter %d · critic %s", iter, c.ID),
 				PromptRef: promptRef, Worker: worker, Status: "running",
 			}))
 			s.emit(sessionID, subtaskID, trajectory.CriticStarted, map[string]any{
@@ -251,6 +327,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, prompt, RunRequest{
 					Workdir: req.Workdir, Env: req.Env, SubtaskTimeout: req.CriticTimeout,
 					PreApproveTools: req.PreApproveTools,
+					MCPConfigPath:   req.MCPConfigPath,
 				})
 				subCancel()
 				done := time.Now()
@@ -265,8 +342,11 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				if err != nil {
 					perCriticMu.Lock()
 					anyCriticErr = true
+					if errors.Is(err, budget.ErrBudgetExceeded) && firstBudgetErr == nil {
+						firstBudgetErr = err
+					}
 					perCriticMu.Unlock()
-					kind := classifyError(err)
+					kind := classifyError(err, ctx)
 					s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 						"critic": c.ID, "error": err.Error(), "kind": kind,
 					})
@@ -369,10 +449,10 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 					s.dbErr(sessionID, subID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 						ID: subID, Status: "failed",
 						StartedAt: &start, CompletedAt: &done,
-						ResultText:  Truncate(result.Stdout, 8000),
+						ResultText:   Truncate(result.Stdout, 8000),
 						RawOutputRef: rawRef,
-						Error:       result.Err.Error(),
-						ErrorKind:   "tool",
+						Error:        result.Err.Error(),
+						ErrorKind:    "tool",
 					}))
 					return
 				}
@@ -400,6 +480,24 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 
 		wg.Wait()
 
+		// Budget exhaustion is a run-level signal: a critic tripping the
+		// cap means subsequent provider calls would all fail at
+		// CheckPreCall, so there's no useful work left. Terminate the
+		// session cleanly with status=budget_exhausted, matching the
+		// behavior of Supervisor.Run on the same error.
+		if firstBudgetErr != nil {
+			res.Iterations = iter
+			res.Status = "budget_exhausted"
+			res.StoppedBecause = "budget_exhausted"
+			s.emit(sessionID, "", trajectory.RunFailed, map[string]any{
+				"reason":    "budget exhausted",
+				"error":     firstBudgetErr.Error(),
+				"iteration": iter,
+			})
+			s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "budget_exhausted", ""))
+			return res, firstBudgetErr
+		}
+
 		// --- aggregate ---
 		report := Aggregate(iter, perCritic)
 		ref, _ := s.persistFindings(req.ContextDir, &report)
@@ -409,6 +507,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 		}
 		res.FinalFindings = &report
 		res.Iterations = iter
+		s.writeHighFindingsToMemory(sessionID, req.ModeName, &report)
 		s.emit(sessionID, "", trajectory.FindingsAggregated, map[string]any{
 			"iteration": iter, "stats": report.Stats, "highest": string(report.HighestSeverity()),
 			"critics_failed": anyCriticErr,
@@ -430,6 +529,21 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 
 		// --- revise ---
 		if revErr := s.runReviser(ctx, sessionID, &ord, iter, &report, req); revErr != nil {
+			// Budget exhaustion on the reviser is the same signal as on a
+			// critic — abort cleanly with status=budget_exhausted instead
+			// of the generic failed path.
+			if errors.Is(revErr, budget.ErrBudgetExceeded) {
+				res.Iterations = iter
+				res.Status = "budget_exhausted"
+				res.StoppedBecause = "budget_exhausted"
+				s.emit(sessionID, "", trajectory.RunFailed, map[string]any{
+					"reason":    "budget exhausted (reviser)",
+					"error":     revErr.Error(),
+					"iteration": iter,
+				})
+				_ = s.deps.Store.MarkSession(sessionID, "budget_exhausted", "")
+				return res, revErr
+			}
 			s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": revErr.Error(), "iteration": iter})
 			_ = s.deps.Store.MarkSession(sessionID, "failed", "")
 			res.Status = "failed"
@@ -452,6 +566,9 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 		}
 	}
 	_ = s.deps.Store.MarkSession(sessionID, res.Status, finalRef)
+	if req.MemoryConsolidate {
+		s.consolidateAuditOutcome(sessionID, req, &res)
+	}
 	s.emit(sessionID, "", trajectory.ReflectorCompleted, map[string]any{
 		"iterations": res.Iterations, "stopped_because": res.StoppedBecause,
 		"final_stats": func() map[string]int {
@@ -484,7 +601,7 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	promptRef, _ := s.deps.Blobs.Put([]byte(prompt), "txt")
 	s.dbErr(sessionID, subtaskID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 		ID: subtaskID, SessionID: sessionID, Ord: *ord,
-		Title: fmt.Sprintf("iter %d · revise", iter),
+		Title:     fmt.Sprintf("iter %d · revise", iter),
 		PromptRef: promptRef, Worker: worker, Status: "running",
 	}))
 	s.emit(sessionID, subtaskID, trajectory.ReviseStarted, map[string]any{
@@ -496,6 +613,7 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, prompt, RunRequest{
 		Workdir: req.Workdir, Env: req.Env, SubtaskTimeout: req.ReviseTimeout,
 		PreApproveTools: req.PreApproveTools,
+		MCPConfigPath:   req.MCPConfigPath,
 	})
 	subCancel()
 	done := time.Now()
@@ -508,7 +626,7 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	}
 
 	if err != nil {
-		kind := classifyError(err)
+		kind := classifyError(err, ctx)
 		s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"iteration": iter, "error": err.Error(), "kind": kind,
 		})
@@ -547,7 +665,7 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 				ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 				StartedAt: &start, CompletedAt: &done,
 				ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
-				Error: fmt.Sprintf("reviser gate %q failed (exit %d)", req.Reviser.Gate.Cmd, gr.ExitCode),
+				Error:     fmt.Sprintf("reviser gate %q failed (exit %d)", req.Reviser.Gate.Cmd, gr.ExitCode),
 				ErrorKind: "gate",
 			}))
 			return fmt.Errorf("reviser gate failed at iteration %d", iter)
@@ -568,6 +686,7 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 // persistFindings writes a FindingsReport to:
 //   - <contextDir>/findings.<iter>.json   (history)
 //   - <contextDir>/findings.json          (latest, mirrors the most recent iter)
+//
 // Returns the absolute path to the history file (or "" if contextDir is empty).
 func (s *Supervisor) persistFindings(contextDir string, rep *FindingsReport) (string, error) {
 	if contextDir == "" {

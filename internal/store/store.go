@@ -8,6 +8,12 @@ import (
 	"fmt"
 
 	_ "modernc.org/sqlite"
+	// Registers the sqlite-vec extension (vec0 virtual tables, vector
+	// KNN) on every connection this driver opens. Pure Go — verified
+	// working under CGO_ENABLED=0 at the pinned driver version. The RAG
+	// layer (internal/memory) creates its vec0 table lazily; without
+	// this import that CREATE fails with "no such module: vec0".
+	_ "modernc.org/sqlite/vec"
 )
 
 type Store struct {

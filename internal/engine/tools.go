@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -47,6 +49,12 @@ type ToolSpec struct {
 	// which exit nonzero when issues are present) or as the tool itself
 	// failing (false).
 	ContinueOnFailure bool
+
+	// Env supplies per-tool environment variables, layered on top of the
+	// parent process environment. Entries here override matching keys from
+	// os.Environ(). Use this to pass API keys or scanner config to a single
+	// tool without leaking them into every other tool or critic.
+	Env map[string]string
 }
 
 // ToolResult is what runTool returns.
@@ -71,6 +79,7 @@ var builtinAdapters = map[string]BuiltinAdapter{
 	"slither":    parseSlither,
 	"mythril":    parseMythril,
 	"forge-test": parseForgeTest,
+	"aderyn":     parseAderyn,
 }
 
 // ResolveToolSpec fills defaults for known IDs. If a user passes `--tool slither`
@@ -114,6 +123,18 @@ func ResolveToolSpec(in ToolSpec) ToolSpec {
 		}
 		// forge test exits non-zero when tests fail — those are our findings.
 		out.ContinueOnFailure = true
+	case "aderyn":
+		if out.Cmd == "" {
+			out.Cmd = "aderyn"
+			// `aderyn . --output -` writes the JSON report to stdout instead
+			// of the default ./report.json on disk.
+			out.Args = append([]string{".", "--output", "-"}, out.Args...)
+		}
+		if out.Adapter == "" {
+			out.Adapter = "aderyn"
+		}
+		// aderyn exits 0 even when it finds issues; non-zero means the
+		// binary itself failed, so we keep ContinueOnFailure false.
 	}
 	if out.Adapter == "" {
 		out.Adapter = "raw"
@@ -155,6 +176,9 @@ func runTool(parent context.Context, spec ToolSpec) ToolResult {
 	}
 	if spec.Workdir != "" {
 		cmd.Dir = spec.Workdir
+	}
+	if len(spec.Env) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), spec.Env)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -218,67 +242,11 @@ func parseFindingsAdapter(toolID, stdout, _ string) ([]Finding, error) {
 	return findings, nil
 }
 
-// parseSlither decodes Slither's `--json -` output. The schema:
-//   {"success":bool,"error":...,"results":{"detectors":[{...}]}}
-// Each detector has: check (rule id), impact (severity), confidence,
-// description, elements[].source_mapping.{filename_relative,lines[]}.
-func parseSlither(toolID, stdout, _ string) ([]Finding, error) {
-	payload := extractJSONObject(stdout)
-	if payload == "" {
-		return nil, nil
-	}
-	var root struct {
-		Success bool `json:"success"`
-		Error   any  `json:"error"`
-		Results struct {
-			Detectors []struct {
-				Check       string `json:"check"`
-				Impact      string `json:"impact"`
-				Confidence  string `json:"confidence"`
-				Description string `json:"description"`
-				Elements    []struct {
-					Type          string `json:"type"`
-					Name          string `json:"name"`
-					SourceMapping struct {
-						FilenameRelative string `json:"filename_relative"`
-						Lines            []int  `json:"lines"`
-					} `json:"source_mapping"`
-				} `json:"elements"`
-			} `json:"detectors"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal([]byte(payload), &root); err != nil {
-		return nil, fmt.Errorf("slither json: %w", err)
-	}
-	out := make([]Finding, 0, len(root.Results.Detectors))
-	for i, d := range root.Results.Detectors {
-		base := Finding{
-			Severity: NormalizeSeverity(d.Impact),
-			Title:    fmt.Sprintf("%s (%s)", d.Check, d.Confidence),
-			Body:     strings.TrimSpace(d.Description),
-		}
-		if len(d.Elements) == 0 {
-			base.ID = fmt.Sprintf("%s-%d", d.Check, i)
-			out = append(out, base)
-			continue
-		}
-		for j, el := range d.Elements {
-			f := base
-			f.ID = fmt.Sprintf("%s-%d-%d", d.Check, i, j)
-			f.File = el.SourceMapping.FilenameRelative
-			if len(el.SourceMapping.Lines) > 0 {
-				f.Line = el.SourceMapping.Lines[0]
-			}
-			out = append(out, f)
-		}
-	}
-	return out, nil
-}
-
 // parseMythril decodes mythril's --o json output. Two known schemas exist
 // across versions; we handle the common ones permissively.
-//   {"issues":[{"swc-id":"...","severity":"...","title":"...","description":"...","filename":"...","lineno":N}]}
-//   {"messages":[...],"issues":[...]} (newer)
+//
+//	{"issues":[{"swc-id":"...","severity":"...","title":"...","description":"...","filename":"...","lineno":N}]}
+//	{"messages":[...],"issues":[...]} (newer)
 func parseMythril(toolID, stdout, _ string) ([]Finding, error) {
 	payload := extractJSONObject(stdout)
 	if payload == "" {
@@ -362,5 +330,36 @@ func parseForgeTest(toolID, stdout, _ string) ([]Finding, error) {
 
 // KnownBuiltinTools lists adapters baked into the binary, for `uta doctor`.
 func KnownBuiltinTools() []string {
-	return []string{"slither", "mythril", "forge-test"}
+	return []string{"slither", "mythril", "forge-test", "aderyn"}
+}
+
+// mergeEnv layers overrides on top of a base "K=V" slice. Keys in overrides
+// replace matching entries from base; the remaining base entries are kept in
+// their original order. Overrides are appended in sorted key order so the
+// result is deterministic across runs.
+func mergeEnv(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			out = append(out, kv)
+			continue
+		}
+		if _, replace := overrides[kv[:eq]]; replace {
+			continue
+		}
+		out = append(out, kv)
+	}
+	keys := make([]string, 0, len(overrides))
+	for k := range overrides {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, k+"="+overrides[k])
+	}
+	return out
 }

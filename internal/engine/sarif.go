@@ -21,8 +21,8 @@ type SARIF struct {
 }
 
 type SARIFRun struct {
-	Tool    SARIFTool      `json:"tool"`
-	Results []SARIFResult  `json:"results"`
+	Tool    SARIFTool     `json:"tool"`
+	Results []SARIFResult `json:"results"`
 }
 
 type SARIFTool struct {

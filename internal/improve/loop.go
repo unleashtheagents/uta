@@ -10,8 +10,32 @@ import (
 	"time"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/provider"
 )
+
+// ApplyProfile transforms req in-place using the supplied MissionProfile.
+// Mirrors engine.ApplyProfile but writes to LoopRequest fields. Each
+// iteration's inner RunRequest inherits these values, so capability gates,
+// HITL triggers, and budget caps fire identically to a top-level
+// `uta run --mode <name>` invocation.
+func ApplyProfile(req *LoopRequest, p *profile.MissionProfile) {
+	if req == nil || p == nil {
+		return
+	}
+	req.Env = engine.MergeProfileEnv(req.Env, p.Env)
+	req.PreApproveTools = engine.IntersectAllowedTools(req.PreApproveTools, p.AllowedTools)
+	req.PreApproveTools = engine.SubtractDeniedTools(req.PreApproveTools, p.DeniedTools)
+	req.AllowedTools = append([]string(nil), p.AllowedTools...)
+	req.DeniedTools = append([]string(nil), p.DeniedTools...)
+	req.ModeName = p.Name
+	req.MaxTokens = int64(p.Policies.TokenBudget)
+	req.PerCallMaxTokens = int64(p.Policies.PerCallBudget)
+	req.MaxUSDCents = int64(p.Policies.DollarBudgetCents)
+	req.HITLTriggers = append([]string(nil), p.Policies.HITLTriggers...)
+	req.HITLTokenThreshold = p.Policies.HITLTokenThreshold
+	req.HITLSeverity = p.Policies.HITLSeverity
+}
 
 // LoopRequest configures a self-improvement loop. Designed to be
 // language-agnostic: the verify command, worker, and timeouts are operator-
@@ -26,12 +50,12 @@ import (
 //
 // The loop itself is the same regardless.
 type LoopRequest struct {
-	Worker          string        // provider that implements each idea (default: claude)
-	GatherWorker    string        // provider that gathers fresh ideas when the board is empty (default: gemini)
-	Workdir         string        // workdir for every subtask (defaults to current working dir)
-	Env             []string      // extra env for every subtask
-	VerifyCommand   string        // gate command run after each iteration. REQUIRED — there is no default;
-	                              // the loop is language-agnostic, so the operator must say what "passing" means.
+	Worker        string   // provider that implements each idea (default: claude)
+	GatherWorker  string   // provider that gathers fresh ideas when the board is empty (default: gemini)
+	Workdir       string   // workdir for every subtask (defaults to current working dir)
+	Env           []string // extra env for every subtask
+	VerifyCommand string   // gate command run after each iteration. REQUIRED — there is no default;
+	// the loop is language-agnostic, so the operator must say what "passing" means.
 	PerIdeaTimeout  time.Duration // per-iteration cap; default 20m
 	GatherTimeout   time.Duration // cap for one gather call; default 10m
 	Budget          time.Duration // total wall-clock budget; 0 = no cap
@@ -42,18 +66,48 @@ type LoopRequest struct {
 	DryRun          bool          // pick + execute but skip the gate (smoke-test mode)
 	MaxRetries      int           // gate retries per iteration; default 1
 	PreApproveTools []string      // forwarded to providers
+
+	// Profile-derived policy fields. Each iteration's inner RunRequest is
+	// constructed with these so capability gates, HITL triggers, and
+	// budget caps flow through to the supervisor identically to a
+	// top-level `uta run --mode <name>` invocation. Populated via
+	// engine.ApplyProfileToLoop from the active MissionProfile.
+	ModeName           string
+	AllowedTools       []string
+	DeniedTools        []string
+	HITLTriggers       []string
+	HITLTokenThreshold int
+	HITLSeverity       string
+	MaxTokens          int64
+	PerCallMaxTokens   int64
+	MaxUSDCents        int64
+
+	// MCPConfigPath is the path to a `.mcp.json` describing the MCP
+	// servers each iteration should see, materialized by the engine's
+	// MCP bridge before Loop is called. Forwarded onto every inner
+	// RunRequest so providers with CapMCP (claude, gemini) pick it up
+	// via --mcp-config.
+	MCPConfigPath string
+
+	// OnIterationSession, if set, is invoked once per iteration with the
+	// session id produced by sup.Run for that idea. The CLI uses this
+	// hook to record each session against the active thread (state.json)
+	// so a Ctrl-C mid-loop still leaves the most-recent session
+	// recoverable via `uta resume` with no args. The hook is called
+	// best-effort — its error is ignored.
+	OnIterationSession func(sessionID string)
 }
 
 // LoopResult summarizes one improve invocation.
 type LoopResult struct {
-	Iterations      int
-	IdeasCompleted  int
-	IdeasFailed     int
-	IdeasGathered   int
-	GatherCalls     int
-	StoppedBecause  string // "no_ideas" | "budget_exhausted" | "max_iterations" | "cancelled" | "error"
-	Elapsed         time.Duration
-	LastError       error
+	Iterations     int
+	IdeasCompleted int
+	IdeasFailed    int
+	IdeasGathered  int
+	GatherCalls    int
+	StoppedBecause string // "no_ideas" | "budget_exhausted" | "max_iterations" | "cancelled" | "error"
+	Elapsed        time.Duration
+	LastError      error
 }
 
 // Loop runs the picker → executor → recorder cycle until a stop condition is
@@ -230,7 +284,13 @@ func runGatherStep(ctx context.Context, g *Gatherer, board *Board, reg *provider
 // Returns the terminal status of the idea (Done | Failed) and any error.
 func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req LoopRequest, idea *Idea) (Status, error) {
 	now := time.Now()
-	_ = board.SetStatus(idea.ID, StatusInProgress, SetStatusOpts{IncrementAttempts: true})
+	// Durably record the attempt before doing any work. If we can't persist
+	// the InProgress transition + attempts bump, abort early — otherwise a
+	// crash mid-execution would leave the idea looking untouched and we'd
+	// re-pick it on restart, burning the same cycles forever.
+	if err := board.SetStatus(idea.ID, StatusInProgress, SetStatusOpts{IncrementAttempts: true}); err != nil {
+		return idea.Status, fmt.Errorf("mark idea in-progress: %w", err)
+	}
 
 	// Build the one-shot DAG.
 	prompt := renderImplementPrompt(idea, req.Workdir, req.VerifyCommand)
@@ -267,6 +327,20 @@ func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req 
 		PreSetSubtasks:  []engine.SubtaskSpec{subtask},
 		SkipSynthesis:   true,
 		Strategy:        "dag",
+		// Profile-derived policy: forward unchanged to the inner Run so
+		// capability gates, HITL triggers, and budget caps fire on each
+		// iteration. Set by engine.ApplyProfileToLoop from the active
+		// MissionProfile when --mode is in play.
+		ModeName:           req.ModeName,
+		AllowedTools:       req.AllowedTools,
+		DeniedTools:        req.DeniedTools,
+		HITLTriggers:       req.HITLTriggers,
+		HITLTokenThreshold: req.HITLTokenThreshold,
+		HITLSeverity:       req.HITLSeverity,
+		MaxTokens:          req.MaxTokens,
+		PerCallMaxTokens:   req.PerCallMaxTokens,
+		MaxUSDCents:        req.MaxUSDCents,
+		MCPConfigPath:      req.MCPConfigPath,
 	})
 
 	terminal := StatusFailed
@@ -294,6 +368,10 @@ func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req 
 		errMsg = "supervisor reported status=" + result.Status
 	}
 	_ = now
+
+	if req.OnIterationSession != nil && result.SessionID != "" {
+		req.OnIterationSession(result.SessionID)
+	}
 
 	opts := SetStatusOpts{LastSession: result.SessionID}
 	if errMsg != "" {
