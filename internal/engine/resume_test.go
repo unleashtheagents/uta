@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -10,8 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/unleashtheagents/uta/internal/budget"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/store"
+	"github.com/unleashtheagents/uta/internal/trajectory"
 )
 
 // fakeResumableProvider satisfies both AgentProvider and provider.Resumable.
@@ -141,9 +144,9 @@ func TestSupervisor_Resume_WorkerNotResumable(t *testing.T) {
 func TestSupervisor_Resume_HappyPath(t *testing.T) {
 	deps := newTestDeps(t)
 	var (
-		calls           atomic.Int32
-		gotSessionID    atomic.Value
-		gotPrompt       atomic.Value
+		calls        atomic.Int32
+		gotSessionID atomic.Value
+		gotPrompt    atomic.Value
 	)
 	worker := &fakeResumableProvider{
 		fakeProvider: fakeProvider{name: "worker"},
@@ -308,5 +311,79 @@ func TestSupervisor_Resume_HeadlessErrorMarksSessionFailed(t *testing.T) {
 	}
 	if subs[0].ErrorKind != "worker" {
 		t.Fatalf("subtask error kind: got %q want %q", subs[0].ErrorKind, "worker")
+	}
+}
+
+// TestSupervisor_Resume_BudgetExhausted_AbortsCleanly proves the budget
+// pre/post-flight wiring in Resume mirrors what Supervisor.Run does: a
+// resume turn whose provider reports more tokens than MaxTokens permits
+// must abort with status="budget_exhausted" and emit a budget_exhausted
+// trajectory event — not a generic "failed".
+//
+// This is the supervisor-side enforcement of STATUS-AGENTIC-OS.md
+// Theme A's deferred piece (item 14 "budget enforcement missing in
+// uta resume").
+func TestSupervisor_Resume_BudgetExhausted_AbortsCleanly(t *testing.T) {
+	deps := newTestDeps(t)
+	busSub := deps.Bus.Subscribe(64)
+	collected := make(chan trajectory.Event, 64)
+	go func() {
+		for ev := range busSub {
+			collected <- ev
+		}
+		close(collected)
+	}()
+
+	worker := &fakeResumableProvider{
+		fakeProvider: fakeProvider{name: "worker"},
+		resume: func(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
+			// 200 tokens reported — exceeds the 100-token MaxTokens cap.
+			return provider.RunResult{
+				FinalText: "continued",
+				SessionID: "prov-sess-2",
+				TokensIn:  120,
+				TokensOut: 80,
+			}, nil
+		},
+	}
+	if err := deps.Registry.Register(worker, false); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	priorID := seedPriorSession(t, deps, "worker", "prov-sess-1")
+
+	res, err := New(deps).Resume(context.Background(), ResumeRequest{
+		PriorSessionID: priorID,
+		Goal:           "follow up",
+		MaxTokens:      100, // intentionally small — the call will exceed
+	})
+	if err == nil {
+		t.Fatalf("expected ErrBudgetExceeded, got nil")
+	}
+	if !errors.Is(err, budget.ErrBudgetExceeded) {
+		t.Fatalf("expected ErrBudgetExceeded, got %v", err)
+	}
+	if res.Status != "budget_exhausted" {
+		t.Fatalf("Status: got %q want budget_exhausted", res.Status)
+	}
+
+	newSess, gerr := deps.Store.GetSession(res.SessionID)
+	if gerr != nil {
+		t.Fatalf("GetSession: %v", gerr)
+	}
+	if newSess.Status != "budget_exhausted" {
+		t.Fatalf("persisted status: got %q want budget_exhausted", newSess.Status)
+	}
+
+	// Drain a few events to confirm budget_exhausted was emitted.
+	deps.Bus.Shutdown()
+	sawExhausted := false
+	for ev := range collected {
+		if ev.Kind == trajectory.BudgetExhausted {
+			sawExhausted = true
+			break
+		}
+	}
+	if !sawExhausted {
+		t.Fatalf("expected a budget_exhausted trajectory event, found none")
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func decodeAll(t *testing.T, r io.Reader) []Message {
@@ -374,6 +376,155 @@ func TestServeContextCancelStopsLoop(t *testing.T) {
 	}
 	if err != context.Canceled {
 		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+func TestNotificationsCancelledInterruptsToolCall(t *testing.T) {
+	// A long-running handler that respects ctx.Done() should be interrupted
+	// as soon as a notifications/cancelled with the matching requestId arrives.
+	s := NewServer("uta", "v")
+	started := make(chan struct{})
+	_ = s.RegisterTool(Tool{Name: "slow"}, func(ctx context.Context, _ json.RawMessage) ToolResult {
+		close(started)
+		<-ctx.Done()
+		return ErrorResult("cancelled: " + ctx.Err().Error())
+	})
+
+	pr, pw := io.Pipe()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), pr, &out) }()
+
+	if _, err := pw.Write([]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slow"}}` + "\n")); err != nil {
+		t.Fatalf("write call: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool handler never started — read loop is blocked")
+	}
+	if _, err := pw.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7,"reason":"test"}}` + "\n")); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+	_ = pw.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after cancellation")
+	}
+
+	msgs := decodeAll(t, &out)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 response, got %d: %s", len(msgs), out.String())
+	}
+	if msgs[0].Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %+v", msgs[0].Error)
+	}
+	var tr ToolResult
+	if err := json.Unmarshal(msgs[0].Result, &tr); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !tr.IsError {
+		t.Fatalf("expected isError=true on cancelled tool, got %+v", tr)
+	}
+	if !strings.Contains(tr.Content[0].Text, "context canceled") {
+		t.Fatalf("cancellation reason not surfaced: %q", tr.Content[0].Text)
+	}
+}
+
+func TestNotificationsCancelledUnknownIdIsNoop(t *testing.T) {
+	// Cancellation for a request id the server never saw must be silently
+	// ignored — and must not block or error the subsequent ping.
+	s := NewServer("uta", "v")
+	input := `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":999}}` + "\n" +
+		`{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n"
+	var out bytes.Buffer
+	if err := s.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	msgs := decodeAll(t, &out)
+	if len(msgs) != 1 || string(msgs[0].ID) != "1" {
+		t.Fatalf("expected single ping response, got %s", out.String())
+	}
+}
+
+func TestCancelledStringRequestIdMatchesNumberId(t *testing.T) {
+	// MCP clients may quote the requestId; the server still has to match it
+	// against the originating numeric id. idKey normalizes both forms.
+	s := NewServer("uta", "v")
+	started := make(chan struct{})
+	_ = s.RegisterTool(Tool{Name: "slow"}, func(ctx context.Context, _ json.RawMessage) ToolResult {
+		close(started)
+		<-ctx.Done()
+		return ErrorResult("cancelled")
+	})
+
+	pr, pw := io.Pipe()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), pr, &out) }()
+
+	if _, err := pw.Write([]byte(`{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"slow"}}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	<-started
+	if _, err := pw.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"42"}}` + "\n")); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+	_ = pw.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return — string-id cancellation didn't match")
+	}
+}
+
+type failingWriter struct {
+	mu  sync.Mutex
+	n   int
+	err error
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.n++
+	return 0, w.err
+}
+
+func (w *failingWriter) calls() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
+}
+
+func TestServeWriteErrorTerminatesLoop(t *testing.T) {
+	// If enc.Encode fails (broken pipe, etc.), the loop must surface the
+	// error and stop — otherwise the server keeps draining requests whose
+	// responses go nowhere.
+	s := NewServer("uta", "v")
+	input := strings.Repeat(`{"jsonrpc":"2.0","id":1,"method":"ping"}`+"\n", 100)
+	boom := errors.New("pipe broken")
+	w := &failingWriter{err: boom}
+	err := s.Serve(context.Background(), strings.NewReader(input), w)
+	if err == nil {
+		t.Fatal("expected non-nil error when writer fails")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected pipe error to be surfaced, got %v", err)
+	}
+	// Once the first write fails, the server must not keep attempting writes
+	// for the remaining 99 ping requests.
+	if got := w.calls(); got > 1 {
+		t.Fatalf("expected writer to be called at most once after failure, got %d", got)
 	}
 }
 

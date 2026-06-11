@@ -86,6 +86,27 @@ func (g *Gemini) RunHeadless(ctx context.Context, prompt string, opts provider.R
 	return g.runHeadless(ctx, prompt, "", opts, events)
 }
 
+// buildGeminiArgs assembles the gemini CLI argv. Split out of runHeadless
+// for unit tests; mirrors buildClaudeArgs in shape so MCP-config wiring
+// stays symmetric across providers. The order is: required flags, resume
+// pointer, MCP config, then caller-supplied extras (so a caller can
+// override defaults with ExtraArgs).
+func buildGeminiArgs(prompt, resumeID string, opts provider.RunOptions) []string {
+	args := []string{"-p", prompt, "--output-format", "stream-json"}
+	if resumeID != "" {
+		args = append(args, "-r", resumeID)
+	}
+	// Gemini CLI advertises CapMCP in Detect(); honor the MCPConfigPath
+	// that callers supply via RunOptions by forwarding --mcp-config. Same
+	// flag name claude uses, kept identical so MissionProfile.MCPServers
+	// descriptors stay portable between providers.
+	if opts.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", opts.MCPConfigPath)
+	}
+	args = append(args, opts.ExtraArgs...)
+	return args
+}
+
 func (g *Gemini) ResumeHeadless(ctx context.Context, sessionID, prompt string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
 	if sessionID == "" {
 		return provider.RunResult{}, fmt.Errorf("gemini resume: empty session id: %w", provider.ErrUnsupported)
@@ -94,11 +115,7 @@ func (g *Gemini) ResumeHeadless(ctx context.Context, sessionID, prompt string, o
 }
 
 func (g *Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts provider.RunOptions, events chan<- provider.Event) (provider.RunResult, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json"}
-	if resumeID != "" {
-		args = append(args, "-r", resumeID)
-	}
-	args = append(args, opts.ExtraArgs...)
+	args := buildGeminiArgs(prompt, resumeID, opts)
 
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -166,11 +183,31 @@ func (g *Gemini) runHeadless(ctx context.Context, prompt, resumeID string, opts 
 		exit = exitErr.ExitCode()
 	}
 
+	// Gemini's stream-json envelope does not carry per-call token counts the
+	// way claude's does. Estimate token usage post-hoc from the byte length of
+	// what we sent (prompt) and what we received (finalText) at the standard
+	// ~4-chars-per-token heuristic. This is intentionally pessimistic so the
+	// budget guard trips a little early rather than letting a runaway prompt
+	// over-spend; precise accounting belongs to a future provider rev that
+	// parses gemini's stats event when it lands.
+	//
+	// Dollar accounting is opt-in via operator-configured per-1k-token cent
+	// rates in UTA_GEMINI_INPUT_CENTS_PER_KTOK / UTA_GEMINI_OUTPUT_CENTS_PER_KTOK
+	// (see pricing.go). The gemini CLI itself does not stream cost, so
+	// without those variables the budget's USD dimension never trips for
+	// gemini calls — the operator must declare what their model costs.
+	finalAnswer := strings.TrimSpace(finalText.String())
+	tokensIn := estimateTokens(prompt)
+	tokensOut := estimateTokens(finalAnswer)
+	inRate, outRate := geminiPriceFromEnv()
 	result := provider.RunResult{
-		SessionID: sessionID,
-		FinalText: strings.TrimSpace(finalText.String()),
-		RawOutput: rawBuf.Bytes(),
-		ExitCode:  exit,
+		SessionID:      sessionID,
+		FinalText:      finalAnswer,
+		RawOutput:      rawBuf.Bytes(),
+		ExitCode:       exit,
+		TokensIn:       tokensIn,
+		TokensOut:      tokensOut,
+		ApproxUSDCents: estimateUSDCents(tokensIn, tokensOut, inRate, outRate),
 	}
 
 	if waitErr != nil {
@@ -335,4 +372,3 @@ func pickString(m map[string]any, keys ...string) (string, bool) {
 	}
 	return "", false
 }
-

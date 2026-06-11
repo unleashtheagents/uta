@@ -1,0 +1,40 @@
+# examples/workflows/hello.yaml — beginner-friendly multi-step run.
+#
+# A two-subtask warm-up to show what a uta workflow file looks like
+# without requiring the planner. Runs end-to-end against either claude
+# or gemini.
+#
+# Usage:
+#
+#   uta run -f examples/workflows/hello.yaml -y
+#
+# What it does:
+#   1. List 3 interesting files in the current directory.
+#   2. Pick one and explain why it matters in 2 sentences.
+#   3. Synthesize the two answers into one tidy summary.
+#
+# Outputs nothing to disk — the final answer streams to stdout and the
+# trajectory lands in `uta sessions` / `uta trajectory <id>` for replay.
+
+version: 2
+goal: introduce uta with a tiny two-step fan-out
+
+defaults:
+  worker: claude          # change to `gemini` if you only have gemini-cli installed
+  max_parallel: 2
+
+synthesis:
+  mode: merge             # combine both subtask answers into one final reply
+
+subtasks:
+  - id: list-files
+    title: list 3 interesting files
+    prompt: |
+      List 3 files in the current directory that look interesting to a new reader.
+      For each, give the filename and a 4-word description.
+      Output as a markdown bulleted list.
+  - id: pick-one
+    title: pick one and explain why it matters
+    prompt: |
+      Pick one file from the current directory that best summarizes what
+      this codebase is for. Explain why in exactly 2 sentences.

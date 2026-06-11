@@ -20,9 +20,28 @@ import (
 
 	"github.com/unleashtheagents/uta/internal/config"
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/hitl"
+	"github.com/unleashtheagents/uta/internal/improve"
+	"github.com/unleashtheagents/uta/internal/memory"
+	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/provider"
+	"github.com/unleashtheagents/uta/internal/state"
 	"github.com/unleashtheagents/uta/internal/trajectory"
+	"github.com/unleashtheagents/uta/internal/whiteboard"
 )
+
+// handoffDepthLimit picks the effective depth cap for a handoff chain.
+// A profile may override the default via MissionProfile.MaxHandoffDepth;
+// zero (the field's zero value) means "use the orchestrator default"
+// from profile.DefaultMaxHandoffDepth. The profile loader enforces the
+// upper bound (profile.MaxHandoffDepthHardLimit) at validation time, so
+// nothing here needs to clamp.
+func handoffDepthLimit(req engine.RunRequest) int {
+	if req.MaxHandoffDepth > 0 {
+		return req.MaxHandoffDepth
+	}
+	return profile.DefaultMaxHandoffDepth
+}
 
 func newRunCmd() *cobra.Command {
 	var (
@@ -43,6 +62,7 @@ func newRunCmd() *cobra.Command {
 		workflowFile   string
 		strategyFlag   string
 		maxWallSeconds int
+		resumeSession  string
 	)
 
 	cmd := &cobra.Command{
@@ -141,8 +161,11 @@ func newRunCmd() *cobra.Command {
 			if strings.TrimSpace(goal) == "" {
 				goal = workflowGoal
 			}
-			if strings.TrimSpace(goal) == "" {
-				return errors.New("--goal/-g is required (or pass via -f workflow.yaml, or as positional args)")
+			if strings.TrimSpace(goal) == "" && resumeSession == "" {
+				return errors.New("--goal/-g is required (or pass via -f workflow.yaml, as positional args, or use --resume-session)")
+			}
+			if resumeSession != "" && (goal != "" || workflowFile != "") {
+				return errors.New("--resume-session recovers the prior session's goal and plan; don't combine it with --goal or -f")
 			}
 
 			app, err := newApp(cmd.Context())
@@ -150,6 +173,32 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			defer app.Close()
+
+			// Crash recovery: rebuild the request from the unfinished
+			// session — completed subtasks become prior outcomes (not
+			// re-run), the remainder re-executes. The recovered goal /
+			// worker / mode flow into the normal path below so profile
+			// preamble, MCP bridge, and rendering behave identically to
+			// a fresh run.
+			var priorOutcomes []engine.SubtaskOutcome
+			if resumeSession != "" {
+				recovered, info, rerr := engine.BuildResumeRunRequest(app.Store, app.Blobs, resumeSession)
+				if rerr != nil {
+					return rerr
+				}
+				goal = recovered.Goal
+				if workerName == "" {
+					workerName = recovered.WorkerName
+				}
+				if plannerName == "" {
+					plannerName = recovered.PlannerName
+				}
+				preSet = recovered.PreSetSubtasks
+				priorOutcomes = recovered.PriorOutcomes
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"[uta] resuming run %s (%s): %d completed subtask(s) recovered, %d to re-run\n",
+					shortID(info.PriorSessionID), info.PriorStatus, info.Completed, info.Rerun)
+			}
 
 			detections := app.Registry.DetectAll(cmd.Context())
 			available := availableProviders(app.Registry.Names(), detections)
@@ -195,11 +244,13 @@ func newRunCmd() *cobra.Command {
 
 			recorder := trajectory.NewRecorder(app.Store)
 			deps := engine.Deps{
-				Store:    app.Store,
-				Blobs:    app.Blobs,
-				Recorder: recorder,
-				Bus:      bus,
-				Registry: app.Registry,
+				Store:      app.Store,
+				Blobs:      app.Blobs,
+				Recorder:   recorder,
+				Bus:        bus,
+				Registry:   app.Registry,
+				Memory:     memory.NewFromEnv(app.Store.DB),
+				Whiteboard: whiteboard.New(app.Store.DB),
 			}
 			sup := engine.New(deps)
 
@@ -208,37 +259,84 @@ func newRunCmd() *cobra.Command {
 			// Workflow-declared env comes first so the project-context vars,
 			// appended last, win on duplicate keys (later entries override
 			// earlier ones in os/exec's env handling).
-			subtaskEnv := workflowEnv
-			if app.InProject() {
-				subtaskEnv = append(subtaskEnv,
-					"UTA_PROJECT_ROOT="+app.ProjectRoot,
-					"UTA_CONTEXT_DIR="+app.ContextDir,
-					"UTA_PROJECT_NAME="+app.ProjectName,
-				)
-				if workdir == "" {
-					workdir = app.ProjectRoot
+			subtaskEnv := append(workflowEnv, app.ProjectSubtaskEnv()...)
+			if app.InProject() && workdir == "" {
+				workdir = app.ProjectRoot
+			}
+
+			req := engine.RunRequest{
+				Goal:               goal,
+				WorkerName:         workerName,
+				PlannerName:        plannerName,
+				SynthName:          synthName,
+				MaxParallel:        maxParallel,
+				MaxSubtasks:        maxSubtasks,
+				SubtaskTimeout:     subtaskTimeout,
+				RunTimeout:         runTimeout,
+				FailFast:           failFast,
+				PreApproveTools:    preApprove,
+				Workdir:            workdir,
+				WorkflowPath:       workflowFile,
+				PreSetSubtasks:     preSet,
+				PriorOutcomes:      priorOutcomes,
+				ResumedFromSession: resumeSession,
+				SkipSynthesis:      skipSynth,
+				Strategy:           strategyFlag,
+				Env:                subtaskEnv,
+				MaxWallSeconds:     maxWallSeconds,
+				HITL: &hitl.Gate{
+					StateDir: app.StateDir,
+					Stdin:    cmd.InOrStdin(),
+					Stderr:   cmd.ErrOrStderr(),
+				},
+			}
+
+			mode, err := resolveActiveMode(cmd, app)
+			if err != nil {
+				return err
+			}
+			engine.ApplyProfile(&req, mode)
+			if mode != nil && len(mode.MCPServers) > 0 {
+				probes := engine.ApplyMCPBridge(ctx, &req, mode)
+				for _, p := range probes {
+					if diag := engine.FormatMCPProbeError(p); diag != "" {
+						fmt.Fprintln(cmd.ErrOrStderr(), "warn:", diag)
+					}
+				}
+				if req.MCPConfigPath != "" {
+					defer os.Remove(req.MCPConfigPath)
 				}
 			}
 
-			result, runErr := sup.Run(ctx, engine.RunRequest{
-				Goal:            goal,
-				WorkerName:      workerName,
-				PlannerName:     plannerName,
-				SynthName:       synthName,
-				MaxParallel:     maxParallel,
-				MaxSubtasks:     maxSubtasks,
-				SubtaskTimeout:  subtaskTimeout,
-				RunTimeout:      runTimeout,
-				FailFast:        failFast,
-				PreApproveTools: preApprove,
-				Workdir:         workdir,
-				WorkflowPath:    workflowFile,
-				PreSetSubtasks:  preSet,
-				SkipSynthesis:   skipSynth,
-				Strategy:        strategyFlag,
-				Env:             subtaskEnv,
-				MaxWallSeconds:  maxWallSeconds,
-			})
+			result, runErr := sup.Run(ctx, req)
+
+			// Record this session against the active thread (if any) so
+			// `uta resume` with no args can pick up where the user left
+			// off. Best-effort — a state.json failure should not derail a
+			// successful run.
+			if result.SessionID != "" {
+				if terr := state.TouchActiveSession(app.StateDir, result.SessionID); terr != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warn: update active thread:", terr)
+				}
+			}
+
+			// Handoff chain: when the active profile declares OnComplete
+			// and the run finished cleanly, evaluate handoffs and chain a
+			// follow-up Run for the first matching target. The chain
+			// reuses the same bus + recorder so live subscribers see
+			// every event from every link in chronological order.
+			if runErr == nil && mode != nil && len(mode.OnComplete) > 0 {
+				result = runHandoffChain(ctx, cmd, app, sup, mode, req, result)
+			}
+
+			// Per-mode retrospective: every Nth completed session in a
+			// mode triggers a synthesis pass that writes a markdown under
+			// <project>/.uta/context/retrospectives/. No-op when the
+			// profile has retrospective_every: 0, or when not inside a
+			// project.
+			if runErr == nil && mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
+				maybeWriteRetrospective(ctx, cmd, app, recorder, bus, mode, req, result)
+			}
 
 			bus.Shutdown()
 			if liveDone != nil {
@@ -294,6 +392,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workdir, "workdir", "", "working directory exposed to the worker (defaults to CWD)")
 	cmd.Flags().StringVarP(&workflowFile, "file", "f", "", "load a uta.yaml workflow file (flags can still override its fields)")
 	cmd.Flags().StringVar(&strategyFlag, "strategy", "", "orchestration strategy: fanout (parallel, default) or dag (with needs+gates). Auto-detected from workflow YAML if unset.")
+	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "re-enter a crashed/cancelled session: completed subtasks are recovered (not re-paid), the remainder re-runs, synthesis covers the whole plan")
 
 	return cmd
 }
@@ -378,6 +477,224 @@ func streamJSONL(w io.Writer, ch <-chan trajectory.Event, done chan struct{}) {
 	defer close(done)
 	enc := json.NewEncoder(w)
 	for ev := range ch {
-		_ = enc.Encode(ev)
+		if err := enc.Encode(ev); err != nil {
+			// Sink closed (e.g. broken pipe). Stop encoding but keep
+			// draining so the bus producer doesn't block.
+			for range ch {
+			}
+			return
+		}
+	}
+}
+
+// handoffChainDeps groups the side-effects the chain loop performs so
+// callers (tests in particular) can swap them out. The cli wires these
+// to the real supervisor + git + filesystem; unit tests inject fakes
+// that drive the chain without spinning up real providers.
+type handoffChainDeps struct {
+	// run executes one chained Run. In production this is sup.Run; in
+	// tests it returns canned RunResult/error pairs.
+	run func(ctx context.Context, req engine.RunRequest) (engine.RunResult, error)
+	// changedFiles reports the files modified by the prior run (for
+	// Handoff condition evaluation). Production: engine.GitChangedFiles.
+	changedFiles func(ctx context.Context, workdir string) ([]string, error)
+	// resolve looks up a profile by name. Production: profile.Find over
+	// the loaded set.
+	resolve engine.ProfileResolver
+	// onSession is called for every chained session id, so callers can
+	// e.g. record it against the active thread. Optional.
+	onSession func(sessionID string)
+	// emit groups the trajectory hooks. Production: *engine.Supervisor.
+	emit handoffEmitter
+	// out receives operator-visible chain messages ("handoff: dev ->
+	// audit (depth 1, ...)"). Production: cmd.ErrOrStderr().
+	out io.Writer
+}
+
+// handoffEmitter is the subset of *engine.Supervisor that the chain
+// loop uses for trajectory events. Defined as an interface so tests
+// can verify the exact emit sequence without poking at the bus.
+type handoffEmitter interface {
+	EvaluateHandoffs(priorSessionID string, handoffs []profile.Handoff, changedFiles []string, resolve engine.ProfileResolver) (*engine.HandoffMatch, error)
+	EmitHandoffStarted(priorSessionID string, m *engine.HandoffMatch)
+	EmitHandoffCompleted(priorSessionID, chainedSessionID, status string)
+	EmitHandoffCancelled(priorSessionID, targetMode, reason string)
+}
+
+// runHandoffChain is the cli-facing wrapper that loads profiles, builds
+// the production handoffChainDeps, and delegates to executeHandoffChain.
+func runHandoffChain(
+	ctx context.Context,
+	cmd *cobra.Command,
+	app *App,
+	sup *engine.Supervisor,
+	mode *profile.MissionProfile,
+	baseReq engine.RunRequest,
+	priorResult engine.RunResult,
+) engine.RunResult {
+	if priorResult.Status != "completed" {
+		return priorResult
+	}
+
+	profiles, perrs := profile.LoadAll(app.GlobalHome, app.ProjectRoot)
+	for _, e := range perrs {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warn: profile:", e)
+	}
+	deps := handoffChainDeps{
+		run:          sup.Run,
+		changedFiles: engine.GitChangedFiles,
+		resolve: func(name string) (*profile.MissionProfile, error) {
+			return profile.Find(profiles, name)
+		},
+		onSession: func(sessionID string) {
+			if terr := state.TouchActiveSession(app.StateDir, sessionID); terr != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warn: update active thread:", terr)
+			}
+		},
+		emit: sup,
+		out:  cmd.ErrOrStderr(),
+	}
+	return executeHandoffChain(ctx, deps, mode, baseReq, priorResult)
+}
+
+// executeHandoffChain is the testable core of the handoff walk. It
+// dispatches chained mode invocations for each matching Handoff,
+// reusing the same trajectory bus from the initial invocation — the
+// only thing that changes between hops is the active MissionProfile
+// (and therefore the env, allow-list, MCP servers, and the goal text
+// the chained worker receives).
+//
+// Returns the result of the last chained run. On cancellation (Ctrl-C)
+// emits HandoffCancelled on the prior session and returns the
+// most-recent result. On a failed chained run emits HandoffCompleted
+// with status "failed" and stops.
+func executeHandoffChain(
+	ctx context.Context,
+	deps handoffChainDeps,
+	mode *profile.MissionProfile,
+	baseReq engine.RunRequest,
+	priorResult engine.RunResult,
+) engine.RunResult {
+	depthLimit := handoffDepthLimit(baseReq)
+	current := mode
+	currentResult := priorResult
+	for depth := 0; depth < depthLimit; depth++ {
+		if current == nil || len(current.OnComplete) == 0 {
+			return currentResult
+		}
+		if ctx.Err() != nil {
+			return currentResult
+		}
+
+		changed, _ := deps.changedFiles(ctx, baseReq.Workdir)
+		match, _ := deps.emit.EvaluateHandoffs(currentResult.SessionID, current.OnComplete, changed, deps.resolve)
+		if match == nil {
+			return currentResult
+		}
+
+		deps.emit.EmitHandoffStarted(currentResult.SessionID, match)
+		fmt.Fprintf(deps.out,
+			"\n[uta] handoff: %s -> %s (depth %d, %d files changed)\n",
+			current.Name, match.Handoff.TargetMode, depth+1, len(match.ChangedFiles))
+
+		chainedReq := engine.RunRequest{
+			Goal:                match.Prompt,
+			WorkerName:          baseReq.WorkerName,
+			PlannerName:         baseReq.PlannerName,
+			SynthName:           baseReq.SynthName,
+			MaxParallel:         baseReq.MaxParallel,
+			MaxSubtasks:         baseReq.MaxSubtasks,
+			SubtaskTimeout:      baseReq.SubtaskTimeout,
+			RunTimeout:          baseReq.RunTimeout,
+			FailFast:            baseReq.FailFast,
+			PreApproveTools:     baseReq.PreApproveTools,
+			Workdir:             baseReq.Workdir,
+			Env:                 baseReq.Env,
+			MaxWallSeconds:      baseReq.MaxWallSeconds,
+			TransportMaxRetries: baseReq.TransportMaxRetries,
+			HandoffFrom:         currentResult.SessionID,
+			HandoffTargetMode:   match.Handoff.TargetMode,
+		}
+		// ApplyProfile, called below, replaces the budget fields with the
+		// chained mode's own policies — so we do not copy baseReq's caps
+		// here. A profile without an explicit budget resets to "uncapped",
+		// which matches what the chained mode's author asked for.
+		engine.ApplyProfile(&chainedReq, match.TargetMode)
+		if len(match.TargetMode.MCPServers) > 0 {
+			probes := engine.ApplyMCPBridge(ctx, &chainedReq, match.TargetMode)
+			for _, p := range probes {
+				if diag := engine.FormatMCPProbeError(p); diag != "" {
+					fmt.Fprintln(deps.out, "warn:", diag)
+				}
+			}
+			if chainedReq.MCPConfigPath != "" {
+				defer os.Remove(chainedReq.MCPConfigPath)
+			}
+		}
+
+		chainedResult, chainedErr := deps.run(ctx, chainedReq)
+		if chainedResult.SessionID != "" && deps.onSession != nil {
+			deps.onSession(chainedResult.SessionID)
+		}
+
+		if chainedErr != nil {
+			if errors.Is(chainedErr, context.Canceled) {
+				deps.emit.EmitHandoffCancelled(currentResult.SessionID, match.Handoff.TargetMode, "user cancelled")
+				return currentResult
+			}
+			deps.emit.EmitHandoffCompleted(currentResult.SessionID, chainedResult.SessionID, "failed")
+			return chainedResult
+		}
+
+		deps.emit.EmitHandoffCompleted(currentResult.SessionID, chainedResult.SessionID, chainedResult.Status)
+		current = match.TargetMode
+		currentResult = chainedResult
+		if currentResult.Status != "completed" {
+			return currentResult
+		}
+	}
+	fmt.Fprintf(deps.out, "[uta] handoff chain reached max depth %d; stopping.\n", depthLimit)
+	return currentResult
+}
+
+// maybeWriteRetrospective is the cli-side wrapper around
+// improve.MaybeRetrospective. Failures are logged as warnings (so a
+// transient provider hiccup does not surface as a run failure) but a
+// successful write is announced on stderr so the operator can spot the
+// new artifact.
+func maybeWriteRetrospective(
+	ctx context.Context,
+	cmd *cobra.Command,
+	app *App,
+	recorder *trajectory.Recorder,
+	bus *trajectory.Bus,
+	mode *profile.MissionProfile,
+	req engine.RunRequest,
+	result engine.RunResult,
+) {
+	res, err := improve.MaybeRetrospective(ctx, improve.RetroDeps{
+		Store:    app.Store,
+		Registry: app.Registry,
+		Recorder: recorder,
+		Bus:      bus,
+	}, improve.RetroRequest{
+		ModeName:       mode.Name,
+		ProjectRoot:    app.ProjectRoot,
+		WorkerName:     req.WorkerName,
+		Every:          mode.RetrospectiveEvery,
+		PromptTemplate: mode.RetrospectivePrompt,
+		Workdir:        req.Workdir,
+		Env:            req.Env,
+		Timeout:        req.SubtaskTimeout,
+		PriorSessionID: result.SessionID,
+	})
+	if err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warn: retrospective:", err)
+		return
+	}
+	if res != nil && res.Triggered && res.Path != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"[uta] retrospective for %q written to %s (after %d sessions)\n",
+			mode.Name, res.Path, res.SessionCount)
 	}
 }

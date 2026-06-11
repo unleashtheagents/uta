@@ -28,12 +28,12 @@ type ImportOptions struct {
 // ImportResult is what Restore returns on success — useful for the CLI's
 // success message.
 type ImportResult struct {
-	SessionsImported  int
-	SubtasksImported  int
-	EventsImported    int
-	BlobsImported     int
-	SessionsReplaced  []string // populated when Force=true and a session existed
-	MissingBlobRefs   []string // basenames referenced by rows but absent from the export
+	SessionsImported int
+	SubtasksImported int
+	EventsImported   int
+	BlobsImported    int
+	SessionsReplaced []string // populated when Force=true and a session existed
+	MissingBlobRefs  []string // basenames referenced by rows but absent from the export
 }
 
 // Restore reads an Export and writes its contents into the destination store

@@ -13,10 +13,10 @@ import (
 type Severity string
 
 const (
-	SevHigh   Severity = "high"
-	SevMedium Severity = "medium"
-	SevLow    Severity = "low"
-	SevInfo   Severity = "info"
+	SevHigh    Severity = "high"
+	SevMedium  Severity = "medium"
+	SevLow     Severity = "low"
+	SevInfo    Severity = "info"
 	SevUnknown Severity = "unknown"
 )
 

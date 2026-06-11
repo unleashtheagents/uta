@@ -123,9 +123,11 @@ func runDoctor(cmd *cobra.Command) error {
 
 	fmt.Fprintln(out)
 	if allOK && anyProvider {
-		fmt.Fprintln(out, "All systems go. Try:  uta run -g \"summarize this repo\" -y")
+		fmt.Fprintln(out, "All systems go. Try:  uta hello  (60-second guided tour)")
+		fmt.Fprintln(out, "                  or:  uta run -g \"summarize this repo\" -y")
 	} else {
 		fmt.Fprintln(out, "Some checks failed or no provider is installed. See lines above.")
+		fmt.Fprintln(out, "Tip:  `uta hello` explains what to install and where to read more.")
 		return exitWith(2)
 	}
 	return nil

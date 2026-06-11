@@ -1,0 +1,58 @@
+# examples/profiles/default.yaml — the baseline MissionProfile.
+#
+# This file expresses uta's pre-MissionProfile behavior as a mode: no
+# persona injection, no tool allow/deny restrictions, no token budget,
+# HITL disabled. The same shape is also embedded into the binary so a
+# fresh install can run `uta mode list` and see at least the "default"
+# entry.
+#
+# To customize the default, drop a file named default.yaml in either:
+#   ~/.uta/profiles/             # applies user-wide
+#   <project>/.uta/profiles/     # overrides per-project
+# The project-local copy wins on collision.
+
+name: default
+description: |
+  Baseline mode — preserves uta's pre-MissionProfile behavior. No persona
+  injection, no tool restrictions, no token budgets, HITL disabled.
+
+# personas: IDs of persona files under ~/.uta/personas/ that this mode
+# wants attached to its workers. Empty means "no automatic persona".
+personas: []
+
+# allowed_tools: pre-approved tool-call patterns. In iter 2 this is a
+# pre-approve allow-list passed through to the provider; iter 7 promotes
+# it to a hard capability gate. Empty means "no extra pre-approval".
+allowed_tools: []
+
+# denied_tools: tool-call patterns that are NEVER allowed for this mode.
+# Wins over allowed_tools on overlap (once enforcement lands).
+denied_tools: []
+
+# env: KEY=VALUE pairs merged into every provider invocation's environment.
+env: {}
+
+# policies: guardrails surfaced here for shape; enforcement lands in
+# later iterations.
+policies:
+  # hitl_severity: minimum severity that triggers a human-in-the-loop
+  # pause. One of: "", low, medium, high, critical. Empty disables.
+  hitl_severity: ""
+  # token_budget: hard cap on total tokens for a session. 0 = uncapped.
+  token_budget: 0
+  # per_call_budget: per-provider-call cap. 0 = uncapped.
+  per_call_budget: 0
+
+# memory: per-mode opt-in to the cross-mode institutional-memory store
+# (SQLite table `institutional_facts`). Disabled by default — flip
+# consolidate on once you trust a mode to summarize its own outcomes.
+memory:
+  # consolidate: when true, the supervisor writes a session_outcome fact
+  # at the end of every run/audit, capturing the goal, status, and a
+  # deterministic summary. False (the default) writes nothing.
+  consolidate: false
+  # top_k: how many relevant prior facts (ranked by tag overlap with the
+  # goal) are injected into the planner prompt under the heading
+  # "## Relevant prior facts". 0 = use engine default (3). Negative
+  # disables planner injection entirely.
+  top_k: 0

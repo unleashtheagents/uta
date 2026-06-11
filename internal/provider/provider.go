@@ -55,17 +55,48 @@ type RunOptions struct {
 	// disables retries (single attempt). Honored by the orchestrator's
 	// retry wrapper; providers themselves typically do not act on this.
 	MaxRetries int
+
+	// MCPConfigPath is an absolute path to a `.mcp.json`-shaped file the
+	// engine has materialized for this run. Providers that advertise
+	// CapMCP translate it into their own CLI flag (claude:
+	// `--mcp-config <path>`); providers without CapMCP ignore it. Empty
+	// means "no MCP servers attached to this run".
+	MCPConfigPath string
 }
 
 // RunResult is the terminal value of one RunHeadless call. RawOutput holds
 // the entire raw stdout the provider emitted (line-delimited JSON for stream
 // modes); the supervisor is responsible for persisting it to blob storage and
 // recording the resulting path.
+//
+// TokensIn / TokensOut / ApproxUSDCents are best-effort accounting fields the
+// supervisor charges to the run's budget. Providers fill them in when the
+// underlying CLI streams usage events (claude reports per-message and
+// per-result usage); when the CLI does not, providers may estimate from
+// stream byte counts or leave the fields zero. ApproxUSDCents is expressed
+// in U.S. cents (1 = $0.01) to keep budget comparisons exact.
+//
+// Where the rates live:
+//
+//   - claude:  USD cost arrives on the stream-json `result` envelope's
+//     `total_cost_usd` field — the claude CLI computes it from whatever
+//     model the operator has configured. We forward the value verbatim; uta
+//     does not maintain a separate rate table.
+//   - gemini:  USD cost is computed from operator-supplied per-1k-token
+//     cent rates (UTA_GEMINI_{INPUT,OUTPUT}_CENTS_PER_KTOK env vars) and
+//     the per-call token estimate. Both rates default to 0, which suppresses
+//     USD accounting for gemini — the operator must declare model pricing
+//     for a dollar budget cap to trip on gemini calls.
+//   - declarative (YAML providers): no usage reporting yet; the budget's
+//     token + USD dimensions are inert for them.
 type RunResult struct {
-	SessionID string
-	FinalText string
-	RawOutput []byte
-	ExitCode  int
+	SessionID      string
+	FinalText      string
+	RawOutput      []byte
+	ExitCode       int
+	TokensIn       int64
+	TokensOut      int64
+	ApproxUSDCents int64
 }
 
 // Event is one normalized event drained from a running provider. Providers

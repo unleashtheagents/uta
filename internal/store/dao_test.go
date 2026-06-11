@@ -249,6 +249,106 @@ func TestUpdateSubtask_NullableTimestampsAndErrorFields(t *testing.T) {
 	}
 }
 
+// TestCostRollups verifies the per-(day, mode, provider) usage rollup
+// the new `uta perf --cost` and `uta dash` cost pane both consume. The
+// query lives in dao.go; this test pins its grouping semantics.
+func TestCostRollups(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now()
+	// Two sessions in the dev mode, one in ops, one with no mode.
+	mkSession := func(id, mode string, age time.Duration) {
+		t.Helper()
+		err := s.CreateSession(Session{
+			ID: id, Goal: "g", Worker: "claude", Status: "completed",
+			CreatedAt: now.Add(-age), ModeName: mode,
+		})
+		if err != nil {
+			t.Fatalf("CreateSession(%s): %v", id, err)
+		}
+	}
+	mkSession("sess-dev-a", "dev", 1*time.Hour)
+	mkSession("sess-dev-b", "dev", 2*time.Hour)
+	mkSession("sess-ops", "ops", 1*time.Hour)
+	mkSession("sess-nomode", "", 1*time.Hour)
+
+	mkSubtask := func(id, sessID, worker string, tokensIn, tokensOut, usdCents int64) {
+		t.Helper()
+		start := now.Add(-30 * time.Minute)
+		done := now.Add(-29 * time.Minute)
+		if err := s.CreateSubtask(Subtask{
+			ID: id, SessionID: sessID, Ord: 0,
+			Title: "t", PromptRef: "ref", Worker: worker, Status: "running",
+		}); err != nil {
+			t.Fatalf("CreateSubtask(%s): %v", id, err)
+		}
+		meta := `{"tokens_in":` + itoa(tokensIn) + `,"tokens_out":` + itoa(tokensOut) + `,"usd_cents":` + itoa(usdCents) + `}`
+		if err := s.UpdateSubtask(Subtask{
+			ID: id, Status: "completed",
+			StartedAt: &start, CompletedAt: &done,
+			MetaJSON: meta,
+		}); err != nil {
+			t.Fatalf("UpdateSubtask(%s): %v", id, err)
+		}
+	}
+	// dev/claude — two subtasks → 300/180 tokens, 5c total
+	mkSubtask("st-1", "sess-dev-a", "claude", 100, 60, 2)
+	mkSubtask("st-2", "sess-dev-b", "claude", 200, 120, 3)
+	// dev/gemini — single subtask
+	mkSubtask("st-3", "sess-dev-a", "gemini", 500, 200, 1)
+	// ops/claude
+	mkSubtask("st-4", "sess-ops", "claude", 50, 50, 1)
+	// no-mode/claude
+	mkSubtask("st-5", "sess-nomode", "claude", 1, 1, 0)
+
+	cutoff := now.Add(-24 * time.Hour)
+	buckets, err := s.CostRollups(cutoff, "")
+	if err != nil {
+		t.Fatalf("CostRollups: %v", err)
+	}
+	// Find (mode=dev, provider=claude). Expect calls=2, tokens_in=300, usd_cents=5.
+	var devClaude *CostBucket
+	for i := range buckets {
+		if buckets[i].ModeName == "dev" && buckets[i].Provider == "claude" {
+			devClaude = &buckets[i]
+		}
+	}
+	if devClaude == nil {
+		t.Fatalf("missing dev/claude bucket in %+v", buckets)
+	}
+	if devClaude.Calls != 2 || devClaude.TokensIn != 300 || devClaude.TokensOut != 180 || devClaude.USDCents != 5 {
+		t.Errorf("dev/claude rollup wrong: %+v", devClaude)
+	}
+
+	// Mode filter "dev" should drop ops + no-mode rows.
+	devOnly, err := s.CostRollups(cutoff, "dev")
+	if err != nil {
+		t.Fatalf("CostRollups(dev): %v", err)
+	}
+	for _, b := range devOnly {
+		if b.ModeName != "dev" {
+			t.Errorf("CostRollups(dev) returned non-dev row: %+v", b)
+		}
+	}
+}
+
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	sign := ""
+	if n < 0 {
+		sign = "-"
+		n = -n
+	}
+	digits := ""
+	for n > 0 {
+		digits = string(rune('0'+(n%10))) + digits
+		n /= 10
+	}
+	return sign + digits
+}
+
 func TestCreateSubtask_OrphanFailsFK(t *testing.T) {
 	s := newTestStore(t)
 	err := s.CreateSubtask(Subtask{

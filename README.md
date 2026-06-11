@@ -4,6 +4,16 @@ A CLI agent orchestrator. Decomposes goals into parallel subtasks, dispatches th
 
 Status: **pre-alpha**. v1 in active development.
 
+## Why uta vs. just using Claude Code (or Gemini, or…)?
+
+A single agent CLI is great at one back-and-forth conversation. uta is the layer above:
+
+- **Parallelism.** A planner decomposes a goal into independent subtasks and fans them out. Three subtasks run on three providers concurrently instead of waiting in sequence.
+- **Cross-provider.** Each subtask can target a different CLI — Gemini for repo-wide context (1M tokens), Claude for delegation-heavy edits, anything else via a 30-line YAML descriptor.
+- **Replayable.** Every prompt, tool call, token count, and final answer is recorded in SQLite. `uta sessions` / `uta trajectory <id>` lets you inspect, audit, or resume any run later.
+- **Modes & profiles.** A MissionProfile sets policy per task type (dev / ops / audit / research): allowed tools, HITL triggers, budget caps, retrospective cadence.
+- **Bidirectional MCP.** uta can call MCP servers as tools, **and** expose itself as an MCP server so Claude Code, Cursor, etc. can call into uta's planner.
+
 ## Install
 
 ```sh
@@ -17,9 +27,10 @@ curl -fsSL https://unleashtheagents.ai/install.sh | sh
 go install github.com/unleashtheagents/uta/cmd/uta@latest
 ```
 
-## Quick start
+## 60-second tour
 
 ```sh
+uta hello                                             # what is this, what's installed, what to try next
 uta doctor                                            # verify environment
 uta providers                                         # list detected agent CLIs
 uta run -g "summarize this repo in 5 bullets" -y      # ad-hoc orchestration
@@ -27,6 +38,27 @@ uta sessions                                          # list past runs
 uta trajectory <id>                                   # the full event timeline
 uta resume <id> -g "now turn each bullet into a tweet"
 ```
+
+Sample output of a fan-out run:
+
+```text
+$ uta run -g "summarize this repo in 5 bullets" -y
+[uta] planner=claude/gemini worker=claude max-parallel=3
+[uta] plan: 3 subtasks
+  s1  what does this codebase do?
+  s2  how is it structured?
+  s3  what's the install path?
+[uta] s1 ─ running (claude)         ✓ 1.2s
+[uta] s2 ─ running (claude)         ✓ 2.1s   parallel with s1
+[uta] s3 ─ running (claude)         ✓ 0.9s   parallel with s1/s2
+[uta] synthesize ── claude          ✓ 0.7s
+- A CLI for orchestrating multiple agent CLIs in parallel.
+- ...
+
+[uta] session 4f6c... status=completed  tokens=12,430  approx $0.04
+```
+
+Run `uta dash` for the at-a-glance view across all sessions, modes, and cost.
 
 ## Workflow file
 
@@ -62,6 +94,22 @@ capabilities: [resume, stream-json]
 ```
 
 `uta providers` will pick it up at the next invocation.
+
+## Use uta from another agent (MCP)
+
+`uta serve --mcp` exposes the whole CLI as a Model Context Protocol server
+on stdio. Wire it into Claude Code, Cursor, or any MCP-aware client and
+their model can call into uta's planner, idea backlog, audit reflector,
+and inter-agent whiteboard.
+
+```sh
+# Print a ready-to-paste client config:
+uta serve --print-mcp-config claude-code > .mcp.json
+uta serve --print-mcp-config cursor      > ~/.cursor/mcp.json
+```
+
+Full setup guide: [`docs/mcp-server.md`](docs/mcp-server.md). Sample
+configs: [`examples/mcp/`](examples/mcp/).
 
 ## Layout
 

@@ -1,0 +1,8 @@
+{
+  "name": "uta",
+  "transport": {
+    "type": "stdio",
+    "command": "uta",
+    "args": ["serve", "--mcp"]
+  }
+}

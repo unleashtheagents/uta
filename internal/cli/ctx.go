@@ -180,10 +180,10 @@ func newCtxListCmd() *cobra.Command {
 				return err
 			}
 			type row struct {
-				Name      string    `json:"name"`
-				Size      int64     `json:"size"`
-				Modified  time.Time `json:"modified"`
-				Path      string    `json:"path"`
+				Name     string    `json:"name"`
+				Size     int64     `json:"size"`
+				Modified time.Time `json:"modified"`
+				Path     string    `json:"path"`
 			}
 			var rows []row
 			for _, e := range entries {

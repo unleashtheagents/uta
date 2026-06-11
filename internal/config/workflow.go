@@ -133,6 +133,9 @@ func (w *Workflow) Validate() error {
 			return fmt.Errorf("subtask %d (id=%q): prompt is required", i, st.ID)
 		}
 		if st.ID != "" {
+			if !isValidSubtaskID(st.ID) {
+				return fmt.Errorf("subtask %d: invalid id %q (allowed: A-Z a-z 0-9 . _ -, max 64)", i, st.ID)
+			}
 			if ids[st.ID] {
 				return fmt.Errorf("subtask %d: duplicate id %q", i, st.ID)
 			}
@@ -162,6 +165,26 @@ func (w *Workflow) Validate() error {
 		}
 	}
 	return nil
+}
+
+// isValidSubtaskID mirrors engine.isValidSubtaskID: subtask IDs flow into map
+// keys, artifact filenames, JSON event payloads, and shell variable names, so
+// we restrict them to a safe character set at load time.
+func isValidSubtaskID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // InferStrategy returns the explicit Strategy field if set; otherwise it

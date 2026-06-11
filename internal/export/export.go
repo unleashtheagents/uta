@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/unleashtheagents/uta/internal/redact"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/version"
 )
@@ -41,23 +42,29 @@ const FormatVersion = 1
 
 // Header is the export's self-describing envelope.
 type Header struct {
-	FormatVersion int            `json:"format_version"`
-	UtaVersion    string         `json:"uta_version"`
-	SchemaVersion string         `json:"schema_version"`
-	ExportedAt    time.Time      `json:"exported_at"`
-	Scope         string         `json:"scope"`
-	SessionIDs    []string       `json:"session_ids"`
-	IncludeBlobs  bool           `json:"include_blobs"`
-	RowCounts     map[string]int `json:"row_counts"`
-	BodySHA256    string         `json:"body_sha256,omitempty"`
+	FormatVersion int       `json:"format_version"`
+	UtaVersion    string    `json:"uta_version"`
+	SchemaVersion string    `json:"schema_version"`
+	ExportedAt    time.Time `json:"exported_at"`
+	Scope         string    `json:"scope"`
+	SessionIDs    []string  `json:"session_ids"`
+	IncludeBlobs  bool      `json:"include_blobs"`
+	// Redacted records whether the secret-scrubbing pass ran; Redactions
+	// is the per-rule replacement count (empty map when nothing matched).
+	// Importers and reviewers can tell at a glance whether an export is
+	// safe to share and what was removed.
+	Redacted   bool           `json:"redacted"`
+	Redactions map[string]int `json:"redactions,omitempty"`
+	RowCounts  map[string]int `json:"row_counts"`
+	BodySHA256 string         `json:"body_sha256,omitempty"`
 }
 
 // Export is the root of the JSON document.
 type Export struct {
-	Header   Header           `json:"header"`
-	Sessions []SessionRow     `json:"sessions"`
-	Subtasks []SubtaskRow     `json:"subtasks"`
-	Events   []EventRow       `json:"events"`
+	Header   Header            `json:"header"`
+	Sessions []SessionRow      `json:"sessions"`
+	Subtasks []SubtaskRow      `json:"subtasks"`
+	Events   []EventRow        `json:"events"`
 	Blobs    map[string]string `json:"blobs,omitempty"`
 }
 
@@ -113,6 +120,11 @@ type Options struct {
 	All bool
 	// IncludeBlobs=true reads referenced blob files and inlines them as base64.
 	IncludeBlobs bool
+	// NoRedact=true skips the secret-scrubbing pass. The zero value keeps
+	// redaction ON — exports are outward-facing artifacts and raw provider
+	// output can contain keys, tokens, and env dumps. Callers that want a
+	// byte-faithful local backup opt out explicitly (--no-redact).
+	NoRedact bool
 }
 
 // Run produces an Export from a live store. The caller is responsible for
@@ -238,6 +250,15 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 		}
 	}
 
+	// Scrub secret-shaped strings from every text field that can carry
+	// raw provider output. Applied before the body hash so the hash
+	// covers what's actually in the file. Refs and IDs are left alone —
+	// they're content-addressed names, not content.
+	var redactions redact.Result
+	if !opts.NoRedact {
+		redactions = scrubExport(out)
+	}
+
 	scope := "session"
 	if opts.All {
 		scope = "all"
@@ -250,6 +271,8 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 		Scope:         scope,
 		SessionIDs:    sessionIDs,
 		IncludeBlobs:  opts.IncludeBlobs,
+		Redacted:      !opts.NoRedact,
+		Redactions:    redactions.Counts,
 		RowCounts: map[string]int{
 			"sessions": len(out.Sessions),
 			"subtasks": len(out.Subtasks),
@@ -270,4 +293,54 @@ func Run(s *store.Store, blobsDir string, opts Options) (*Export, error) {
 	out.Header.BodySHA256 = hex.EncodeToString(sum[:])
 
 	return out, nil
+}
+
+// scrubExport runs the redaction pass over every field that can carry
+// raw provider output: session goals, subtask titles/results/errors,
+// event payloads, and inlined blob contents. Blob values are base64 —
+// they are decoded, scrubbed, and re-encoded so the secret never
+// survives in either representation. Returns the merged counts.
+func scrubExport(out *Export) redact.Result {
+	var total redact.Result
+	scrub := func(s *string) {
+		if *s == "" {
+			return
+		}
+		clean, res := redact.String(*s)
+		*s = clean
+		total.Merge(res)
+	}
+	for i := range out.Sessions {
+		scrub(&out.Sessions[i].Goal)
+		scrub(&out.Sessions[i].MetaJSON)
+	}
+	for i := range out.Subtasks {
+		scrub(&out.Subtasks[i].Title)
+		scrub(&out.Subtasks[i].ResultText)
+		scrub(&out.Subtasks[i].Error)
+		scrub(&out.Subtasks[i].MetaJSON)
+	}
+	for i := range out.Events {
+		if len(out.Events[i].Payload) == 0 {
+			continue
+		}
+		clean, res := redact.Bytes(out.Events[i].Payload)
+		out.Events[i].Payload = clean
+		total.Merge(res)
+	}
+	for base, b64 := range out.Blobs {
+		if b64 == "" {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			continue // not valid base64; leave as-is rather than corrupt
+		}
+		clean, res := redact.Bytes(raw)
+		if res.Total() > 0 {
+			out.Blobs[base] = base64.StdEncoding.EncodeToString(clean)
+			total.Merge(res)
+		}
+	}
+	return total
 }

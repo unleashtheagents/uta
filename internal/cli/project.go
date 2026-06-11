@@ -94,9 +94,13 @@ func newProjectInitCmd() *cobra.Command {
 			success = true
 
 			// Record the project in the global index so `uta project list`
-			// can find it later. Best-effort; failure is non-fatal.
+			// can find it later. Best-effort; failure is non-fatal but we
+			// surface it on stderr so a silently-broken registry doesn't go
+			// unnoticed.
 			if home, herr := paths.Home(); herr == nil {
-				appendProjectIndex(home, cwd)
+				if ierr := appendProjectIndex(home, cwd); ierr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not record project in global index: %v\n", ierr)
+				}
 			}
 
 			loaded, _ := config.LoadProject(cwd)
@@ -137,14 +141,14 @@ func newProjectInfoCmd() *cobra.Command {
 				return err
 			}
 			info := map[string]any{
-				"name":         proj.Name,
-				"root":         app.ProjectRoot,
-				"state_dir":    app.StateDir,
-				"context_dir":  app.ContextDir,
-				"created_at":   proj.CreatedAt,
-				"schema":       proj.SchemaVersion,
-				"db":           paths.DB(app.StateDir),
-				"global_home":  app.GlobalHome,
+				"name":        proj.Name,
+				"root":        app.ProjectRoot,
+				"state_dir":   app.StateDir,
+				"context_dir": app.ContextDir,
+				"created_at":  proj.CreatedAt,
+				"schema":      proj.SchemaVersion,
+				"db":          paths.DB(app.StateDir),
+				"global_home": app.GlobalHome,
 			}
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
@@ -227,21 +231,28 @@ registry of projects beyond what uta has seen on this machine.`,
 	return cmd
 }
 
-// appendProjectIndex appends root (deduped) to ~/.uta/projects.index.
-func appendProjectIndex(globalHome, root string) {
+// appendProjectIndex appends root (deduped) to ~/.uta/projects.index. On a
+// partial write the file is truncated back to its original size so the
+// index is not left with a half-written line.
+func appendProjectIndex(globalHome, root string) error {
 	idx := filepath.Join(globalHome, "projects.index")
 	existing, _ := os.ReadFile(idx)
 	for _, line := range splitLines(string(existing)) {
 		if line == root {
-			return // already recorded
+			return nil // already recorded
 		}
 	}
+	origLen := int64(len(existing))
 	f, err := os.OpenFile(idx, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-	_, _ = f.WriteString(root + "\n")
+	if _, werr := f.WriteString(root + "\n"); werr != nil {
+		f.Close()
+		_ = os.Truncate(idx, origLen)
+		return werr
+	}
+	return f.Close()
 }
 
 func splitLines(s string) []string {

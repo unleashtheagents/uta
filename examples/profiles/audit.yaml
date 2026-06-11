@@ -1,0 +1,57 @@
+# examples/profiles/audit.yaml — the "audit" MissionProfile.
+#
+# Wraps uta's Reflector strategy into a first-class smart-contract audit
+# mode. Activating it (`uta audit <path> --mode audit`) bundles three
+# auditor personas — Trail-of-Bits, OpenZeppelin-style, and a formal
+# verification reviewer — alongside the slither + aderyn static
+# analyzers. Findings from every source land in the same severity-sorted
+# FindingsReport.
+#
+# Drop a copy under ~/.uta/profiles/ to make it user-wide, or under
+# <project>/.uta/profiles/ to make it project-local (project copy wins
+# on name collision).
+#
+# Prerequisites for the bundled tool adapters:
+#   - slither — pip install slither-analyzer
+#   - aderyn  — cargo install aderyn   (or download a prebuilt binary)
+# Both tools exit cleanly when not installed; the audit just won't get
+# their findings.
+
+name: audit
+description: |
+  Smart-contract audit mode. Three personas (Trail-of-Bits, OpenZeppelin-style,
+  formal-verification) review the contracts in parallel while slither + aderyn
+  contribute static-analysis findings to the same report. HITL fires on any
+  high-severity action so a worker can't auto-apply destructive fixes when
+  --fix is also set.
+
+personas:
+  - trail-of-bits
+  - openzeppelin-style
+  - formal-verification
+
+# tools: external static analyzers attached to every iteration of the
+# audit loop. Built-in adapter names (slither, aderyn, mythril,
+# forge-test) get sensible default invocations; bring your own by
+# repeating the same id=cmd grammar the --tool CLI flag accepts.
+tools:
+  - slither
+  - aderyn
+
+# allowed_tools: pre-approve list for the LLM workers. Audits need
+# read access plus the ability to shell out to the bundled analyzers;
+# anything destructive is intentionally omitted so --pre-approve can't
+# slip it in.
+allowed_tools:
+  - Read
+  - Bash(slither *)
+  - Bash(aderyn *)
+
+denied_tools: []
+
+env: {}
+
+policies:
+  hitl_severity: high
+  token_budget: 0
+  per_call_budget: 0

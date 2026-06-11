@@ -33,3 +33,19 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// estimateTokens returns a coarse byte-length-based token estimate. The
+// industry-standard heuristic for English-ish input is ~4 chars per token;
+// we round up so the budget treats the estimate as a ceiling. Used by the
+// gemini provider as a post-hoc stand-in for usage events the CLI does
+// not stream.
+func estimateTokens(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n := int64(len(s)) / 4
+	if int64(len(s))%4 != 0 {
+		n++
+	}
+	return n
+}

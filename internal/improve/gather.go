@@ -20,14 +20,14 @@ type Gatherer struct {
 
 // GatherRequest configures one gather call.
 type GatherRequest struct {
-	WorkerName string         // provider to invoke; defaults to "gemini" because of its context-window advantage
-	Goal       string         // optional extra steering ("focus on test coverage", etc.)
-	Workdir    string         // exposed to the worker
-	Env        []string       // extra env (e.g. UTA_PROJECT_ROOT)
-	Timeout    time.Duration  // per-call timeout; default 10m
-	MaxIdeas   int            // hard cap on the number of ideas returned; default 15
-	Tags       []string       // tags applied to every produced idea
-	Existing   []*Idea        // already-known ideas; the gatherer is told to avoid duplicates
+	WorkerName string        // provider to invoke; defaults to "gemini" because of its context-window advantage
+	Goal       string        // optional extra steering ("focus on test coverage", etc.)
+	Workdir    string        // exposed to the worker
+	Env        []string      // extra env (e.g. UTA_PROJECT_ROOT)
+	Timeout    time.Duration // per-call timeout; default 10m
+	MaxIdeas   int           // hard cap on the number of ideas returned; default 15
+	Tags       []string      // tags applied to every produced idea
+	Existing   []*Idea       // already-known ideas; the gatherer is told to avoid duplicates
 }
 
 // GatherResult is what the gatherer returns. Ideas are NOT yet persisted —

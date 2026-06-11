@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "uta": {
+      "command": "uta",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}

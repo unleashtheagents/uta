@@ -12,10 +12,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/config"
+	"github.com/unleashtheagents/uta/internal/orgstate"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/provider/builtin"
 	"github.com/unleashtheagents/uta/internal/provider/declarative"
+	"github.com/unleashtheagents/uta/internal/researchdb"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/version"
 )
@@ -74,6 +76,24 @@ func (a *App) Close() {
 
 // InProject reports whether this invocation is scoped to a project.
 func (a *App) InProject() bool { return a.ProjectRoot != "" }
+
+// ProjectSubtaskEnv returns the project-scoped env vars every subtask
+// should see when uta is running inside a project. Returns nil when not
+// in a project so callers can append unconditionally. Keep this in sync
+// with the orgstate / researchdb package docs, which advertise the
+// $UTA_ORG_STATE and $UTA_RESEARCH_DB names to persona authors.
+func (a *App) ProjectSubtaskEnv() []string {
+	if !a.InProject() {
+		return nil
+	}
+	return []string{
+		"UTA_PROJECT_ROOT=" + a.ProjectRoot,
+		"UTA_CONTEXT_DIR=" + a.ContextDir,
+		"UTA_PROJECT_NAME=" + a.ProjectName,
+		"UTA_ORG_STATE=" + orgstate.Path(a.ContextDir),
+		"UTA_RESEARCH_DB=" + researchdb.Path(a.ContextDir),
+	}
+}
 
 // newApp resolves paths, opens the store (running migrations if needed), and
 // builds a registry seeded with the built-in providers. Auto-detects a
@@ -170,7 +190,9 @@ func Execute() {
 	}
 	root.PersistentFlags().String("log-level", "info", "log level: debug|info|warn|error")
 	root.PersistentFlags().Bool("no-color", false, "disable ANSI colors")
+	root.PersistentFlags().String("mode", "", "MissionProfile name (see `uta mode list`). When set, the profile's env is merged in and its allowed_tools restricts --pre-approve.")
 
+	root.AddCommand(newHelloCmd())
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newProvidersCmd())
 	root.AddCommand(newRunCmd())
@@ -186,6 +208,16 @@ func Execute() {
 	root.AddCommand(newIdeasCmd())
 	root.AddCommand(newImproveCmd())
 	root.AddCommand(newServeCmd())
+	root.AddCommand(newModeCmd())
+	root.AddCommand(newThreadCmd())
+	root.AddCommand(newDashCmd())
+	root.AddCommand(newMemoryCmd())
+	root.AddCommand(newRecallCmd())
+	root.AddCommand(newEvalCmd())
+	root.AddCommand(newVibeCmd())
+	root.AddCommand(newShadowCmd())
+	root.AddCommand(newHITLCmd())
+	root.AddCommand(newPerfCmd())
 
 	if err := root.Execute(); err != nil {
 		var ee *exitError

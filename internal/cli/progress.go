@@ -176,6 +176,11 @@ func (r *Renderer) handle(ev trajectory.Event) {
 	case trajectory.SubtaskFailed:
 		r.dotLocked(r.red("!"))
 
+	case trajectory.CapabilityGateDenied:
+		// Yellow "x" marks a tool call the active MissionProfile's
+		// capability gate denied. The full payload is in the trajectory.
+		r.dotLocked(r.yellow("x"))
+
 	case trajectory.SynthesisStarted:
 		r.endPhaseLocked("", "")
 		r.startPhaseLocked("Synthesizing")

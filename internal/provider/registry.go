@@ -60,6 +60,31 @@ func (r *Registry) Names() []string {
 	return out
 }
 
+// GetAvailable runs DetectAll and returns the providers whose Detect()
+// reported Available=true, sorted by name. Callers that already hold a
+// Detection map should filter it directly — this helper exists for sites
+// that only need the available subset and would otherwise duplicate the
+// DetectAll-plus-filter boilerplate.
+func (r *Registry) GetAvailable(ctx context.Context) []AgentProvider {
+	detections := r.DetectAll(ctx)
+	available := make([]string, 0, len(detections))
+	for name, d := range detections {
+		if d.Available {
+			available = append(available, name)
+		}
+	}
+	sort.Strings(available)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]AgentProvider, 0, len(available))
+	for _, n := range available {
+		if p, ok := r.providers[n]; ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // DetectAll runs Detect() on every registered provider, in parallel. Results
 // come back keyed by provider name. If a provider's Detect() returns without
 // setting Detection.Err but the per-detection context deadline expired,

@@ -14,9 +14,9 @@ import (
 // subtasks (uta audit, uta run with reflector strategy) can be paired with
 // at run time. Stored at ~/.uta/personas/<id>.yaml.
 type Persona struct {
-	ID     string   `yaml:"id"`              // stable identifier; used as --critic and on Finding rows
-	Title  string   `yaml:"title,omitempty"` // human-readable label
-	Prompt string   `yaml:"prompt"`          // appended to the critic preamble verbatim
+	ID     string   `yaml:"id"`               // stable identifier; used as --critic and on Finding rows
+	Title  string   `yaml:"title,omitempty"`  // human-readable label
+	Prompt string   `yaml:"prompt"`           // appended to the critic preamble verbatim
 	Worker string   `yaml:"worker,omitempty"` // optional default worker
 	Tags   []string `yaml:"tags,omitempty"`
 
