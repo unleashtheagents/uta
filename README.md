@@ -37,7 +37,13 @@ uta run -g "summarize this repo in 5 bullets" -y      # ad-hoc orchestration
 uta sessions                                          # list past runs
 uta trajectory <id>                                   # the full event timeline
 uta resume <id> -g "now turn each bullet into a tweet"
+uta discuss -t "monolith or microservices for this repo?"   # two LLMs debate, moderator synthesizes
 ```
+
+`uta discuss` pits two agents — ideally two different LLMs (claude vs
+gemini) — against each other for several rounds of rebuttals, then a
+moderator synthesizes agreements, disagreements, and a verdict. See
+[`docs/discussion.md`](docs/discussion.md).
 
 Sample output of a fan-out run:
 
