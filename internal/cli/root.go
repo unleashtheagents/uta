@@ -190,34 +190,34 @@ func Execute() {
 	}
 	root.PersistentFlags().String("log-level", "info", "log level: debug|info|warn|error")
 	root.PersistentFlags().Bool("no-color", false, "disable ANSI colors")
-	root.PersistentFlags().String("mode", "", "MissionProfile name (see `uta mode list`). When set, the profile's env is merged in and its allowed_tools restricts --pre-approve.")
+	// Note: no backticks in the usage string — cobra renders backticked text
+	// as the flag's type placeholder ("--mode uta mode list").
+	root.PersistentFlags().String("mode", "", "MissionProfile name (see 'uta mode list'). When set, the profile's env is merged in and its allowed_tools restricts --pre-approve.")
 
-	root.AddCommand(newHelloCmd())
-	root.AddCommand(newDoctorCmd())
-	root.AddCommand(newProvidersCmd())
-	root.AddCommand(newRunCmd())
-	root.AddCommand(newResumeCmd())
-	root.AddCommand(newSessionsCmd())
-	root.AddCommand(newTrajectoryCmd())
-	root.AddCommand(newInitCmd())
-	root.AddCommand(newExportDBCmd())
-	root.AddCommand(newImportCmd())
-	root.AddCommand(newProjectCmd())
-	root.AddCommand(newCtxCmd())
-	root.AddCommand(newAuditCmd())
-	root.AddCommand(newIdeasCmd())
-	root.AddCommand(newImproveCmd())
-	root.AddCommand(newServeCmd())
-	root.AddCommand(newModeCmd())
-	root.AddCommand(newThreadCmd())
-	root.AddCommand(newDashCmd())
-	root.AddCommand(newMemoryCmd())
-	root.AddCommand(newRecallCmd())
-	root.AddCommand(newEvalCmd())
-	root.AddCommand(newVibeCmd())
-	root.AddCommand(newShadowCmd())
-	root.AddCommand(newHITLCmd())
-	root.AddCommand(newPerfCmd())
+	// Group commands so `uta --help` reads as a guided menu instead of a
+	// flat 28-entry list. addTo assigns the group id and registers.
+	addTo := func(groupID string, cmds ...*cobra.Command) {
+		for _, c := range cmds {
+			c.GroupID = groupID
+			root.AddCommand(c)
+		}
+	}
+	root.AddGroup(
+		&cobra.Group{ID: "start", Title: "Getting Started:"},
+		&cobra.Group{ID: "orchestrate", Title: "Run & Orchestrate:"},
+		&cobra.Group{ID: "inspect", Title: "Inspect & Analyze:"},
+		&cobra.Group{ID: "workspace", Title: "Workspace & Steering:"},
+		&cobra.Group{ID: "data", Title: "Memory & Data:"},
+		&cobra.Group{ID: "integrate", Title: "Integrations:"},
+	)
+	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newProvidersCmd())
+	addTo("orchestrate", newRunCmd(), newResumeCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
+	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newPerfCmd(), newDashCmd())
+	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd())
+	addTo("data", newMemoryCmd(), newRecallCmd(), newIdeasCmd(), newExportDBCmd(), newImportCmd())
+	addTo("integrate", newServeCmd())
+	root.SetHelpCommandGroupID("start")
+	root.SetCompletionCommandGroupID("integrate")
 
 	if err := root.Execute(); err != nil {
 		var ee *exitError

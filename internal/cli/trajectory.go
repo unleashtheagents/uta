@@ -39,7 +39,8 @@ Formats:
 The OTLP trace has deterministic ids (derived from session/subtask ids)
 so re-exporting the same session updates rather than duplicates it in
 the collector.`,
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {

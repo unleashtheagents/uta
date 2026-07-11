@@ -171,7 +171,7 @@ your own workflow YAML and using 'uta run -f' instead.`,
 				detections := app.Registry.DetectAll(cmd.Context())
 				avail := availableProviders(app.Registry.Names(), detections)
 				if len(avail) == 0 {
-					return errors.New("no provider is installed on PATH. Try installing 'claude' or 'gemini' first.")
+					return errNoProviders
 				}
 				worker = avail[0]
 			}

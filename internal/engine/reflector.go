@@ -541,11 +541,11 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 					"error":     revErr.Error(),
 					"iteration": iter,
 				})
-				_ = s.deps.Store.MarkSession(sessionID, "budget_exhausted", "")
+				s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "budget_exhausted", ""))
 				return res, revErr
 			}
 			s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": revErr.Error(), "iteration": iter})
-			_ = s.deps.Store.MarkSession(sessionID, "failed", "")
+			s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
 			res.Status = "failed"
 			return res, revErr
 		}
@@ -565,7 +565,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 			}
 		}
 	}
-	_ = s.deps.Store.MarkSession(sessionID, res.Status, finalRef)
+	s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, res.Status, finalRef))
 	if req.MemoryConsolidate {
 		s.consolidateAuditOutcome(sessionID, req, &res)
 	}

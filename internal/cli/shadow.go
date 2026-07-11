@@ -119,7 +119,7 @@ provider — useful for sanity-checking the filter.`,
 				det := app.Registry.DetectAll(cmd.Context())
 				avail := availableProviders(app.Registry.Names(), det)
 				if len(avail) == 0 {
-					return errors.New("no provider is installed on PATH; pass --worker to override")
+					return errNoProviders
 				}
 				worker = avail[0]
 			}

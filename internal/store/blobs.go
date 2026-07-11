@@ -121,6 +121,53 @@ func (b *Blobs) List() ([]BlobInfo, error) {
 	return out, nil
 }
 
+// UnreferencedBlobs compares the blobs on disk against every blob-ref
+// column in the database (sessions.final_answer_ref, subtasks.prompt_ref,
+// subtasks.raw_output_ref) and returns the orphans plus their total size in
+// bytes. Detection only — callers decide whether to delete. Note refs are
+// stored as absolute paths, so a relocated state dir makes every blob look
+// orphaned; report before acting.
+func (s *Store) UnreferencedBlobs(b *Blobs) ([]BlobInfo, int64, error) {
+	refs := map[string]bool{}
+	for _, q := range []string{
+		`SELECT final_answer_ref FROM sessions WHERE final_answer_ref IS NOT NULL AND final_answer_ref != ''`,
+		`SELECT prompt_ref FROM subtasks WHERE prompt_ref != ''`,
+		`SELECT raw_output_ref FROM subtasks WHERE raw_output_ref IS NOT NULL AND raw_output_ref != ''`,
+	} {
+		rows, err := s.DB.Query(q)
+		if err != nil {
+			return nil, 0, err
+		}
+		for rows.Next() {
+			var ref string
+			if err := rows.Scan(&ref); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			refs[ref] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		rows.Close()
+	}
+
+	blobs, err := b.List()
+	if err != nil {
+		return nil, 0, err
+	}
+	var orphans []BlobInfo
+	var size int64
+	for _, bi := range blobs {
+		if !refs[bi.Path] {
+			orphans = append(orphans, bi)
+			size += bi.Size
+		}
+	}
+	return orphans, size, nil
+}
+
 func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]

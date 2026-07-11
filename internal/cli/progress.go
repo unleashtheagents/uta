@@ -24,6 +24,15 @@ type Renderer struct {
 	phase    string
 	started  time.Time
 	doneSubs int
+	// lastSession is the most recent session id announced to the user.
+	// Handoff chains reuse one renderer across sessions, so each new id
+	// gets its own line.
+	lastSession string
+	// Live usage accumulated from subtask_completed payloads, surfaced in
+	// the final "Done" line so spend is visible without `uta perf`.
+	tokensIn  int64
+	tokensOut int64
+	usdCents  int64
 }
 
 const (
@@ -127,12 +136,58 @@ func (r *Renderer) dotLocked(marker string) {
 	fmt.Fprint(r.w, marker)
 }
 
+// interjectLocked prints a full line mid-phase (budget warnings, alerts)
+// without corrupting the dot stream: it breaks the current line, prints the
+// message, and restarts the phase label so dots keep a home. Caller must
+// hold r.mu.
+func (r *Renderer) interjectLocked(line string) {
+	if r.phase == "" {
+		fmt.Fprintf(r.w, "  %s\n", line)
+		return
+	}
+	fmt.Fprintf(r.w, "\n  %s\n", line)
+	fmt.Fprintf(r.w, "  %s ", r.dim(r.phase+"…"))
+}
+
+// usageSuffix renders the accumulated token/cost totals for the final
+// summary line, or "" when nothing was recorded (provider didn't report
+// usage). Caller must hold r.mu.
+func (r *Renderer) usageSuffix() string {
+	total := r.tokensIn + r.tokensOut
+	if total == 0 && r.usdCents == 0 {
+		return ""
+	}
+	s := fmt.Sprintf(", %s tokens", humanCount(total))
+	if r.usdCents > 0 {
+		s += fmt.Sprintf(", ~$%.2f", float64(r.usdCents)/100)
+	}
+	return s
+}
+
+// humanCount renders 12345 as "12.3k" — compact enough for a status line.
+func humanCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 func (r *Renderer) handle(ev trajectory.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	switch ev.Kind {
 	case trajectory.GoalReceived:
+		// Announce the session id up front so long runs can be followed
+		// (uta trajectory <id>) or recovered without waiting for the end.
+		if ev.SessionID != "" && ev.SessionID != r.lastSession {
+			r.lastSession = ev.SessionID
+			fmt.Fprintf(r.w, "%s\n", r.dim(fmt.Sprintf("  session=%s", shortID(ev.SessionID))))
+		}
 		r.startPhaseLocked("Planning")
 
 	case trajectory.PlanProposed:
@@ -171,10 +226,40 @@ func (r *Renderer) handle(ev trajectory.Event) {
 
 	case trajectory.SubtaskCompleted:
 		r.doneSubs++
+		var p struct {
+			TokensIn  int64 `json:"tokens_in"`
+			TokensOut int64 `json:"tokens_out"`
+			USDCents  int64 `json:"usd_cents"`
+		}
+		if err := json.Unmarshal(ev.Payload, &p); err == nil {
+			r.tokensIn += p.TokensIn
+			r.tokensOut += p.TokensOut
+			r.usdCents += p.USDCents
+		}
 		r.dotLocked(r.green("•"))
 
 	case trajectory.SubtaskFailed:
 		r.dotLocked(r.red("!"))
+
+	case trajectory.BudgetWarning:
+		var p struct {
+			Message string `json:"message"`
+		}
+		msg := "budget 80% consumed"
+		if err := json.Unmarshal(ev.Payload, &p); err == nil && p.Message != "" {
+			msg = p.Message
+		}
+		r.interjectLocked(r.yellow("⚠ " + msg))
+
+	case trajectory.BudgetExhausted:
+		var p struct {
+			Message string `json:"message"`
+		}
+		msg := "budget exhausted"
+		if err := json.Unmarshal(ev.Payload, &p); err == nil && p.Message != "" {
+			msg = "budget exhausted: " + p.Message
+		}
+		r.interjectLocked(r.red("✗ " + msg))
 
 	case trajectory.CapabilityGateDenied:
 		// Yellow "x" marks a tool call the active MissionProfile's
@@ -210,18 +295,19 @@ func (r *Renderer) handle(ev trajectory.Event) {
 			Subtasks int    `json:"subtasks"`
 		}
 		elapsed := time.Since(r.started).Round(time.Second)
+		usage := r.usageSuffix()
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			fmt.Fprintf(r.w, "%s %s\n\n", r.green("✓"),
-				r.bold(r.green(fmt.Sprintf("Done in %s", elapsed))))
+				r.bold(r.green(fmt.Sprintf("Done in %s%s", elapsed, usage))))
 			return
 		}
 		switch p.Status {
 		case "partial":
 			fmt.Fprintf(r.w, "%s %s\n\n", r.yellow("◐"),
-				r.bold(r.yellow(fmt.Sprintf("Partial: %d subtasks, some failed (%s)", p.Subtasks, elapsed))))
+				r.bold(r.yellow(fmt.Sprintf("Partial: %d subtasks, some failed (%s%s)", p.Subtasks, elapsed, usage))))
 		default:
 			fmt.Fprintf(r.w, "%s %s\n\n", r.green("✓"),
-				r.bold(r.green(fmt.Sprintf("Done in %s", elapsed))))
+				r.bold(r.green(fmt.Sprintf("Done in %s%s", elapsed, usage))))
 		}
 
 	case trajectory.RunFailed:

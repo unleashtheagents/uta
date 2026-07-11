@@ -541,6 +541,7 @@ func (s *Store) ListSentinelAlertsSince(since time.Time, limit int) ([]SentinelA
 // tour), so every command that accepts a session id must accept what
 // those surfaces display. Resolution rules:
 //
+//   - "latest" / "last" resolve to the most recently created session
 //   - exact match wins immediately (full UUIDs never get prefix-scanned)
 //   - a unique prefix resolves to its full id
 //   - an ambiguous prefix errors and lists the candidates
@@ -549,6 +550,17 @@ func (s *Store) ResolveSessionID(idOrPrefix string) (string, error) {
 	idOrPrefix = strings.TrimSpace(idOrPrefix)
 	if idOrPrefix == "" {
 		return "", errors.New("session id is empty")
+	}
+	if idOrPrefix == "latest" || idOrPrefix == "last" {
+		var id string
+		err := s.DB.QueryRow(`SELECT id FROM sessions ORDER BY created_at DESC LIMIT 1`).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("no sessions recorded yet")
+		}
+		if err != nil {
+			return "", err
+		}
+		return id, nil
 	}
 	var exact string
 	err := s.DB.QueryRow(`SELECT id FROM sessions WHERE id = ?`, idOrPrefix).Scan(&exact)

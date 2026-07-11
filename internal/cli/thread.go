@@ -78,9 +78,10 @@ func newThreadNewCmd() *cobra.Command {
 
 func newThreadSwitchCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "switch <name|id>",
-		Short: "make an existing thread the active one",
-		Args:  cobra.ExactArgs(1),
+		Use:               "switch <name|id>",
+		Short:             "make an existing thread the active one",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeThreadNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {

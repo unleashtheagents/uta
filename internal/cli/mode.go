@@ -139,9 +139,10 @@ func newModeListCmd() *cobra.Command {
 func newModeShowCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "show <name>",
-		Short: "print a MissionProfile in full",
-		Args:  cobra.ExactArgs(1),
+		Use:               "show <name>",
+		Short:             "print a MissionProfile in full",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeModeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {

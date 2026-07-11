@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestBlobsDelete_RemovesPutBlob(t *testing.T) {
@@ -167,5 +168,56 @@ func TestBlobsList_DeletedBlobNotListed(t *testing.T) {
 	var buf bytes.Buffer
 	if err := b.Get(path, &buf); !os.IsNotExist(err) {
 		t.Fatalf("Get on deleted blob: want IsNotExist, got %v", err)
+	}
+}
+
+// TestUnreferencedBlobs verifies orphan detection: blobs pointed at by a
+// session's final_answer_ref or a subtask's prompt/raw refs are kept; a
+// blob nothing references is reported with its size.
+func TestUnreferencedBlobs(t *testing.T) {
+	s := newTestStore(t)
+	b := NewBlobs(t.TempDir())
+
+	answerRef, err := b.Put([]byte("final answer"), "txt")
+	if err != nil {
+		t.Fatalf("Put answer: %v", err)
+	}
+	promptRef, err := b.Put([]byte("the prompt"), "txt")
+	if err != nil {
+		t.Fatalf("Put prompt: %v", err)
+	}
+	orphanPayload := []byte("orphaned raw output, nothing references me")
+	orphanRef, err := b.Put(orphanPayload, "jsonl")
+	if err != nil {
+		t.Fatalf("Put orphan: %v", err)
+	}
+
+	if err := s.CreateSession(Session{
+		ID: "sess-orphan-test-01", Goal: "g", Worker: "w", Status: "running", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.MarkSession("sess-orphan-test-01", "completed", answerRef); err != nil {
+		t.Fatalf("MarkSession: %v", err)
+	}
+	if err := s.CreateSubtask(Subtask{
+		ID: "sub1", SessionID: "sess-orphan-test-01", Ord: 0, Title: "t",
+		PromptRef: promptRef, Worker: "w", Status: "completed",
+	}); err != nil {
+		t.Fatalf("CreateSubtask: %v", err)
+	}
+
+	orphans, size, err := s.UnreferencedBlobs(b)
+	if err != nil {
+		t.Fatalf("UnreferencedBlobs: %v", err)
+	}
+	if len(orphans) != 1 {
+		t.Fatalf("orphans = %d, want 1 (%+v)", len(orphans), orphans)
+	}
+	if orphans[0].Path != orphanRef {
+		t.Errorf("orphan path = %q, want %q", orphans[0].Path, orphanRef)
+	}
+	if size != int64(len(orphanPayload)) {
+		t.Errorf("orphan size = %d, want %d", size, len(orphanPayload))
 	}
 }

@@ -198,6 +198,125 @@ func seedSession(t *testing.T, stateDir string, s store.Session) {
 	}
 }
 
+// TestSessionsCmd_LastFlag verifies --last prints exactly one full session
+// id (pipeable) and honors --status.
+func TestSessionsCmd_LastFlag(t *testing.T) {
+	stateDir := setupSessionsHome(t)
+
+	base := time.Unix(1_700_000_000, 0).UTC()
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-older-completed", Goal: "a", Worker: "w", Status: "completed", CreatedAt: base,
+	})
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-newer-failed", Goal: "b", Worker: "w", Status: "failed", CreatedAt: base.Add(time.Minute),
+	})
+
+	out, _, err := runSessions(t, "--last")
+	if err != nil {
+		t.Fatalf("sessions --last: %v", err)
+	}
+	if strings.TrimSpace(out) != "sess-newer-failed" {
+		t.Errorf("--last = %q, want newest full id", strings.TrimSpace(out))
+	}
+
+	out, _, err = runSessions(t, "--last", "--status", "completed")
+	if err != nil {
+		t.Fatalf("sessions --last --status: %v", err)
+	}
+	if strings.TrimSpace(out) != "sess-older-completed" {
+		t.Errorf("--last --status=completed = %q, want completed session", strings.TrimSpace(out))
+	}
+}
+
+// TestSessionsCmd_LastFlagEmptyStore pins the error path: --last on a fresh
+// store fails with a clear message instead of printing nothing.
+func TestSessionsCmd_LastFlagEmptyStore(t *testing.T) {
+	setupSessionsHome(t)
+	_, _, err := runSessions(t, "--last")
+	if err == nil || !strings.Contains(err.Error(), "no sessions") {
+		t.Fatalf("want no-sessions error, got %v", err)
+	}
+}
+
+// TestSessionsCmd_SinceFilter verifies --since drops sessions older than the
+// window while keeping recent ones, and composes with --limit.
+func TestSessionsCmd_SinceFilter(t *testing.T) {
+	stateDir := setupSessionsHome(t)
+
+	now := time.Now().UTC()
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-ancient-run00", Goal: "old", Worker: "w", Status: "completed",
+		CreatedAt: now.Add(-48 * time.Hour),
+	})
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-recent-run000", Goal: "new", Worker: "w", Status: "completed",
+		CreatedAt: now.Add(-time.Hour),
+	})
+
+	out, _, err := runSessions(t, "--since", "24h")
+	if err != nil {
+		t.Fatalf("sessions --since: %v", err)
+	}
+	if strings.Contains(out, "sess-anc") {
+		t.Errorf("--since 24h should drop the 48h-old session:\n%s", out)
+	}
+	if !strings.Contains(out, "sess-rec") {
+		t.Errorf("--since 24h should keep the 1h-old session:\n%s", out)
+	}
+
+	// Bad duration surfaces a parse error.
+	if _, _, err := runSessions(t, "--since", "nonsense"); err == nil {
+		t.Error("want parse error for --since nonsense")
+	}
+}
+
+// TestSessionsCmd_DurationColumn verifies the DURATION column renders the
+// completed-created delta and "-" for unfinished sessions.
+func TestSessionsCmd_DurationColumn(t *testing.T) {
+	stateDir := setupSessionsHome(t)
+
+	base := time.Unix(1_700_000_000, 0).UTC()
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-finished-0001", Goal: "g", Worker: "w", Status: "completed",
+		CreatedAt: base,
+	})
+	// CreateSession doesn't persist CompletedAt (that's MarkSession's job,
+	// which stamps "now"); set a deterministic completion directly.
+	{
+		st, err := store.Open(paths.DB(stateDir))
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		_, err = st.DB.Exec(`UPDATE sessions SET completed_at = ? WHERE id = ?`,
+			base.Add(3*time.Minute).UnixNano(), "sess-finished-0001")
+		st.Close()
+		if err != nil {
+			t.Fatalf("set completed_at: %v", err)
+		}
+	}
+	seedSession(t, stateDir, store.Session{
+		ID: "sess-running-00001", Goal: "g", Worker: "w", Status: "running",
+		CreatedAt: base.Add(time.Second),
+	})
+
+	out, _, err := runSessions(t)
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	if !strings.Contains(out, "DURATION") {
+		t.Errorf("missing DURATION header:\n%s", out)
+	}
+	if !strings.Contains(out, "3m0s") {
+		t.Errorf("expected 3m0s duration for finished session:\n%s", out)
+	}
+	// The running session's duration cell renders as "-".
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "sess-run") && !strings.Contains(line, "-") {
+			t.Errorf("running session should render '-' duration: %q", line)
+		}
+	}
+}
+
 func TestSessionsCmd_JSONOutput(t *testing.T) {
 	stateDir := setupSessionsHome(t)
 

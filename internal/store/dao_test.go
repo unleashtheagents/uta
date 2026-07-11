@@ -427,3 +427,37 @@ func TestResolveSessionID(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveSessionID_LatestAlias pins the "latest"/"last" aliases: both
+// resolve to the most recently created session, and error cleanly on an
+// empty store.
+func TestResolveSessionID_LatestAlias(t *testing.T) {
+	s := newTestStore(t)
+
+	t.Run("empty-store", func(t *testing.T) {
+		_, err := s.ResolveSessionID("latest")
+		if err == nil || !strings.Contains(err.Error(), "no sessions") {
+			t.Fatalf("want no-sessions error, got %v", err)
+		}
+	})
+
+	base := time.Now().Add(-time.Hour)
+	for i, id := range []string{
+		"older111-1111-2222-3333-444455556666",
+		"newer222-1111-2222-3333-444455556666",
+	} {
+		if err := s.CreateSession(Session{
+			ID: id, Goal: "g", Worker: "w", Status: "completed",
+			CreatedAt: base.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("CreateSession(%s): %v", id, err)
+		}
+	}
+
+	for _, alias := range []string{"latest", "last"} {
+		got, err := s.ResolveSessionID(alias)
+		if err != nil || got != "newer222-1111-2222-3333-444455556666" {
+			t.Fatalf("ResolveSessionID(%q) = %q, %v; want newest session", alias, got, err)
+		}
+	}
+}

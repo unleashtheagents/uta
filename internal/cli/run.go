@@ -26,6 +26,7 @@ import (
 	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/state"
+	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 	"github.com/unleashtheagents/uta/internal/whiteboard"
 )
@@ -68,6 +69,17 @@ func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "decompose a goal, fan it out to agent providers, and synthesize the result",
+		Example: `  # orchestrate a goal with the first detected provider (interactive pick)
+  uta run -g "summarize the architecture of this repo"
+
+  # non-interactive: pin the worker, skip prompts
+  uta run -g "add table tests for internal/paths" --worker claude -y
+
+  # drive a workflow file, stream events as JSONL
+  uta run -f uta.yaml --print-jsonl
+
+  # re-enter a crashed/cancelled session (completed subtasks are not re-paid)
+  uta run --resume-session 1a2b3c4d`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var preSet []engine.SubtaskSpec
 			var skipSynth bool
@@ -209,7 +221,7 @@ func newRunCmd() *cobra.Command {
 			detections := app.Registry.DetectAll(cmd.Context())
 			available := availableProviders(app.Registry.Names(), detections)
 			if len(available) == 0 {
-				fmt.Fprintln(cmd.ErrOrStderr(), "no provider is installed on PATH. Try installing 'claude' or 'gemini' first.")
+				fmt.Fprintln(cmd.ErrOrStderr(), errNoProviders)
 				return exitWith(3)
 			}
 
@@ -314,6 +326,7 @@ func newRunCmd() *cobra.Command {
 				}
 			}
 
+			runStart := time.Now()
 			result, runErr := sup.Run(ctx, req)
 
 			// Record this session against the active thread (if any) so
@@ -355,12 +368,11 @@ func newRunCmd() *cobra.Command {
 			if runErr != nil {
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
+					printRecoveryHint(cmd.ErrOrStderr(), result)
 					return exitWith(130)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "run failed: %v\n", runErr)
-				if result.SessionID != "" {
-					fmt.Fprintf(cmd.ErrOrStderr(), "session: %s\n", result.SessionID)
-				}
+				printRecoveryHint(cmd.ErrOrStderr(), result)
 				if result.Status == "failed" {
 					return exitWith(4)
 				}
@@ -372,8 +384,9 @@ func newRunCmd() *cobra.Command {
 					fmt.Fprintln(cmd.OutOrStdout(), result.FinalAnswer)
 				}
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] session %s status=%s subtasks=%d\n",
-				result.SessionID, result.Status, len(result.Subtasks))
+			fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] session %s status=%s subtasks=%d duration=%s%s\n",
+				result.SessionID, result.Status, len(result.Subtasks),
+				time.Since(runStart).Round(time.Second), usageSummary(result.Subtasks))
 
 			if result.Status == "partial" {
 				return exitWith(5)
@@ -401,6 +414,54 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "re-enter a crashed/cancelled session: completed subtasks are recovered (not re-paid), the remainder re-runs, synthesis covers the whole plan")
 
 	return cmd
+}
+
+// printRecoveryHint tells the user how to pick a stopped run back up.
+// Printed after a cancel (Ctrl-C) or failure so the session id and the
+// exact recovery command are one copy-paste away.
+func printRecoveryHint(w io.Writer, result engine.RunResult) {
+	if result.SessionID == "" {
+		return
+	}
+	completed := 0
+	for _, st := range result.Subtasks {
+		if st.Status == "completed" {
+			completed++
+		}
+	}
+	fmt.Fprintf(w, "session: %s (%d/%d subtasks completed)\n",
+		shortID(result.SessionID), completed, len(result.Subtasks))
+	fmt.Fprintf(w, "resume where it stopped (completed subtasks are not re-paid):\n  uta run --resume-session %s\n",
+		shortID(result.SessionID))
+}
+
+// usageSummary sums the per-subtask usage meta into a " tokens=… cost=…"
+// suffix for the final session line. Empty when no usage was recorded.
+func usageSummary(subs []store.Subtask) string {
+	var tokens, cents int64
+	for _, st := range subs {
+		if st.MetaJSON == "" {
+			continue
+		}
+		var m struct {
+			TokensIn  int64 `json:"tokens_in"`
+			TokensOut int64 `json:"tokens_out"`
+			USDCents  int64 `json:"usd_cents"`
+		}
+		if err := json.Unmarshal([]byte(st.MetaJSON), &m); err != nil {
+			continue
+		}
+		tokens += m.TokensIn + m.TokensOut
+		cents += m.USDCents
+	}
+	if tokens == 0 && cents == 0 {
+		return ""
+	}
+	s := fmt.Sprintf(" tokens=%d", tokens)
+	if cents > 0 {
+		s += fmt.Sprintf(" cost=$%.2f", float64(cents)/100)
+	}
+	return s
 }
 
 func availableProviders(names []string, detections map[string]provider.Detection) []string {

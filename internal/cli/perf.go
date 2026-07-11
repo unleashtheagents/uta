@@ -38,7 +38,8 @@ ratio above 1.0.
 
 --since accepts standard Go durations ("168h", "30m") and a 'd' suffix
 ("7d", "30d") that other Go-CLI tools commonly support. Both work.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeSessionIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {

@@ -401,6 +401,91 @@ func TestFinish_FlushesOpenPhase(t *testing.T) {
 	}
 }
 
+// TestHandle_SessionAnnouncedOnce verifies the session id is printed on the
+// first GoalReceived, repeated only when a handoff chain switches to a new
+// session id, and never duplicated for the same session.
+func TestHandle_SessionAnnouncedOnce(t *testing.T) {
+	r, buf := newTestRenderer(t)
+	r.handle(trajectory.Event{Kind: trajectory.GoalReceived, Ts: time.Now(), SessionID: "aaaabbbbccccdddd"})
+	r.handle(trajectory.Event{Kind: trajectory.GoalReceived, Ts: time.Now(), SessionID: "aaaabbbbccccdddd"})
+	r.handle(trajectory.Event{Kind: trajectory.GoalReceived, Ts: time.Now(), SessionID: "eeeeffff00001111"})
+	out := buf.String()
+	if got := strings.Count(out, "session=aaaabbbb"); got != 1 {
+		t.Errorf("expected first session announced exactly once, got %d\nout: %s", got, out)
+	}
+	if got := strings.Count(out, "session=eeeeffff"); got != 1 {
+		t.Errorf("expected handoff session announced once, got %d\nout: %s", got, out)
+	}
+}
+
+// TestHandle_BudgetEventsInterject covers the budget warning / exhausted
+// branches: both must surface their message mid-phase and re-open the phase
+// label so subsequent dots still have a home line.
+func TestHandle_BudgetEventsInterject(t *testing.T) {
+	r, buf := newTestRenderer(t)
+	r.handle(trajectory.Event{Kind: trajectory.GoalReceived, Ts: time.Now()})
+	r.handle(trajectory.Event{
+		Kind:    trajectory.BudgetWarning,
+		Ts:      time.Now(),
+		Payload: mustJSON(t, map[string]any{"message": "tokens budget 80% consumed (used=800, cap=1000)"}),
+	})
+	r.handle(trajectory.Event{
+		Kind:    trajectory.BudgetExhausted,
+		Ts:      time.Now(),
+		Payload: mustJSON(t, map[string]any{"message": "tokens cap reached"}),
+	})
+	out := buf.String()
+	if !strings.Contains(out, "tokens budget 80% consumed") {
+		t.Errorf("expected budget warning surfaced, got:\n%s", out)
+	}
+	if !strings.Contains(out, "budget exhausted: tokens cap reached") {
+		t.Errorf("expected budget exhausted surfaced, got:\n%s", out)
+	}
+	// Phase label re-printed after each interjection (initial + 2 interjects).
+	if got := strings.Count(out, "Planning…"); got != 3 {
+		t.Errorf("expected phase label re-opened after interjections (3 total), got %d\nout: %s", got, out)
+	}
+}
+
+// TestHandle_DoneLineIncludesUsage verifies token/cost accumulation from
+// subtask_completed payloads lands in the final Done banner.
+func TestHandle_DoneLineIncludesUsage(t *testing.T) {
+	r, buf := newTestRenderer(t)
+	r.handle(trajectory.Event{Kind: trajectory.GoalReceived, Ts: time.Now()})
+	r.handle(trajectory.Event{
+		Kind:    trajectory.SubtaskCompleted,
+		Ts:      time.Now(),
+		Payload: mustJSON(t, map[string]any{"tokens_in": 10_000, "tokens_out": 2_345, "usd_cents": 23}),
+	})
+	r.handle(trajectory.Event{
+		Kind:    trajectory.RunCompleted,
+		Ts:      time.Now(),
+		Payload: mustJSON(t, map[string]any{"status": "completed", "subtasks": 1}),
+	})
+	out := buf.String()
+	if !strings.Contains(out, "12.3k tokens") {
+		t.Errorf("expected token total in Done line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "~$0.23") {
+		t.Errorf("expected cost in Done line, got:\n%s", out)
+	}
+}
+
+// TestHumanCount pins the compact-number formatting used in status lines.
+func TestHumanCount(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{0, "0"}, {999, "999"}, {1000, "1.0k"}, {12345, "12.3k"}, {2_500_000, "2.5M"},
+	}
+	for _, c := range cases {
+		if got := humanCount(c.n); got != c.want {
+			t.Errorf("humanCount(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 // ---- helpers -------------------------------------------------------------
 
 func mustJSON(t *testing.T, v any) json.RawMessage {

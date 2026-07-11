@@ -33,7 +33,16 @@ func newResumeCmd() *cobra.Command {
 		Long: `Resume a prior session by id. If no session id is given, picks up the
 active thread's last session (see 'uta thread current'). Pass --goal with
 the follow-up instructions.`,
-		Args: cobra.MaximumNArgs(1),
+		Example: `  # follow up on the most recent session
+  uta resume latest -g "now add unit tests for the fix"
+
+  # follow up on a specific session (short ids from 'uta sessions' work)
+  uta resume 1a2b3c4d -g "tighten the error handling"
+
+  # no id: picks up the active thread's last session
+  uta resume -g "continue"`,
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeSessionIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if goal == "" {
 				return errors.New("--goal is required")

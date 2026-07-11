@@ -53,10 +53,10 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 		provs[i] = prov
 
 		promptRef, _ := s.deps.Blobs.Put([]byte(spec.Prompt), "txt")
-		_ = s.deps.Store.CreateSubtask(store.Subtask{
+		s.dbErr(sessionID, subID, "create_subtask", s.deps.Store.CreateSubtask(store.Subtask{
 			ID: subID, SessionID: sessionID, Ord: i, SpecID: spec.ID,
 			Title: spec.Title, PromptRef: promptRef, Worker: workerName, Status: "pending",
-		})
+		}))
 	}
 
 	completed := map[string]bool{}
@@ -100,13 +100,13 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 					"reason": "upstream_failed", "deps": spec.Needs,
 				})
 				now := time.Now()
-				_ = s.deps.Store.UpdateSubtask(store.Subtask{
+				s.dbErr(sessionID, dbIDs[i], "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 					ID:          dbIDs[i],
 					Status:      "skipped",
 					CompletedAt: &now,
 					Error:       "upstream dependency failed",
 					ErrorKind:   "blocked",
-				})
+				}))
 				continue
 			}
 			if depPending {
@@ -141,10 +141,10 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 						// makes progress instead of spinning on the same wave.
 						cancelErr := ctx.Err()
 						now := time.Now()
-						_ = s.deps.Store.UpdateSubtask(store.Subtask{
+						s.dbErr(sessionID, dbIDs[i], "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 							ID: dbIDs[i], Status: "failed", CompletedAt: &now,
 							Error: cancelErr.Error(), ErrorKind: "cancelled",
-						})
+						}))
 						s.emit(sessionID, dbIDs[i], trajectory.SubtaskFailed, map[string]any{
 							"spec_id": plan.Subtasks[i].ID, "error": cancelErr.Error(), "kind": "cancelled",
 						})
@@ -187,10 +187,10 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 				}
 				s.emit(sessionID, dbIDs[i], trajectory.SubtaskSkipped, map[string]any{"reason": "fail_fast"})
 				now := time.Now()
-				_ = s.deps.Store.UpdateSubtask(store.Subtask{
+				s.dbErr(sessionID, dbIDs[i], "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 					ID: dbIDs[i], Status: "skipped", CompletedAt: &now,
 					Error: "fail-fast triggered", ErrorKind: "blocked",
-				})
+				}))
 			}
 			return outcomes, anyFailed, true, nil
 		}
@@ -203,7 +203,7 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 // retry-producer loop on gate failure.
 func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID string, spec SubtaskSpec, prov provider.AgentProvider, workerName string, req RunRequest) SubtaskOutcome {
 	startedAt := time.Now()
-	_ = s.deps.Store.UpdateSubtask(store.Subtask{ID: subtaskID, Status: "running", StartedAt: &startedAt})
+	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{ID: subtaskID, Status: "running", StartedAt: &startedAt}))
 	s.emit(sessionID, subtaskID, trajectory.SubtaskStarted, map[string]any{
 		"spec_id": spec.ID, "title": spec.Title, "worker": workerName, "needs": spec.Needs,
 	})
@@ -288,12 +288,12 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 		s.emit(sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"spec_id": spec.ID, "error": lastErr.Error(), "kind": kind,
 		})
-		_ = s.deps.Store.UpdateSubtask(store.Subtask{
+		s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 			ID: subtaskID, ProviderSessionID: lastResult.SessionID, Status: "failed",
 			StartedAt: &startedAt, CompletedAt: &completedAt,
 			ResultText: Truncate(lastResult.FinalText, 8000), RawOutputRef: rawRef,
 			Error: lastErr.Error(), ErrorKind: kind,
-		})
+		}))
 		return SubtaskOutcome{
 			ID: spec.ID, Title: spec.Title, Worker: workerName,
 			Result: fmt.Sprintf("failed (%s): %v", kind, lastErr), Failed: true,
@@ -303,11 +303,11 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 	s.emit(sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"spec_id": spec.ID, "chars": len(lastResult.FinalText), "provider_session_id": lastResult.SessionID,
 	})
-	_ = s.deps.Store.UpdateSubtask(store.Subtask{
+	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: lastResult.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
 		ResultText: Truncate(lastResult.FinalText, 8000), RawOutputRef: rawRef,
-	})
+	}))
 	return SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: workerName, Result: lastResult.FinalText}
 }
 
