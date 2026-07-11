@@ -95,6 +95,11 @@ capabilities: [resume, stream-json]
 
 `uta providers` will pick it up at the next invocation.
 
+To pin a provider to a specific model (e.g. run claude on Claude Fable 5,
+or keep a cheap `gemini-flash` worker next to the default), see
+[`docs/model-selection.md`](docs/model-selection.md) — covers per-workflow
+env, per-mode env, and model-pinned wrapper providers.
+
 ## Use uta from another agent (MCP)
 
 `uta serve --mcp` exposes the whole CLI as a Model Context Protocol server
