@@ -59,6 +59,10 @@ type MissionRequest struct {
 // record schema even after the bounded retry. errors.Is-able.
 var ErrSchemaMismatch = errors.New("schema mismatch")
 
+// ErrJudgeRejected marks a value that failed its k-of-n verification —
+// fewer than K verifiers let it stand. errors.Is-able.
+var ErrJudgeRejected = errors.New("judge rejected")
+
 // errCallFailed wraps a provider failure with the call site so the mission
 // error reads like a stack frame: `greet("world") at hello.steer:13`.
 type errCallFailed struct {
@@ -257,6 +261,11 @@ type missionWalk struct {
 	ord       *int64        // global subtask ordinal (atomic; claim order)
 	recovered *int64        // recovered-call count (atomic)
 	sem       chan struct{} // caps concurrently running par branches
+
+	// verdictMode marks a judge-verifier scope: evalCall appends the
+	// STANDS/REFUTED contract to the prompt instead of any schema.
+	verdictMode bool
+	judgeSeq    int // judge sequence within this scope
 }
 
 func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
@@ -273,6 +282,8 @@ func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
 		return w.evalCall(ctx, x)
 	case *steer.ParForExpr:
 		return w.evalParFor(ctx, x)
+	case *steer.JudgeExpr:
+		return w.evalJudge(ctx, x)
 	default:
 		return "", fmt.Errorf("unsupported expression at line %d", e.(interface{ exprPos() steer.Pos }).exprPos().Line)
 	}
@@ -299,8 +310,13 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 	// A record return type is a contract: the schema instruction is the
 	// one line of type system the model ever sees, and the response is
 	// validated (with one feedback retry) before the value flows onward.
+	// In a judge-verifier scope the verdict contract replaces it (the
+	// checker forbids structured returns on verifiers).
 	recType, isList, structured := w.req.Program.SchemaFor(fn)
-	if structured {
+	switch {
+	case w.verdictMode:
+		prompt += "\n\n" + steer.VerdictInstruction
+	case structured:
 		prompt += "\n\n" + steer.SchemaInstruction(recType, isList)
 	}
 
@@ -516,6 +532,79 @@ func truncateArg(s string) string {
 		return s[:31] + "…"
 	}
 	return s
+}
+
+// evalJudge implements `judge V by f(...), g(...) require K of N`: the
+// verifiers run concurrently, each in verdict mode with the judged value
+// appended as its final argument. The value passes through when at least
+// K verifiers answer STANDS; unclear responses count as refuted.
+func (w *missionWalk) evalJudge(ctx context.Context, j *steer.JudgeExpr) (string, error) {
+	val, err := w.eval(ctx, j.Value)
+	if err != nil {
+		return "", err
+	}
+
+	w.judgeSeq++
+	judgeID := w.judgeSeq
+	verdicts := make([]steer.Verdict, len(j.By))
+	errs := make([]error, len(j.By))
+	var wg sync.WaitGroup
+	for i, by := range j.By {
+		// The judged value rides in as the verifier's final argument.
+		synthetic := &steer.CallExpr{
+			Pos:  by.Pos,
+			Name: by.Name,
+			Args: append(append([]steer.Expr{}, by.Args...), &steer.StringLit{Pos: by.Pos, Value: val}),
+		}
+		branch := &missionWalk{
+			sup: w.sup, req: w.req, sessionID: w.sessionID,
+			bindings: w.bindings, journal: w.journal,
+			prefix: fmt.Sprintf("%sj%d.v%d.", w.prefix, judgeID, i+1),
+			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			verdictMode: true,
+		}
+		wg.Add(1)
+		go func(i int, bw *missionWalk, call *steer.CallExpr) {
+			defer wg.Done()
+			bw.sem <- struct{}{}
+			defer func() { <-bw.sem }()
+			resp, err := bw.evalCall(ctx, call)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			verdicts[i] = steer.ParseVerdict(resp)
+		}(i, branch, synthetic)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil && errors.Is(err, budget.ErrBudgetExceeded) {
+			return "", err
+		}
+	}
+	stands, refuted, unclear, failed := 0, 0, 0, 0
+	for i := range j.By {
+		switch {
+		case errs[i] != nil:
+			failed++ // a dead verifier does not count toward K (RFC open question Q3, resolved conservatively)
+		case verdicts[i] == steer.VerdictStands:
+			stands++
+		case verdicts[i] == steer.VerdictUnclear:
+			unclear++
+		default:
+			refuted++
+		}
+	}
+	w.sup.emit(w.sessionID, "", trajectory.JudgeCompleted, map[string]any{
+		"require": j.K, "of": j.N, "stands": stands, "refuted": refuted,
+		"unclear": unclear, "verifier_errors": failed, "passed": stands >= j.K,
+	})
+	if stands < j.K {
+		return "", fmt.Errorf("%d of %d verifier(s) let the value stand, require %d (refuted=%d, unclear=%d, errored=%d): %w",
+			stands, j.N, j.K, refuted, unclear, failed, ErrJudgeRejected)
+	}
+	return val, nil
 }
 
 // recoverResult decides whether a prior subtask can stand in for the call

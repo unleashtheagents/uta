@@ -122,6 +122,38 @@ func jsonKind(v any) string {
 	return "value"
 }
 
+// VerdictInstruction is the contract appended to every judge verifier's
+// prompt. The default-to-REFUTED clause is the adversarial stance: an
+// uncertain verifier must not launder a claim through.
+const VerdictInstruction = "You are an adversarial verifier. After your analysis, end your response with exactly one word on its own line: STANDS if the claim survives your scrutiny, or REFUTED if it does not. If you are uncertain, answer REFUTED."
+
+// Verdict is the parsed outcome of one verifier response.
+type Verdict int
+
+const (
+	VerdictUnclear Verdict = iota // no parseable verdict — counts as refuted
+	VerdictStands
+	VerdictRefuted
+)
+
+// ParseVerdict extracts the verifier's verdict: the LAST occurrence of
+// STANDS or REFUTED wins (the contract asks for it as the final line, and
+// analysis text may mention both words on the way there). No verdict at
+// all is VerdictUnclear, which callers must treat as refuted.
+func ParseVerdict(response string) Verdict {
+	upper := strings.ToUpper(response)
+	stands := strings.LastIndex(upper, "STANDS")
+	refuted := strings.LastIndex(upper, "REFUTED")
+	switch {
+	case stands < 0 && refuted < 0:
+		return VerdictUnclear
+	case stands > refuted:
+		return VerdictStands
+	default:
+		return VerdictRefuted
+	}
+}
+
 // stripCodeFences removes a single wrapping ``` or ```json fence.
 func stripCodeFences(s string) string {
 	if !strings.HasPrefix(s, "```") {

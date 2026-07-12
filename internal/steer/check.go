@@ -183,6 +183,34 @@ func (c *checker) checkExpr(e Expr, lets map[string]Pos, used, calledFns map[str
 		}
 		child[x.Var] = x.Pos
 		c.checkExpr(x.Body, child, used, calledFns)
+	case *JudgeExpr:
+		c.checkExpr(x.Value, lets, used, calledFns)
+		if x.N != len(x.By) {
+			c.errAt(x.Pos, "judge declares %d verifier(s) but `require %d of %d` — N must match the verifier count", len(x.By), x.K, x.N)
+		}
+		if x.K < 1 || x.K > x.N {
+			c.errAt(x.Pos, "require %d of %d is unsatisfiable — K must be between 1 and N", x.K, x.N)
+		}
+		for _, by := range x.By {
+			fn := c.prog.Agent(by.Name)
+			if fn == nil {
+				c.errAt(by.Pos, "unknown function %q%s", by.Name, suggest(by.Name, agentNames(c.prog)))
+				continue
+			}
+			calledFns[by.Name] = true
+			if len(fn.Params) < 1 {
+				c.errAt(by.Pos, "judge verifier %q needs at least one parameter — the runtime appends the judged value as the last argument", fn.Name)
+			} else if len(by.Args) != len(fn.Params)-1 {
+				c.errAt(by.Pos, "judge verifier %s takes %d argument(s) here (its last parameter %q receives the judged value), got %d",
+					fn.Name, len(fn.Params)-1, fn.Params[len(fn.Params)-1].Name, len(by.Args))
+			}
+			if _, _, structured := c.prog.SchemaFor(fn); structured {
+				c.errAt(by.Pos, "judge verifier %q must return Text — its verdict contract (STANDS/REFUTED) conflicts with a record schema", fn.Name)
+			}
+			for _, a := range by.Args {
+				c.checkExpr(a, lets, used, calledFns)
+			}
+		}
 	case *CallExpr:
 		fn := c.prog.Agent(x.Name)
 		if fn == nil {

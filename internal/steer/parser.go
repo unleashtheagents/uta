@@ -10,7 +10,6 @@ import (
 // execute yet. Naming them explicitly turns "syntax error" into a roadmap
 // pointer for programs written against the full RFC.
 var reservedConstructs = map[string]string{
-	"judge": "verification refinement",
 	"until": "discovery loops", "gate": "human gates",
 	"with": "capability raises", "retry": "typed failure handling",
 	"context": "named context bindings", "policy": "policy scopes",
@@ -467,6 +466,9 @@ func (p *parser) parseExpr() (Expr, *Diag) {
 		if t.text == "par" {
 			return p.parseParFor()
 		}
+		if t.text == "judge" {
+			return p.parseJudge()
+		}
 		if d := p.advance(); d != nil {
 			return nil, d
 		}
@@ -595,6 +597,59 @@ func (p *parser) parseParFor() (Expr, *Diag) {
 		return nil, d
 	}
 	return pf, nil
+}
+
+// parseJudge parses:
+//
+//	judge <expr> by call(...), call(...) require K of N
+func (p *parser) parseJudge() (Expr, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'judge'
+		return nil, d
+	}
+	val, d := p.parseExpr()
+	if d != nil {
+		return nil, d
+	}
+	if d := p.expectKeyword("by", "after the judged expression"); d != nil {
+		return nil, d
+	}
+	j := &JudgeExpr{Pos: pos, Value: val}
+	for {
+		e, d := p.parseExpr()
+		if d != nil {
+			return nil, d
+		}
+		call, ok := e.(*CallExpr)
+		if !ok {
+			dd := p.lx.errAt(e.exprPos(), "judge verifiers must be agent fn calls")
+			return nil, &dd
+		}
+		j.By = append(j.By, call)
+		if p.tok.kind == tokComma {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+			continue
+		}
+		break
+	}
+	if d := p.expectKeyword("require", "after the verifier list"); d != nil {
+		return nil, d
+	}
+	k, d := p.expect(tokNumber, "as the required stand count")
+	if d != nil {
+		return nil, d
+	}
+	if d := p.expectKeyword("of", "after the required count"); d != nil {
+		return nil, d
+	}
+	n, d := p.expect(tokNumber, "as the verifier count")
+	if d != nil {
+		return nil, d
+	}
+	j.K, j.N = int(k.num), int(n.num)
+	return j, nil
 }
 
 // extractSlots finds every ${name} in a prompt block. Slot positions are

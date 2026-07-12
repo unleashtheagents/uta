@@ -64,6 +64,7 @@ const (
 	DiscussionTurnDone     Kind = "discussion_turn_completed"
 	DiscussionCompleted    Kind = "discussion_completed"
 	MissionEmit            Kind = "mission_emit"
+	JudgeCompleted         Kind = "judge_completed"
 	RunCompleted           Kind = "run_completed"
 	RunFailed              Kind = "run_failed"
 	RunCancelled           Kind = "run_cancelled"

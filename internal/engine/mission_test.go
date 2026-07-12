@@ -524,3 +524,91 @@ func TestRunMission_DurationBudgetIsDeadline(t *testing.T) {
 		t.Errorf("status = %q", res.Status)
 	}
 }
+
+const judgeMissionSrc = `
+agent fn propose(topic: Text) -> Text
+  prompt """Propose a claim about ${topic}."""
+
+agent fn refute(lens: Text, claim: Text) -> Text
+  prompt """LENS=${lens} Refute: ${claim}"""
+
+mission verified {
+  budget 50k tokens
+  let claim = propose("caching")
+  let real = judge claim by refute("correctness"), refute("perf"), refute("repro") require 2 of 3
+  emit real
+}
+`
+
+func TestRunMission_JudgePassesKofN(t *testing.T) {
+	deps := newTestDeps(t)
+	var mu sync.Mutex
+	var verifierPrompts []string
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(prompt, "Propose a claim") {
+			return provider.RunResult{FinalText: "caching is hard"}, nil
+		}
+		verifierPrompts = append(verifierPrompts, prompt)
+		if strings.Contains(prompt, "LENS=perf") {
+			return provider.RunResult{FinalText: "Weak on latency.\nREFUTED"}, nil
+		}
+		return provider.RunResult{FinalText: "Solid.\nSTANDS"}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, judgeMissionSrc), SourceFile: "verified.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("RunMission: %v", err)
+	}
+	// 2 of 3 stand → the judged value passes through unchanged.
+	if res.FinalAnswer != "caching is hard" {
+		t.Errorf("final = %q", res.FinalAnswer)
+	}
+	if len(verifierPrompts) != 3 {
+		t.Fatalf("verifier calls = %d, want 3", len(verifierPrompts))
+	}
+	for _, p := range verifierPrompts {
+		if !strings.Contains(p, "Refute: caching is hard") {
+			t.Errorf("judged value missing from verifier prompt:\n%s", p)
+		}
+		if !strings.Contains(p, "STANDS") || !strings.Contains(p, "REFUTED") {
+			t.Errorf("verdict contract missing from verifier prompt:\n%s", p)
+		}
+	}
+}
+
+func TestRunMission_JudgeRejectionIsTyped(t *testing.T) {
+	deps := newTestDeps(t)
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		if strings.Contains(prompt, "Propose a claim") {
+			return provider.RunResult{FinalText: "a bold claim"}, nil
+		}
+		if strings.Contains(prompt, "LENS=correctness") {
+			return provider.RunResult{FinalText: "Fine.\nSTANDS"}, nil
+		}
+		return provider.RunResult{FinalText: "No.\nREFUTED"}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, judgeMissionSrc), SourceFile: "verified.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	})
+	if !errors.Is(err, ErrJudgeRejected) {
+		t.Fatalf("err = %v, want ErrJudgeRejected", err)
+	}
+	if !strings.Contains(err.Error(), "1 of 3") || !strings.Contains(err.Error(), "require 2") {
+		t.Errorf("error should carry the tally: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Errorf("status = %q", res.Status)
+	}
+}

@@ -411,3 +411,68 @@ func renderAll(diags []Diag) string {
 	}
 	return b.String()
 }
+
+const judgeSrc = `agent fn propose(topic: Text) -> Text
+  prompt """Propose a claim about ${topic}."""
+
+agent fn refute(lens: Text, claim: Text) -> Text
+  prompt """Refute through the ${lens} lens: ${claim}"""
+
+mission verified {
+  budget 50k tokens
+  let claim = propose("caching")
+  let real = judge claim by refute("correctness"), refute("perf") require 2 of 2
+  emit real
+}`
+
+func TestParse_Judge(t *testing.T) {
+	prog := parseOK(t, judgeSrc)
+	if diags := Check(prog, judgeSrc); HasErrors(diags) {
+		t.Fatalf("check: %s", renderAll(diags))
+	}
+	let := prog.Mission.Stmts[1].(*LetStmt)
+	j, ok := let.Expr.(*JudgeExpr)
+	if !ok {
+		t.Fatalf("expr = %#v", let.Expr)
+	}
+	if j.K != 2 || j.N != 2 || len(j.By) != 2 {
+		t.Errorf("judge = K%d N%d by%d", j.K, j.N, len(j.By))
+	}
+	if len(j.By[0].Args) != 1 {
+		t.Errorf("by args = %d, want 1 (value appended at runtime)", len(j.By[0].Args))
+	}
+	// Calls(): propose + 2 refuters = 3 call sites.
+	if n := len(prog.Mission.Calls()); n != 3 {
+		t.Errorf("Calls() = %d, want 3", n)
+	}
+}
+
+func TestCheck_JudgeArityAndCounts(t *testing.T) {
+	// N mismatch
+	src := strings.Replace(judgeSrc, "require 2 of 2", "require 2 of 3", 1)
+	prog := parseOK(t, src)
+	if joined := renderAll(Check(prog, src)); !strings.Contains(joined, "N must match") {
+		t.Errorf("diags:\n%s", joined)
+	}
+	// Verifier written with full arity (forgot the appended value)
+	src = strings.Replace(judgeSrc, `refute("correctness"), refute("perf")`, `refute("correctness", claim), refute("perf")`, 1)
+	prog = parseOK(t, src)
+	if joined := renderAll(Check(prog, src)); !strings.Contains(joined, "receives the judged value") {
+		t.Errorf("diags:\n%s", joined)
+	}
+}
+
+func TestParseVerdict(t *testing.T) {
+	cases := map[string]Verdict{
+		"Analysis...\nSTANDS":                    VerdictStands,
+		"it stands to reason, but...\nREFUTED":   VerdictRefuted,
+		"The claim REFUTED my doubts.\n\nSTANDS": VerdictStands,
+		"stands":                                 VerdictStands,
+		"I cannot decide.":                       VerdictUnclear,
+	}
+	for in, want := range cases {
+		if got := ParseVerdict(in); got != want {
+			t.Errorf("ParseVerdict(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

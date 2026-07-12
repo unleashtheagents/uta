@@ -100,10 +100,20 @@ agentFn    := "agent" "fn" name "(" (param ":" Type),* ")" "->" Type
               "prompt" """…${param}…"""
 mission    := "mission" name "{" budget stmt* "}"
 budget     := "budget" (N["k"] "tokens" | "$" N[".NN"] | N ("min"|"s"|"h")),*
+typeDecl   := "type" Name "{" (field ":" ("Text"|"Int"|"Bool")),* "}"
 stmt       := "let" name "=" expr | "emit" expr
 expr       := "string" | name | call(expr,*)
             | "par" "for" name "in" "[" expr,* "]" "{" expr "}"
+            | "judge" expr "by" call,* "require" K "of" N
 ```
+
+`judge` is k-of-n verification: the verifiers run concurrently, each
+receiving the judged value as its **last declared parameter** (so a
+2-param verifier is written with 1 argument in the `by` list) plus the
+STANDS/REFUTED verdict contract ("default to REFUTED if uncertain"). The
+value passes through when at least K verifiers answer STANDS; unclear
+responses and dead verifiers count against it; fewer than K is a typed
+`judge rejected` failure with the full tally journaled.
 
 `par for` is structured fan-out: the body runs once per item,
 concurrently (bounded by `--max-parallel`, default 4), and the

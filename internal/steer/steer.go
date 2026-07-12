@@ -218,10 +218,28 @@ type ParForExpr struct {
 	Body  Expr
 }
 
+// JudgeExpr is verification as an expression: N verifier calls run
+// concurrently against a value; the value passes through when at least K
+// let it stand, otherwise the judge fails with a typed rejection.
+//
+//	let real = judge finding by refute("security"), refute("repro") require 2 of 2
+//
+// Each By call names an agent fn whose LAST declared parameter receives
+// the judged value — so a 2-param fn is written with 1 argument here. The
+// runtime appends the verdict contract (STANDS / REFUTED, default to
+// REFUTED when uncertain) to each verifier's prompt.
+type JudgeExpr struct {
+	Pos   Pos
+	Value Expr
+	By    []*CallExpr
+	K, N  int
+}
+
 func (e *StringLit) exprPos() Pos  { return e.Pos }
 func (e *Ident) exprPos() Pos      { return e.Pos }
 func (e *CallExpr) exprPos() Pos   { return e.Pos }
 func (e *ParForExpr) exprPos() Pos { return e.Pos }
+func (e *JudgeExpr) exprPos() Pos  { return e.Pos }
 
 // RenderPrompt substitutes the prompt's ${name} slots from the given
 // bindings. The checker guarantees every slot resolves, so a missing
@@ -291,6 +309,11 @@ func (m *Mission) Calls() []*CallExpr {
 				walk(it)
 			}
 			walk(x.Body) // the body call appears once; it runs per item
+		case *JudgeExpr:
+			walk(x.Value)
+			for _, by := range x.By {
+				walk(by)
+			}
 		}
 	}
 	for _, st := range m.Stmts {
