@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ["**"] # releases are cut locally via goreleaser; CI guards main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needed on:" && echo "$out" && exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: unit tests
+        run: CGO_ENABLED=0 go test ./...
+        env:
+          UTA_HOME: ${{ runner.temp }}/uta-home
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      - name: e2e (real binary, stub provider)
+        run: CGO_ENABLED=0 go test -tags e2e ./tests/e2e/
+        env:
+          UTA_HOME: ${{ runner.temp }}/uta-home-e2e
+
+  release-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: goreleaser config check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          args: check
