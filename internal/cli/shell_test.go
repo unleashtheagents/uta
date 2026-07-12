@@ -380,7 +380,7 @@ func TestShellLoop_ScriptedSession(t *testing.T) {
 	in := strings.NewReader("summarize the repo\n/worker gemini\nnow deeper\n/exit\nafter exit\n")
 	var out, errw strings.Builder
 
-	if err := shellLoop(context.Background(), in, &out, &errw, f); err != nil {
+	if err := shellLoop(context.Background(), newLineReader(in, &out, ""), &out, &errw, f); err != nil {
 		t.Fatalf("shellLoop: %v", err)
 	}
 	if len(f.turns) != 2 || f.turns[0] != "summarize the repo" || f.turns[1] != "now deeper" {
@@ -394,7 +394,7 @@ func TestShellLoop_ScriptedSession(t *testing.T) {
 func TestShellLoop_EOFExitsCleanly(t *testing.T) {
 	f := &fakeShellBackend{}
 	var out strings.Builder
-	if err := shellLoop(context.Background(), strings.NewReader(""), &out, io.Discard, f); err != nil {
+	if err := shellLoop(context.Background(), newLineReader(strings.NewReader(""), &out, ""), &out, io.Discard, f); err != nil {
 		t.Fatalf("EOF should exit cleanly, got %v", err)
 	}
 	if !strings.Contains(out.String(), "uta> ") {
@@ -405,7 +405,7 @@ func TestShellLoop_EOFExitsCleanly(t *testing.T) {
 func TestShellLoop_BlankLinesReprompt(t *testing.T) {
 	f := &fakeShellBackend{}
 	var out strings.Builder
-	if err := shellLoop(context.Background(), strings.NewReader("\n   \n"), &out, io.Discard, f); err != nil {
+	if err := shellLoop(context.Background(), newLineReader(strings.NewReader("\n   \n"), &out, ""), &out, io.Discard, f); err != nil {
 		t.Fatalf("shellLoop: %v", err)
 	}
 	if len(f.turns) != 0 {
@@ -431,7 +431,7 @@ func TestShellLoop_CancelledContextStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	f := &fakeShellBackend{}
-	err := shellLoop(ctx, strings.NewReader("should never run\n"), io.Discard, io.Discard, f)
+	err := shellLoop(ctx, newLineReader(strings.NewReader("should never run\n"), io.Discard, ""), io.Discard, io.Discard, f)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

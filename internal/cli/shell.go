@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -161,7 +160,9 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 			fmt.Fprintln(cmd.ErrOrStderr(), "[uta] shell — text talks to agents, /commands control them, !commands run locally. /help for details, /exit to leave.")
 			fmt.Fprintf(cmd.ErrOrStderr(), "[uta] worker: %s   mode: %s   agents detected: %s\n",
 				workerName, modeName, strings.Join(available, ", "))
-			return shellLoop(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), sh)
+			rl := newLineReader(cmd.InOrStdin(), cmd.OutOrStdout(),
+				filepath.Join(app.StateDir, "shell_history"))
+			return shellLoop(cmd.Context(), rl, cmd.OutOrStdout(), cmd.ErrOrStderr(), sh)
 		},
 	}
 	cmd.Flags().StringVar(&workerName, "worker", "", "worker provider (defaults to the first detected one)")
@@ -175,25 +176,31 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 	return cmd
 }
 
-// shellLoop is the read-dispatch cycle. It owns nothing but the scanner;
-// every effect goes through the backend, so tests drive it with a
-// strings.Reader and a fake. EOF (Ctrl-D) exits cleanly.
-func shellLoop(ctx context.Context, in io.Reader, out, errw io.Writer, b shellBackend) error {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+// shellLoop is the read-dispatch cycle. It owns nothing but the line
+// reader; every effect goes through the backend, so tests drive it with a
+// scanner-backed reader and a fake. EOF (Ctrl-D) exits cleanly; Ctrl-C at
+// the prompt (interactive readers only) clears the line and re-prompts.
+func shellLoop(ctx context.Context, rl lineReader, out, errw io.Writer, b shellBackend) error {
+	defer rl.Close()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		fmt.Fprint(out, shellPrompt(b))
-		if !sc.Scan() {
-			fmt.Fprintln(out)
-			return sc.Err()
+		line, err := rl.ReadLine(shellPrompt(b))
+		if errors.Is(err, errInterrupted) {
+			continue
 		}
-		line := strings.TrimSpace(sc.Text())
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
+		rl.Remember(line)
 		if dispatchShellLine(ctx, line, b, out, errw) {
 			return nil
 		}
