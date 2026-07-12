@@ -498,3 +498,39 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 func runeLen(s string) int { return len([]rune(s)) }
+
+// TestHandle_AssistantTextStreamsWhenSingleSubtask covers the live-prose
+// path: with exactly one subtask in flight the worker's text renders as
+// dim gutter lines; with two in flight it degrades to dots.
+func TestHandle_AssistantTextStreamsWhenSingleSubtask(t *testing.T) {
+	r, buf := newTestRenderer(t)
+	emit := func(k trajectory.Kind, subtaskID string, payload any) {
+		var raw json.RawMessage
+		if payload != nil {
+			b, _ := json.Marshal(payload)
+			raw = b
+		}
+		r.handle(trajectory.Event{Kind: k, SubtaskID: subtaskID, Ts: time.Now(), Payload: raw})
+	}
+
+	emit(trajectory.GoalReceived, "", nil)
+	emit(trajectory.PlanProposed, "", map[string]any{"subtasks": []map[string]any{{"id": "a"}}})
+	emit(trajectory.SubtaskStarted, "s1", nil)
+	emit(trajectory.SubtaskAssistantText, "s1", map[string]string{"text": "Hello there\nsecond line"})
+	if out := buf.String(); !strings.Contains(out, "│ Hello there") || !strings.Contains(out, "│ second line") {
+		t.Fatalf("single-stream text should render as gutter prose, got:\n%s", out)
+	}
+	// A second in-flight subtask switches back to dots.
+	emit(trajectory.SubtaskStarted, "s2", nil)
+	before := buf.Len()
+	emit(trajectory.SubtaskAssistantText, "s2", map[string]string{"text": "interleaved"})
+	if got := buf.String()[before:]; strings.Contains(got, "interleaved") {
+		t.Errorf("parallel subtasks must not stream prose, got %q", got)
+	}
+	// Completing s1 makes s2 the single stream again.
+	emit(trajectory.SubtaskCompleted, "s1", nil)
+	emit(trajectory.SubtaskAssistantText, "s2", map[string]string{"text": "back to prose"})
+	if !strings.Contains(buf.String(), "│ back to prose") {
+		t.Errorf("streaming should resume once one subtask remains:\n%s", buf.String())
+	}
+}

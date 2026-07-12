@@ -33,6 +33,9 @@ type Renderer struct {
 	tokensIn  int64
 	tokensOut int64
 	usdCents  int64
+	// running tracks in-flight subtask ids; assistant text streams as
+	// prose only while exactly one is running (dots otherwise).
+	running map[string]bool
 }
 
 const (
@@ -149,6 +152,17 @@ func (r *Renderer) interjectLocked(line string) {
 	fmt.Fprintf(r.w, "  %s ", r.dim(r.phase+"…"))
 }
 
+// streamTextLocked prints one assistant text block as dim, gutter-marked
+// prose inside the current phase, then restores the phase label so dots
+// keep a home. Caller must hold r.mu and ensure a phase is active.
+func (r *Renderer) streamTextLocked(text string) {
+	fmt.Fprintln(r.w)
+	for _, ln := range strings.Split(strings.TrimSpace(text), "\n") {
+		fmt.Fprintf(r.w, "  %s %s\n", r.dim("│"), r.dim(ln))
+	}
+	fmt.Fprintf(r.w, "  %s ", r.dim(r.phase+"…"))
+}
+
 // usageSuffix renders the accumulated token/cost totals for the final
 // summary line, or "" when nothing was recorded (provider didn't report
 // usage). Caller must hold r.mu.
@@ -217,15 +231,38 @@ func (r *Renderer) handle(ev trajectory.Event) {
 		r.endPhaseLocked("", r.yellow("planner output unparseable; using fallback"))
 		r.startPhaseLocked("Running 1 subtask")
 
+	case trajectory.SubtaskStarted:
+		if ev.SubtaskID != "" {
+			if r.running == nil {
+				r.running = map[string]bool{}
+			}
+			r.running[ev.SubtaskID] = true
+		}
+		r.dotLocked("")
+
+	case trajectory.SubtaskAssistantText:
+		// Single-stream case: when exactly one subtask is in flight, show
+		// the worker's actual prose as it lands instead of a dot. With
+		// parallel subtasks the streams would interleave, so they stay dots.
+		if r.phase != "" && len(r.running) == 1 && r.running[ev.SubtaskID] {
+			var p struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err == nil && strings.TrimSpace(p.Text) != "" {
+				r.streamTextLocked(p.Text)
+				return
+			}
+		}
+		r.dotLocked("")
+
 	case trajectory.SubtaskStdout,
-		trajectory.SubtaskAssistantText,
 		trajectory.SubtaskToolCall,
-		trajectory.SubtaskToolResult,
-		trajectory.SubtaskStarted:
+		trajectory.SubtaskToolResult:
 		r.dotLocked("")
 
 	case trajectory.SubtaskCompleted:
 		r.doneSubs++
+		delete(r.running, ev.SubtaskID)
 		var p struct {
 			TokensIn  int64 `json:"tokens_in"`
 			TokensOut int64 `json:"tokens_out"`
@@ -239,7 +276,12 @@ func (r *Renderer) handle(ev trajectory.Event) {
 		r.dotLocked(r.green("•"))
 
 	case trajectory.SubtaskFailed:
+		delete(r.running, ev.SubtaskID)
 		r.dotLocked(r.red("!"))
+
+	case trajectory.SubtaskSkipped:
+		delete(r.running, ev.SubtaskID)
+		r.dotLocked(r.yellow("s"))
 
 	case trajectory.BudgetWarning:
 		var p struct {
