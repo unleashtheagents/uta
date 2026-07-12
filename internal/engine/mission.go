@@ -55,6 +55,10 @@ type MissionRequest struct {
 	ResumeSessionID string
 }
 
+// ErrSchemaMismatch marks an agent response that failed its declared
+// record schema even after the bounded retry. errors.Is-able.
+var ErrSchemaMismatch = errors.New("schema mismatch")
+
 // errCallFailed wraps a provider failure with the call site so the mission
 // error reads like a stack frame: `greet("world") at hello.steer:13`.
 type errCallFailed struct {
@@ -292,6 +296,13 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 	if err != nil {
 		return "", err
 	}
+	// A record return type is a contract: the schema instruction is the
+	// one line of type system the model ever sees, and the response is
+	// validated (with one feedback retry) before the value flows onward.
+	recType, isList, structured := w.req.Program.SchemaFor(fn)
+	if structured {
+		prompt += "\n\n" + steer.SchemaInstruction(recType, isList)
+	}
 
 	w.seq++
 	specID := fmt.Sprintf("%sc%d-%s", w.prefix, w.seq, fn.Name)
@@ -352,6 +363,36 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 	callCtx, cancel := context.WithTimeout(ctx, w.req.CallTimeout)
 	result, callErr := w.sup.callProvider(callCtx, w.sessionID, subtaskID, prov, prompt, carrier)
 	cancel()
+
+	// Schema enforcement with one bounded retry: the rejection reason is
+	// fed back verbatim so the model can repair its own output. The retry
+	// is a real provider call — it charges the budget like any other.
+	if callErr == nil && structured {
+		validated, verr := steer.ValidateRecord(recType, result.FinalText, isList)
+		if verr != nil {
+			w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskStdout, map[string]any{
+				"schema_retry": verr.Error(), "spec_id": specID,
+			})
+			retryPrompt := prompt + "\n\nYour previous response was rejected: " + verr.Error() +
+				"\nRespond again with ONLY the JSON described above."
+			retryCtx, retryCancel := context.WithTimeout(ctx, w.req.CallTimeout)
+			retryResult, retryErr := w.sup.callProvider(retryCtx, w.sessionID, subtaskID, prov, retryPrompt, carrier)
+			retryCancel()
+			retryResult.TokensIn += result.TokensIn
+			retryResult.TokensOut += result.TokensOut
+			retryResult.ApproxUSDCents += result.ApproxUSDCents
+			result = retryResult
+			if retryErr != nil {
+				callErr = retryErr
+			} else if validated, verr = steer.ValidateRecord(recType, result.FinalText, isList); verr != nil {
+				callErr = fmt.Errorf("response failed the %s schema after retry (%v): %w",
+					recType.Name, verr, ErrSchemaMismatch)
+			}
+		}
+		if callErr == nil {
+			result.FinalText = validated
+		}
+	}
 	completedAt := time.Now()
 
 	// The fn's `costs <=` clause is a per-call ceiling, checked post-hoc

@@ -14,8 +14,8 @@ var reservedConstructs = map[string]string{
 	"until": "discovery loops", "gate": "human gates",
 	"with": "capability raises", "retry": "typed failure handling",
 	"context": "named context bindings", "policy": "policy scopes",
-	"type": "record type declarations", "recall": "memory queries",
-	"var": "mutable bindings", "if": "conditionals",
+	"recall": "memory queries",
+	"var":    "mutable bindings", "if": "conditionals",
 }
 
 // Parse turns one .steer source file into a Program. It fails fast on the
@@ -45,6 +45,12 @@ func Parse(file, src string) (*Program, *Diag) {
 				return nil, &d
 			}
 			prog.Mission = m
+		case p.tok.kind == tokIdent && p.tok.text == "type":
+			t, d := p.parseTypeDecl()
+			if d != nil {
+				return nil, d
+			}
+			prog.Types = append(prog.Types, t)
 		case p.tok.kind == tokIdent && p.tok.text == "fn":
 			d := p.errHere("host fn declarations are not implemented in the v0 interpreter (only agent fn)")
 			return nil, &d
@@ -491,6 +497,50 @@ func (p *parser) parseExpr() (Expr, *Diag) {
 		d := p.errHere("expected an expression (string, name, or call), got %s", p.describe())
 		return nil, &d
 	}
+}
+
+// parseTypeDecl parses `type Name { field: Text, count: Int, ok: Bool }`.
+// Commas between fields are optional (newlines read naturally).
+func (p *parser) parseTypeDecl() (*RecordType, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'type'
+		return nil, d
+	}
+	nameTok, d := p.expect(tokIdent, "as the type name")
+	if d != nil {
+		return nil, d
+	}
+	t := &RecordType{Pos: pos, Name: nameTok.text}
+	if _, d := p.expect(tokLBrace, "to open the field list"); d != nil {
+		return nil, d
+	}
+	for p.tok.kind != tokRBrace {
+		fTok, d := p.expect(tokIdent, "as a field name")
+		if d != nil {
+			return nil, d
+		}
+		if _, d := p.expect(tokColon, "after the field name"); d != nil {
+			return nil, d
+		}
+		fType, d := p.expect(tokIdent, "as the field type (Text, Int, Bool)")
+		if d != nil {
+			return nil, d
+		}
+		t.Fields = append(t.Fields, RecordField{Pos: fTok.pos, Name: fTok.text, Type: fType.text})
+		if p.tok.kind == tokComma {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+		}
+	}
+	if d := p.advance(); d != nil { // consume '}'
+		return nil, d
+	}
+	if len(t.Fields) == 0 {
+		dd := p.lx.errAt(pos, "type %q has no fields", t.Name)
+		return nil, &dd
+	}
+	return t, nil
 }
 
 // parseParFor parses `par for x in [item, ...] { body }`. The item list is

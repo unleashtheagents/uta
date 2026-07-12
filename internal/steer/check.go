@@ -58,7 +58,28 @@ func (c *checker) srcLine(n int) string {
 	return ""
 }
 
+// recordFieldTypes are the JSON-schema-able field types of v0.
+var recordFieldTypes = map[string]bool{"Text": true, "Int": true, "Bool": true}
+
 func (c *checker) run() {
+	seenTypes := map[string]Pos{}
+	for _, t := range c.prog.Types {
+		if prev, dup := seenTypes[t.Name]; dup {
+			c.errAt(t.Pos, "type %q already declared at line %d", t.Name, prev.Line)
+		}
+		seenTypes[t.Name] = t.Pos
+		fields := map[string]bool{}
+		for _, f := range t.Fields {
+			if fields[f.Name] {
+				c.errAt(f.Pos, "duplicate field %q in type %q", f.Name, t.Name)
+			}
+			fields[f.Name] = true
+			if !recordFieldTypes[f.Type] {
+				c.errAt(f.Pos, "field %q has type %q — record fields are Text, Int, or Bool in v0", f.Name, f.Type)
+			}
+		}
+	}
+
 	seen := map[string]Pos{}
 	for _, fn := range c.prog.Agents {
 		if prev, dup := seen[fn.Name]; dup {
@@ -78,6 +99,14 @@ func (c *checker) run() {
 func (c *checker) checkAgentFn(fn *AgentFn) {
 	if fn.Prompt.Text == "" {
 		c.errAt(fn.Pos, "agent fn %q has no prompt block — the body of an agent fn is a goal, and the prompt is where it lives", fn.Name)
+	}
+	// Return types: Text (or [Text]) flows as-is; a declared record (or
+	// [record]) is schema-validated at the agent boundary. Anything else
+	// is a typo or an undeclared type.
+	ret := strings.TrimSuffix(strings.TrimPrefix(fn.ReturnType, "["), "]")
+	if ret != "Text" && c.prog.Type(ret) == nil {
+		c.errAt(fn.Pos, "agent fn %q returns %q, which is not Text and not a declared type%s",
+			fn.Name, fn.ReturnType, suggest(ret, typeNames(c.prog)))
 	}
 	params := map[string]bool{}
 	for _, p := range fn.Params {
@@ -177,6 +206,14 @@ func paramNames(fn *AgentFn) []string {
 		out[i] = p.Name
 	}
 	return out
+}
+
+func typeNames(prog *Program) []string {
+	out := make([]string, 0, len(prog.Types)+1)
+	for _, t := range prog.Types {
+		out = append(out, t.Name)
+	}
+	return append(out, "Text")
 }
 
 func agentNames(prog *Program) []string {

@@ -432,6 +432,74 @@ func TestRunMission_ParForResumeRecoversAllBranches(t *testing.T) {
 	}
 }
 
+const typedMissionSrc = `
+type Verdict { summary: Text, score: Int, ship: Bool }
+
+agent fn assess(topic: Text) -> Verdict
+  prompt """Assess ${topic}."""
+
+mission typed {
+  budget 10k tokens
+  emit assess("the release")
+}
+`
+
+func TestRunMission_SchemaValidatedWithRetry(t *testing.T) {
+	deps := newTestDeps(t)
+	var prompts []string
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return provider.RunResult{FinalText: "Sure! Here you go: it looks great."}, nil
+		}
+		return provider.RunResult{FinalText: "```json\n{\"summary\":\"solid\",\"score\":8,\"ship\":true}\n```"}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, typedMissionSrc), SourceFile: "typed.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("RunMission: %v", err)
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (original + one retry)", len(prompts))
+	}
+	if !strings.Contains(prompts[0], "Respond ONLY with a single JSON Verdict object") {
+		t.Errorf("schema instruction missing from prompt:\n%s", prompts[0])
+	}
+	if !strings.Contains(prompts[1], "was rejected: response is not valid JSON") {
+		t.Errorf("retry prompt should carry the rejection reason:\n%s", prompts[1])
+	}
+	// The value that flows onward is the normalized JSON, fences stripped.
+	if res.FinalAnswer != `{"score":8,"ship":true,"summary":"solid"}` {
+		t.Errorf("final = %q", res.FinalAnswer)
+	}
+}
+
+func TestRunMission_SchemaMismatchAfterRetryIsTyped(t *testing.T) {
+	deps := newTestDeps(t)
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		return provider.RunResult{FinalText: "I refuse to emit JSON."}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, typedMissionSrc), SourceFile: "typed.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	})
+	if !errors.Is(err, ErrSchemaMismatch) {
+		t.Fatalf("err = %v, want ErrSchemaMismatch", err)
+	}
+	if res.Status != "failed" {
+		t.Errorf("status = %q", res.Status)
+	}
+}
+
 func TestRunMission_DurationBudgetIsDeadline(t *testing.T) {
 	deps := newTestDeps(t)
 	prov := &fakeProvider{name: "claude", run: func(ctx context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {

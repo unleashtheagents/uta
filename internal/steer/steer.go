@@ -82,12 +82,30 @@ func (d Diag) Render() string {
 	return b.String()
 }
 
-// Program is one parsed .steer file: agent fn declarations plus exactly
-// one mission (the checker enforces the "exactly one").
+// Program is one parsed .steer file: type + agent fn declarations plus
+// exactly one mission (the checker enforces the "exactly one").
 type Program struct {
 	File    string
+	Types   []*RecordType
 	Agents  []*AgentFn
 	Mission *Mission
+}
+
+// RecordType is a declared record: it doubles as the JSON Schema enforced
+// at the agent boundary when an agent fn returns it.
+//
+//	type Finding { title: Text, file: Text, severity: Text }
+type RecordType struct {
+	Pos    Pos
+	Name   string
+	Fields []RecordField
+}
+
+// RecordField types are Text, Int, or Bool in v0.
+type RecordField struct {
+	Pos  Pos
+	Name string
+	Type string
 }
 
 // AgentFn is declaration form 2 from the paper: the body is a goal,
@@ -228,6 +246,31 @@ func (p *Program) Agent(name string) *AgentFn {
 		}
 	}
 	return nil
+}
+
+// Type returns the declared record type by name, or nil.
+func (p *Program) Type(name string) *RecordType {
+	for _, t := range p.Types {
+		if t.Name == name {
+			return t
+		}
+	}
+	return nil
+}
+
+// SchemaFor resolves an agent fn's return type to its record schema.
+// structured=false means the fn returns plain Text (or a text list) and
+// no boundary validation applies.
+func (p *Program) SchemaFor(fn *AgentFn) (rec *RecordType, isList, structured bool) {
+	name := fn.ReturnType
+	if strings.HasPrefix(name, "[") && strings.HasSuffix(name, "]") {
+		name = name[1 : len(name)-1]
+		isList = true
+	}
+	if t := p.Type(name); t != nil {
+		return t, isList, true
+	}
+	return nil, false, false
 }
 
 // Calls returns the mission's agent calls in execution order — nested
