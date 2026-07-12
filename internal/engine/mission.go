@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/unleashtheagents/uta/internal/budget"
+	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/steer"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -173,6 +174,7 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		ord:       new(int64),
 		recovered: new(int64),
 		sem:       make(chan struct{}, maxPar),
+		unhealthy: &sync.Map{},
 	}
 
 	var finalAnswer string
@@ -261,6 +263,9 @@ type missionWalk struct {
 	ord       *int64        // global subtask ordinal (atomic; claim order)
 	recovered *int64        // recovered-call count (atomic)
 	sem       chan struct{} // caps concurrently running par branches
+	// unhealthy remembers providers that failed on infrastructure (auth,
+	// quota, dead transport) this mission; any() resolution benches them.
+	unhealthy *sync.Map
 
 	// verdictMode marks a judge-verifier scope: evalCall appends the
 	// STANDS/REFUTED contract to the prompt instead of any schema.
@@ -347,14 +352,60 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		}
 	}
 
-	workerName, err := resolveMissionWorker(fn, w.req.DefaultWorker, w.req.Available)
+	candidates, err := missionWorkerCandidates(fn, w.req.DefaultWorker, w.req.Available)
 	if err != nil {
 		return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File, err: err}
 	}
+	// Providers that already failed on infrastructure this mission go to
+	// the back of the line: still a last resort, never the first choice.
+	ordered := make([]string, 0, len(candidates))
+	var benched []string
+	for _, c := range candidates {
+		if w.isUnhealthy(c) {
+			benched = append(benched, c)
+		} else {
+			ordered = append(ordered, c)
+		}
+	}
+	ordered = append(ordered, benched...)
+
+	var lastErr error
+	for i, workerName := range ordered {
+		text, callErr := w.callOnce(ctx, fn, call, args, specID, prompt, workerName, recType, isList, structured)
+		if callErr == nil {
+			return text, nil
+		}
+		lastErr = callErr
+		// Failover is for infrastructure failures only (auth, quota,
+		// exhausted transport). Semantic failures — the agent worked and
+		// failed, schema mismatches, budget, cancellation — would fail the
+		// same way anywhere, so they don't burn a second provider.
+		if i == len(ordered)-1 || !failoverEligible(callErr) {
+			break
+		}
+		w.markUnhealthy(workerName)
+		w.sup.emit(w.sessionID, "", trajectory.ProviderFailover, map[string]any{
+			"spec_id": specID, "from": workerName, "to": ordered[i+1], "reason": callErr.Error(),
+		})
+	}
+	return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File, err: lastErr}
+}
+
+// failoverEligible reports whether a call failure is an infrastructure
+// problem another provider in the worker set could plausibly not have.
+func failoverEligible(err error) bool {
+	return errors.Is(err, provider.ErrAuth) ||
+		errors.Is(err, provider.ErrQuota) ||
+		errors.Is(err, provider.ErrTransport)
+}
+
+// callOnce executes one provider attempt for a call: its own subtask row,
+// schema enforcement, and cost ceiling. Returns the raw failure (no call
+// site wrapper) so evalCall's failover loop can classify it.
+func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *steer.CallExpr, args map[string]string, specID, prompt, workerName string, recType *steer.RecordType, isList, structured bool) (string, error) {
 	prov, ok := w.sup.deps.Registry.Get(workerName)
 	if !ok {
-		return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File,
-			err: fmt.Errorf("provider %q not in registry", workerName)}
+		return "", fmt.Errorf("provider %q not in registry", workerName)
 	}
 
 	subtaskID := uuid.NewString()
@@ -441,7 +492,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
 			"spec_id": specID, "error": callErr.Error(), "kind": kind,
 		})
-		return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File, err: callErr}
+		return "", callErr
 	}
 
 	// The full result text goes to a blob so a future --resume-session can
@@ -501,6 +552,7 @@ func (w *missionWalk) evalParFor(ctx context.Context, pf *steer.ParForExpr) (str
 			bindings: bindings, journal: w.journal,
 			prefix: fmt.Sprintf("%sp%d.b%d.", w.prefix, parID, i+1),
 			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			unhealthy: w.unhealthy,
 		}
 		wg.Add(1)
 		go func(i int, bw *missionWalk) {
@@ -561,6 +613,7 @@ func (w *missionWalk) evalJudge(ctx context.Context, j *steer.JudgeExpr) (string
 			bindings: w.bindings, journal: w.journal,
 			prefix: fmt.Sprintf("%sj%d.v%d.", w.prefix, judgeID, i+1),
 			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			unhealthy:   w.unhealthy,
 			verdictMode: true,
 		}
 		wg.Add(1)
@@ -642,31 +695,44 @@ func (w *missionWalk) blobString(ref string) (string, bool) {
 	return buf.String(), true
 }
 
-// resolveMissionWorker picks the provider for one agent fn call: the fn's
-// worker set in declaration order, else the mission default. The error
-// spells out what was asked for and what is actually available.
-func resolveMissionWorker(fn *steer.AgentFn, defaultWorker string, available []string) (string, error) {
+// missionWorkerCandidates returns the ordered provider candidates for one
+// agent fn call: the fn's declared worker set filtered to available
+// providers (declaration order — predictability is a feature), or the
+// mission default. The error spells out what was asked for and what is
+// actually available.
+func missionWorkerCandidates(fn *steer.AgentFn, defaultWorker string, available []string) ([]string, error) {
 	avail := map[string]bool{}
 	for _, a := range available {
 		avail[a] = true
 	}
 	if len(fn.Workers) == 0 {
 		if defaultWorker == "" {
-			return "", fmt.Errorf("agent fn %q has no worker clause and no default worker is set", fn.Name)
+			return nil, fmt.Errorf("agent fn %q has no worker clause and no default worker is set", fn.Name)
 		}
 		if !avail[defaultWorker] {
-			return "", fmt.Errorf("default worker %q is not available (detected: %s)", defaultWorker, strings.Join(available, ", "))
+			return nil, fmt.Errorf("default worker %q is not available (detected: %s)", defaultWorker, strings.Join(available, ", "))
 		}
-		return defaultWorker, nil
+		return []string{defaultWorker}, nil
 	}
+	var out []string
 	for _, wname := range fn.Workers {
 		if avail[wname] {
-			return wname, nil
+			out = append(out, wname)
 		}
 	}
-	return "", fmt.Errorf("none of %q's declared workers (%s) are available (detected: %s)",
-		fn.Name, strings.Join(fn.Workers, ", "), strings.Join(available, ", "))
+	if len(out) == 0 {
+		return nil, fmt.Errorf("none of %q's declared workers (%s) are available (detected: %s)",
+			fn.Name, strings.Join(fn.Workers, ", "), strings.Join(available, ", "))
+	}
+	return out, nil
 }
+
+func (w *missionWalk) isUnhealthy(worker string) bool {
+	_, bad := w.unhealthy.Load(worker)
+	return bad
+}
+
+func (w *missionWalk) markUnhealthy(worker string) { w.unhealthy.Store(worker, true) }
 
 func callTitle(fn *steer.AgentFn, call *steer.CallExpr, args map[string]string) string {
 	if len(fn.Params) == 0 {

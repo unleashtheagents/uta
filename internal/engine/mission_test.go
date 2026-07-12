@@ -612,3 +612,96 @@ func TestRunMission_JudgeRejectionIsTyped(t *testing.T) {
 		t.Errorf("status = %q", res.Status)
 	}
 }
+
+const failoverMissionSrc = `
+agent fn ask(q: Text) -> Text
+  worker any(flaky, steady)
+  prompt """Q: ${q}"""
+
+mission failover {
+  budget 10k tokens
+  let a = ask("first")
+  let b = ask("second")
+  emit b
+}
+`
+
+func TestRunMission_AnyFailsOverOnInfraErrors(t *testing.T) {
+	deps := newTestDeps(t)
+	var flakyCalls, steadyCalls int
+	flaky := &fakeProvider{name: "flaky", run: func(_ context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		flakyCalls++
+		return provider.RunResult{}, provider.ErrAuth
+	}}
+	steady := &fakeProvider{name: "steady", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		steadyCalls++
+		return provider.RunResult{FinalText: "ok: " + prompt}, nil
+	}}
+	if err := deps.Registry.Register(flaky, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Registry.Register(steady, false); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, failoverMissionSrc), SourceFile: "failover.steer",
+		Available: []string{"flaky", "steady"},
+	})
+	if err != nil {
+		t.Fatalf("RunMission: %v", err)
+	}
+	if res.Status != "completed" {
+		t.Errorf("status = %q", res.Status)
+	}
+	// Call 1: flaky fails auth → failover to steady. Call 2: flaky is
+	// benched, steady goes first — flaky is hit exactly once all mission.
+	if flakyCalls != 1 {
+		t.Errorf("flaky calls = %d, want 1 (benched after the auth failure)", flakyCalls)
+	}
+	if steadyCalls != 2 {
+		t.Errorf("steady calls = %d, want 2", steadyCalls)
+	}
+	// Both attempts are on the journal: a failed row and completed rows.
+	var failed, completed int
+	for _, st := range res.Subtasks {
+		switch st.Status {
+		case "failed":
+			failed++
+		case "completed":
+			completed++
+		}
+	}
+	if failed != 1 || completed != 2 {
+		t.Errorf("journal shape = %d failed / %d completed, want 1/2", failed, completed)
+	}
+}
+
+func TestRunMission_NoFailoverOnSemanticFailure(t *testing.T) {
+	deps := newTestDeps(t)
+	var steadyCalls int
+	flaky := &fakeProvider{name: "flaky", run: func(_ context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		return provider.RunResult{FinalText: "I tried and failed"}, provider.ErrWorkerFailed
+	}}
+	steady := &fakeProvider{name: "steady", run: func(_ context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		steadyCalls++
+		return provider.RunResult{FinalText: "ok"}, nil
+	}}
+	if err := deps.Registry.Register(flaky, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Registry.Register(steady, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, failoverMissionSrc), SourceFile: "failover.steer",
+		Available: []string{"flaky", "steady"},
+	})
+	if err == nil {
+		t.Fatal("semantic failure should fail the mission")
+	}
+	if steadyCalls != 0 {
+		t.Errorf("semantic failures must not burn a second provider, steady calls = %d", steadyCalls)
+	}
+}
