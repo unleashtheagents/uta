@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,6 +324,111 @@ mission m {
 	}
 	if calls != 2 {
 		t.Errorf("provider calls = %d, want 2 (no false recovery)", calls)
+	}
+}
+
+const parMissionSrc = `
+agent fn scan(lens: Text) -> Text
+  prompt """Scan through the ${lens} lens."""
+
+mission sweep {
+  budget 50k tokens
+  let raw = par for lens in ["security", "perf", "style"] { scan(lens) }
+  emit raw
+}
+`
+
+func TestRunMission_ParForRunsBranchesConcurrently(t *testing.T) {
+	deps := newTestDeps(t)
+	var mu sync.Mutex
+	var prompts []string
+	inflight, peak := 0, 0
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		mu.Lock()
+		prompts = append(prompts, prompt)
+		inflight++
+		if inflight > peak {
+			peak = inflight
+		}
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+		return provider.RunResult{FinalText: "found: " + prompt}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := New(deps).RunMission(context.Background(), MissionRequest{
+		Program: parseMission(t, parMissionSrc), SourceFile: "sweep.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("RunMission: %v", err)
+	}
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+	if peak < 2 {
+		t.Errorf("peak concurrency = %d, want >= 2 (branches must overlap)", peak)
+	}
+	// Results join in item order regardless of completion order.
+	wantOrder := []string{"security", "perf", "style"}
+	last := -1
+	for _, lens := range wantOrder {
+		idx := strings.Index(res.FinalAnswer, lens)
+		if idx < 0 || idx < last {
+			t.Fatalf("answer out of item order:\n%s", res.FinalAnswer)
+		}
+		last = idx
+	}
+	// Spec ids are structural, not scheduling-dependent.
+	specs := map[string]bool{}
+	for _, st := range res.Subtasks {
+		specs[st.SpecID] = true
+	}
+	for _, want := range []string{"p1.b1.c1-scan", "p1.b2.c1-scan", "p1.b3.c1-scan"} {
+		if !specs[want] {
+			t.Errorf("missing spec id %s in %v", want, specs)
+		}
+	}
+}
+
+func TestRunMission_ParForResumeRecoversAllBranches(t *testing.T) {
+	deps := newTestDeps(t)
+	var calls int64
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		atomic.AddInt64(&calls, 1)
+		return provider.RunResult{FinalText: "found: " + prompt}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+	sup := New(deps)
+	req := MissionRequest{
+		Program: parseMission(t, parMissionSrc), SourceFile: "sweep.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	}
+	res1, err := sup.RunMission(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt64(&calls) != 3 {
+		t.Fatalf("first run calls = %d", calls)
+	}
+
+	req.ResumeSessionID = res1.SessionID
+	res2, err := sup.RunMission(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt64(&calls) != 3 {
+		t.Errorf("resume made %d extra provider calls, want 0", calls-3)
+	}
+	if res2.FinalAnswer != res1.FinalAnswer {
+		t.Errorf("replayed answer differs:\n%q\nvs\n%q", res2.FinalAnswer, res1.FinalAnswer)
 	}
 }
 

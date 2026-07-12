@@ -10,7 +10,7 @@ import (
 // execute yet. Naming them explicitly turns "syntax error" into a roadmap
 // pointer for programs written against the full RFC.
 var reservedConstructs = map[string]string{
-	"par": "structured fan-out", "judge": "verification refinement",
+	"judge": "verification refinement",
 	"until": "discovery loops", "gate": "human gates",
 	"with": "capability raises", "retry": "typed failure handling",
 	"context": "named context bindings", "policy": "policy scopes",
@@ -458,6 +458,9 @@ func (p *parser) parseExpr() (Expr, *Diag) {
 		return &StringLit{Pos: t.pos, Value: t.text}, nil
 	case tokIdent:
 		t := p.tok
+		if t.text == "par" {
+			return p.parseParFor()
+		}
 		if d := p.advance(); d != nil {
 			return nil, d
 		}
@@ -488,6 +491,60 @@ func (p *parser) parseExpr() (Expr, *Diag) {
 		d := p.errHere("expected an expression (string, name, or call), got %s", p.describe())
 		return nil, &d
 	}
+}
+
+// parseParFor parses `par for x in [item, ...] { body }`. The item list is
+// syntactic — list values do not exist elsewhere in the v0 value model.
+func (p *parser) parseParFor() (Expr, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'par'
+		return nil, d
+	}
+	if d := p.expectKeyword("for", "after 'par'"); d != nil {
+		return nil, d
+	}
+	v, d := p.expect(tokIdent, "as the loop variable")
+	if d != nil {
+		return nil, d
+	}
+	if d := p.expectKeyword("in", "after the loop variable"); d != nil {
+		return nil, d
+	}
+	if _, d := p.expect(tokLBracket, "to open the item list"); d != nil {
+		return nil, d
+	}
+	pf := &ParForExpr{Pos: pos, Var: v.text}
+	for p.tok.kind != tokRBracket {
+		item, d := p.parseExpr()
+		if d != nil {
+			return nil, d
+		}
+		pf.Items = append(pf.Items, item)
+		if p.tok.kind == tokComma {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+		}
+	}
+	if d := p.advance(); d != nil { // consume ']'
+		return nil, d
+	}
+	if len(pf.Items) == 0 {
+		dd := p.lx.errAt(pos, "par for needs at least one item")
+		return nil, &dd
+	}
+	if _, d := p.expect(tokLBrace, "to open the par body"); d != nil {
+		return nil, d
+	}
+	body, d := p.parseExpr()
+	if d != nil {
+		return nil, d
+	}
+	pf.Body = body
+	if _, d := p.expect(tokRBrace, "to close the par body"); d != nil {
+		return nil, d
+	}
+	return pf, nil
 }
 
 // extractSlots finds every ${name} in a prompt block. Slot positions are

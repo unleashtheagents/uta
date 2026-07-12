@@ -1,0 +1,34 @@
+#!/usr/bin/env -S uta mission run
+// fanout.steer — structured fan-out with `par for`.
+//
+// Three scan branches run concurrently (bounded by --max-parallel), each
+// journaled as its own subtask with a structural spec id (p1.b1.c1-scan…),
+// so --resume-session recovers completed branches deterministically.
+
+agent fn scan(lens: Text) -> Text
+  worker any(claude, gemini)
+  costs <= 60k tokens
+  prompt """
+  Review the current directory through the ${lens} lens.
+  Report the single most important finding in 2-3 sentences.
+  """
+
+agent fn digest(findings: Text) -> Text
+  worker any(claude, gemini)
+  costs <= 60k tokens
+  prompt """
+  Here are findings from three parallel reviews:
+
+  ${findings}
+
+  Synthesize them into one prioritized paragraph.
+  """
+
+mission sweep {
+  budget 500k tokens, $2, 10min
+
+  let raw = par for lens in ["security", "performance", "code clarity"] {
+    scan(lens)
+  }
+  emit digest(raw)
+}

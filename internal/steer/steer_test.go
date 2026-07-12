@@ -341,6 +341,68 @@ mission m {
 	}
 }
 
+const parSrc = `agent fn scan(lens: Text) -> Text
+  prompt """Scan through the ${lens} lens."""
+
+mission sweep {
+  budget 50k tokens
+  let raw = par for lens in ["security", "perf", "style"] { scan(lens) }
+  emit raw
+}`
+
+func TestParse_ParFor(t *testing.T) {
+	prog := parseOK(t, parSrc)
+	let := prog.Mission.Stmts[0].(*LetStmt)
+	pf, ok := let.Expr.(*ParForExpr)
+	if !ok {
+		t.Fatalf("expr = %#v, want ParForExpr", let.Expr)
+	}
+	if pf.Var != "lens" || len(pf.Items) != 3 {
+		t.Errorf("pf = var %q items %d", pf.Var, len(pf.Items))
+	}
+	if _, ok := pf.Body.(*CallExpr); !ok {
+		t.Errorf("body = %#v", pf.Body)
+	}
+	if diags := Check(prog, parSrc); HasErrors(diags) {
+		t.Fatalf("check: %s", renderAll(diags))
+	}
+	if calls := prog.Mission.Calls(); len(calls) != 1 || calls[0].Name != "scan" {
+		t.Errorf("Calls() = %v", calls)
+	}
+}
+
+func TestParse_ParForEmptyListRejected(t *testing.T) {
+	src := `mission m {
+  budget 1k tokens
+  emit par for x in [] { f(x) }
+}`
+	_, d := Parse("t.steer", src)
+	if d == nil || !strings.Contains(d.Msg, "at least one item") {
+		t.Fatalf("diag = %v", d)
+	}
+}
+
+func TestCheck_ParForVarScoping(t *testing.T) {
+	// The loop variable resolves inside the body...
+	prog := parseOK(t, parSrc)
+	if diags := Check(prog, parSrc); HasErrors(diags) {
+		t.Fatalf("var must be visible in body: %s", renderAll(diags))
+	}
+	// ...but not outside it.
+	src := `agent fn scan(lens: Text) -> Text
+  prompt """${lens}"""
+mission m {
+  budget 1k tokens
+  let raw = par for lens in ["a"] { scan(lens) }
+  emit scan(lens)
+}`
+	prog = parseOK(t, src)
+	joined := renderAll(Check(prog, src))
+	if !strings.Contains(joined, `unknown name "lens"`) {
+		t.Errorf("loop var must not leak, got:\n%s", joined)
+	}
+}
+
 func renderAll(diags []Diag) string {
 	var b strings.Builder
 	for _, d := range diags {

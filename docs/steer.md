@@ -102,7 +102,17 @@ mission    := "mission" name "{" budget stmt* "}"
 budget     := "budget" (N["k"] "tokens" | "$" N[".NN"] | N ("min"|"s"|"h")),*
 stmt       := "let" name "=" expr | "emit" expr
 expr       := "string" | name | call(expr,*)
+            | "par" "for" name "in" "[" expr,* "]" "{" expr "}"
 ```
+
+`par for` is structured fan-out: the body runs once per item,
+concurrently (bounded by `--max-parallel`, default 4), and the
+expression's value is the branch results joined in item order. Each
+branch journals under a structural spec id (`p1.b2.c1-scan`), so
+`--resume-session` recovers completed branches deterministically no
+matter how the scheduler interleaved them. List literals are only legal
+as the iteration source — the v0 value model stays Text. See
+[`examples/fanout.steer`](../examples/fanout.steer).
 
 Values are text in v0; declared types are contracts-in-waiting (arity is
 checked, shapes come with schema validation in a later step). Calls may

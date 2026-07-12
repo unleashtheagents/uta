@@ -96,6 +96,7 @@ func newMissionRunCmd() *cobra.Command {
 		printJSONL    bool
 		callTimeout   time.Duration
 		resumeSession string
+		maxParallel   int
 	)
 	cmd := &cobra.Command{
 		Use:   "run <file.steer>",
@@ -201,6 +202,7 @@ func newMissionRunCmd() *cobra.Command {
 				Workdir:         workdir,
 				Env:             env,
 				CallTimeout:     callTimeout,
+				MaxParallel:     maxParallel,
 				ModeName:        rr.ModeName,
 				ResumeSessionID: resumeSession,
 			})
@@ -255,6 +257,7 @@ func newMissionRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&printJSONL, "print-jsonl", false, "stream every trajectory event to stdout as JSONL")
 	cmd.Flags().DurationVar(&callTimeout, "call-timeout", 10*time.Minute, "timeout per agent fn call")
 	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "replay a prior mission run from its journal: completed calls with matching prompts are recovered (not re-paid), only the frontier re-runs")
+	cmd.Flags().IntVar(&maxParallel, "max-parallel", 4, "maximum concurrently running par branches")
 	return cmd
 }
 

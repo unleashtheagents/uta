@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +40,8 @@ type MissionRequest struct {
 	// CallTimeout bounds each individual agent fn call (default 10m).
 	// The mission's own duration budget, if declared, bounds the whole walk.
 	CallTimeout time.Duration
+	// MaxParallel caps concurrently running par branches (default 4).
+	MaxParallel int
 
 	ModeName            string
 	TransportMaxRetries int
@@ -148,12 +152,19 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		"source":   "steer",
 	})
 
+	maxPar := req.MaxParallel
+	if maxPar <= 0 {
+		maxPar = 4
+	}
 	w := &missionWalk{
 		sup:       s,
 		req:       req,
 		sessionID: sessionID,
 		bindings:  map[string]string{},
 		journal:   journal,
+		ord:       new(int64),
+		recovered: new(int64),
+		sem:       make(chan struct{}, maxPar),
 	}
 
 	var finalAnswer string
@@ -187,8 +198,8 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 	s.emit(sessionID, "", trajectory.RunCompleted, map[string]any{
 		"status":       "completed",
 		"mission":      m.Name,
-		"calls":        w.calls,
-		"recovered":    w.recovered,
+		"calls":        atomic.LoadInt64(w.ord),
+		"recovered":    atomic.LoadInt64(w.recovered),
 		"total_tokens": runBudget.TotalTokens(),
 		"usd_cents":    runBudget.TotalUSDCents(),
 	})
@@ -227,11 +238,21 @@ type missionWalk struct {
 	req       MissionRequest
 	sessionID string
 	bindings  map[string]string
-	calls     int // subtask ordinal counter
 	// journal holds the prior run's completed subtasks (by spec id) when
-	// resuming; recovered is the count of calls replayed from it.
-	journal   map[string]store.Subtask
-	recovered int
+	// resuming.
+	journal map[string]store.Subtask
+
+	// prefix is the structural path for spec ids: "" at the top level
+	// ("c1-greet"), "p1.b2." inside branch 2 of the first par
+	// ("p1.b2.c1-greet"). Structural keying keeps --resume-session
+	// deterministic regardless of goroutine scheduling.
+	prefix string
+	seq    int // call sequence within this scope; scopes are single-goroutine
+	parSeq int // par sequence within this scope
+
+	ord       *int64        // global subtask ordinal (atomic; claim order)
+	recovered *int64        // recovered-call count (atomic)
+	sem       chan struct{} // caps concurrently running par branches
 }
 
 func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
@@ -246,6 +267,8 @@ func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
 		return v, nil
 	case *steer.CallExpr:
 		return w.evalCall(ctx, x)
+	case *steer.ParForExpr:
+		return w.evalParFor(ctx, x)
 	default:
 		return "", fmt.Errorf("unsupported expression at line %d", e.(interface{ exprPos() steer.Pos }).exprPos().Line)
 	}
@@ -270,8 +293,8 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		return "", err
 	}
 
-	w.calls++
-	specID := fmt.Sprintf("c%d-%s", w.calls, fn.Name)
+	w.seq++
+	specID := fmt.Sprintf("%sc%d-%s", w.prefix, w.seq, fn.Name)
 
 	// Replay: a completed prior call with the same spec id AND the same
 	// rendered prompt is recovered instead of re-run. Prompt equality is
@@ -283,7 +306,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 			subtaskID := uuid.NewString()
 			recMeta, _ := json.Marshal(map[string]any{"recovered_from": prior.ID})
 			w.sup.dbErr(w.sessionID, subtaskID, "create_subtask", w.sup.deps.Store.CreateSubtask(store.Subtask{
-				ID: subtaskID, SessionID: w.sessionID, Ord: w.calls - 1, SpecID: specID,
+				ID: subtaskID, SessionID: w.sessionID, Ord: int(atomic.AddInt64(w.ord, 1)) - 1, SpecID: specID,
 				Title: callTitle(fn, call, args) + " (recovered)", PromptRef: prior.PromptRef,
 				Worker: prior.Worker, Status: "completed", StartedAt: &now, CompletedAt: &now,
 				ResultText: Truncate(text, 8000), RawOutputRef: prior.RawOutputRef,
@@ -292,7 +315,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 			w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 				"spec_id": specID, "recovered": true, "recovered_from": prior.ID,
 			})
-			w.recovered++
+			atomic.AddInt64(w.recovered, 1)
 			return text, nil
 		}
 	}
@@ -307,18 +330,11 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 			err: fmt.Errorf("provider %q not in registry", workerName)}
 	}
 
-	// The fn's `costs <=` clause is a per-call ceiling; the walk is
-	// sequential, so re-pointing the shared budget's per-call cap between
-	// calls is safe and lets callProvider enforce + journal it uniformly.
-	if b := budgetFromContext(ctx); b != nil {
-		b.PerCallMaxTokens = fn.CostTokens
-	}
-
 	subtaskID := uuid.NewString()
 	promptRef, _ := w.sup.deps.Blobs.Put([]byte(prompt), "txt")
 	startedAt := time.Now()
 	w.sup.dbErr(w.sessionID, subtaskID, "create_subtask", w.sup.deps.Store.CreateSubtask(store.Subtask{
-		ID: subtaskID, SessionID: w.sessionID, Ord: w.calls - 1, SpecID: specID,
+		ID: subtaskID, SessionID: w.sessionID, Ord: int(atomic.AddInt64(w.ord, 1)) - 1, SpecID: specID,
 		Title: callTitle(fn, call, args), PromptRef: promptRef,
 		Worker: workerName, Status: "running", StartedAt: &startedAt,
 	}))
@@ -337,6 +353,18 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 	result, callErr := w.sup.callProvider(callCtx, w.sessionID, subtaskID, prov, prompt, carrier)
 	cancel()
 	completedAt := time.Now()
+
+	// The fn's `costs <=` clause is a per-call ceiling, checked post-hoc
+	// (providers don't pre-declare usage). Done here rather than through
+	// the shared budget's PerCallMaxTokens so concurrent par branches with
+	// different ceilings can't race. The cumulative charge stands — the
+	// spend happened — but the call is a typed budget failure.
+	if callErr == nil && fn.CostTokens > 0 {
+		if used := result.TokensIn + result.TokensOut; used > fn.CostTokens {
+			callErr = fmt.Errorf("per-call costs ceiling exceeded (used=%d, cap=%d): %w",
+				used, fn.CostTokens, budget.ErrBudgetExceeded)
+		}
+	}
 
 	rawRef := ""
 	if len(result.RawOutput) > 0 {
@@ -383,6 +411,70 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		"usd_cents": result.ApproxUSDCents,
 	})
 	return finalText, nil
+}
+
+// evalParFor runs the body once per item, concurrently (bounded by the
+// walk's semaphore). Each branch gets its own single-goroutine walk scope
+// with a structural spec-id prefix, so journaling and resume stay
+// deterministic no matter how the scheduler interleaves branches. The
+// expression's value is the branch results joined in item order.
+func (w *missionWalk) evalParFor(ctx context.Context, pf *steer.ParForExpr) (string, error) {
+	items := make([]string, len(pf.Items))
+	for i, it := range pf.Items {
+		v, err := w.eval(ctx, it)
+		if err != nil {
+			return "", err
+		}
+		items[i] = v
+	}
+
+	w.parSeq++
+	parID := w.parSeq
+	results := make([]string, len(items))
+	errs := make([]error, len(items))
+	var wg sync.WaitGroup
+	for i := range items {
+		bindings := make(map[string]string, len(w.bindings)+1)
+		for k, v := range w.bindings {
+			bindings[k] = v
+		}
+		bindings[pf.Var] = items[i]
+		branch := &missionWalk{
+			sup: w.sup, req: w.req, sessionID: w.sessionID,
+			bindings: bindings, journal: w.journal,
+			prefix: fmt.Sprintf("%sp%d.b%d.", w.prefix, parID, i+1),
+			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+		}
+		wg.Add(1)
+		go func(i int, bw *missionWalk) {
+			defer wg.Done()
+			bw.sem <- struct{}{}
+			defer func() { <-bw.sem }()
+			results[i], errs[i] = bw.eval(ctx, pf.Body)
+		}(i, branch)
+	}
+	wg.Wait()
+
+	// Budget exhaustion outranks other failures — it must reach
+	// failMission as itself so the session closes as budget_exhausted.
+	for _, err := range errs {
+		if err != nil && errors.Is(err, budget.ErrBudgetExceeded) {
+			return "", err
+		}
+	}
+	for i, err := range errs {
+		if err != nil {
+			return "", fmt.Errorf("par branch %d (%s=%q): %w", i+1, pf.Var, truncateArg(items[i]), err)
+		}
+	}
+	return strings.Join(results, "\n\n---\n\n"), nil
+}
+
+func truncateArg(s string) string {
+	if len(s) > 32 {
+		return s[:31] + "…"
+	}
+	return s
 }
 
 // recoverResult decides whether a prior subtask can stand in for the call

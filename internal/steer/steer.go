@@ -187,9 +187,23 @@ type CallExpr struct {
 	Args []Expr
 }
 
-func (e *StringLit) exprPos() Pos { return e.Pos }
-func (e *Ident) exprPos() Pos     { return e.Pos }
-func (e *CallExpr) exprPos() Pos  { return e.Pos }
+// ParForExpr is structured fan-out: the body expression runs once per
+// item, concurrently, with Var bound to the item. The expression's value
+// is the branch results joined in item order. List literals are only
+// legal as the iteration source (the v0 value model stays Text).
+//
+//	let raw = par for dim in ["security", "perf"] { find_bugs(dim) }
+type ParForExpr struct {
+	Pos   Pos
+	Var   string
+	Items []Expr
+	Body  Expr
+}
+
+func (e *StringLit) exprPos() Pos  { return e.Pos }
+func (e *Ident) exprPos() Pos      { return e.Pos }
+func (e *CallExpr) exprPos() Pos   { return e.Pos }
+func (e *ParForExpr) exprPos() Pos { return e.Pos }
 
 // RenderPrompt substitutes the prompt's ${name} slots from the given
 // bindings. The checker guarantees every slot resolves, so a missing
@@ -223,14 +237,18 @@ func (m *Mission) Calls() []*CallExpr {
 	var out []*CallExpr
 	var walk func(e Expr)
 	walk = func(e Expr) {
-		c, ok := e.(*CallExpr)
-		if !ok {
-			return
+		switch x := e.(type) {
+		case *CallExpr:
+			for _, a := range x.Args {
+				walk(a)
+			}
+			out = append(out, x)
+		case *ParForExpr:
+			for _, it := range x.Items {
+				walk(it)
+			}
+			walk(x.Body) // the body call appears once; it runs per item
 		}
-		for _, a := range c.Args {
-			walk(a)
-		}
-		out = append(out, c)
 	}
 	for _, st := range m.Stmts {
 		switch s := st.(type) {

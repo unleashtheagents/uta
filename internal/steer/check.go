@@ -143,6 +143,17 @@ func (c *checker) checkExpr(e Expr, lets map[string]Pos, used, calledFns map[str
 			c.errAt(x.Pos, "unknown name %q%s", x.Name, suggest(x.Name, keys(lets)))
 		}
 		used[x.Name] = true
+	case *ParForExpr:
+		for _, it := range x.Items {
+			c.checkExpr(it, lets, used, calledFns)
+		}
+		// The loop variable is visible only inside the body.
+		child := make(map[string]Pos, len(lets)+1)
+		for k, v := range lets {
+			child[k] = v
+		}
+		child[x.Var] = x.Pos
+		c.checkExpr(x.Body, child, used, calledFns)
 	case *CallExpr:
 		fn := c.prog.Agent(x.Name)
 		if fn == nil {
