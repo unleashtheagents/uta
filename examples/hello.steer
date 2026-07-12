@@ -1,0 +1,28 @@
+#!/usr/bin/env -S uta mission run
+// hello.steer — the first steer program.
+//
+// steer is the programming language for agents sketched in Paper № 02
+// (https://unleashtheagents.ai/uta/steer/): inference is an effect,
+// budget is a linear resource, and uta is the v0 interpreter.
+//
+//   uta mission check hello.steer     static checks, no tokens spent
+//   uta mission run hello.steer       run it
+//   uta mission run hello.steer --dry-run
+//
+// or make it executable and run it like any script:
+//   chmod +x hello.steer && ./hello.steer
+
+agent fn greet(name: Text) -> Text
+  worker any(claude, gemini)     // a provider set, not a vendor lock
+  costs <= 50k tokens            // per-call ceiling, enforced
+  prompt """
+  Say "hello, ${name}" back — one short, warm sentence.
+  No preamble, no quotes.
+  """
+
+mission hello_world {
+  budget 200k tokens, $1, 5min   // linear; a mission without a budget won't compile
+
+  let greeting = greet("world")
+  emit greeting                  // the mission's public result
+}

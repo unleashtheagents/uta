@@ -38,12 +38,28 @@ uta sessions                                          # list past runs
 uta trajectory <id>                                   # the full event timeline
 uta resume <id> -g "now turn each bullet into a tweet"
 uta discuss -t "monolith or microservices for this repo?"   # two LLMs debate, moderator synthesizes
+uta shell                                             # interactive shell: converse with + control agents
+uta mission run examples/hello.steer                  # run a steer program (the agent language, v0)
 ```
 
 `uta discuss` pits two agents — ideally two different LLMs (claude vs
 gemini) — against each other for several rounds of rebuttals, then a
 moderator synthesizes agreements, disagreements, and a verdict. See
 [`docs/discussion.md`](docs/discussion.md).
+
+`uta shell` is a persistent, terminal-style prompt on top of the same
+engine: type a goal and it fans out; type again and the conversation
+continues. Its slash commands are a superset of what the underlying agent
+CLIs offer — `/model`, `/tools`, `/clear` work like in claude/gemini, plus
+uta-level control like `/worker`, `/mode`, `/agents`, and `@gemini <goal>`
+to route one turn to a specific agent. See [`docs/shell.md`](docs/shell.md).
+
+`uta mission` is the v0 interpreter for **steer**, the programming language
+for agents ([Paper № 02](https://unleashtheagents.ai/uta/steer/)): agent
+calls are effects, budgets are linear and mandatory, and every run journals
+to the normal session store. Hello world is at
+[`examples/hello.steer`](examples/hello.steer); the guide is
+[`docs/steer.md`](docs/steer.md).
 
 Sample output of a fan-out run:
 

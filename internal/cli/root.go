@@ -211,7 +211,7 @@ func Execute() {
 		&cobra.Group{ID: "integrate", Title: "Integrations:"},
 	)
 	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newProvidersCmd())
-	addTo("orchestrate", newRunCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
+	addTo("orchestrate", newRunCmd(), newShellCmd(), newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
 	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newPerfCmd(), newDashCmd())
 	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd())
 	addTo("data", newMemoryCmd(), newRecallCmd(), newIdeasCmd(), newExportDBCmd(), newImportCmd())
