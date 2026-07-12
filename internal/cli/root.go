@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -138,13 +139,18 @@ func newApp(_ context.Context) (*App, error) {
 	}
 
 	reg := provider.NewRegistry()
-	if err := reg.Register(&builtin.Claude{}, false); err != nil {
-		st.Close()
-		return nil, err
+	disabled := disabledProviderSet()
+	if !disabled["claude"] {
+		if err := reg.Register(&builtin.Claude{}, false); err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
-	if err := reg.Register(&builtin.Gemini{}, false); err != nil {
-		st.Close()
-		return nil, err
+	if !disabled["gemini"] {
+		if err := reg.Register(&builtin.Gemini{}, false); err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
 
 	// Declarative providers from <globalHome>/providers/*.yaml. Errors are
@@ -155,6 +161,9 @@ func newApp(_ context.Context) (*App, error) {
 		fmt.Fprintln(os.Stderr, "warn: provider descriptor:", e)
 	}
 	for _, d := range descriptors {
+		if disabled[strings.ToLower(d.Name)] {
+			continue
+		}
 		p, err := declarative.New(d)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: provider %s: %v\n", d.Name, err)
@@ -227,4 +236,20 @@ func Execute() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// disabledProviderSet parses UTA_DISABLED_PROVIDERS — a comma-separated,
+// case-insensitive list of provider names the operator wants uta to ignore
+// even though their binaries are installed (e.g. "gemini" when there are no
+// Gemini credits to spend). A disabled provider is never registered: it does
+// not appear in `uta providers`, is not offered as a worker, and is never
+// auto-picked by defaults like `uta discuss`'s first-two-available rule.
+func disabledProviderSet() map[string]bool {
+	out := map[string]bool{}
+	for _, n := range strings.Split(os.Getenv("UTA_DISABLED_PROVIDERS"), ",") {
+		if n = strings.ToLower(strings.TrimSpace(n)); n != "" {
+			out[n] = true
+		}
+	}
+	return out
 }

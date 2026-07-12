@@ -126,3 +126,19 @@ The same pattern pins gemini: `binary: gemini`,
   rollup by provider/day; budget caps in a MissionProfile
   (`policies.token_budget`, `policies.dollar_budget_cents`) apply regardless
   of which model is behind the provider.
+
+## Disabling a provider
+
+Sometimes a provider's CLI is installed but you don't want uta to use it —
+no credits, a paused subscription, a policy. Set `UTA_DISABLED_PROVIDERS`
+(comma-separated, case-insensitive):
+
+```sh
+export UTA_DISABLED_PROVIDERS=gemini
+```
+
+A disabled provider is never registered: it disappears from
+`uta providers`, is not offered in the worker picker, and is never
+auto-selected by defaults like `uta discuss`'s first-two-available rule or
+a workflow's `worker: any(...)` set. Unset the variable to re-enable —
+nothing else changes.
