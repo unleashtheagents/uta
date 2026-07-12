@@ -130,6 +130,8 @@ func TestRegisterMCPTools_AllRegistered(t *testing.T) {
 		"uta_trajectory_get",
 		"uta_audit",
 		"uta_run",
+		"uta_mission_check",
+		"uta_mission_run",
 		"uta_improve_pick",
 		"uta_whiteboard_set",
 		"uta_whiteboard_get",

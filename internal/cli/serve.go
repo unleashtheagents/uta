@@ -497,6 +497,104 @@ func registerMCPTools(s *mcp.Server, app *App) {
 	})
 
 	mustRegister(mcp.Tool{
+		Name:        "uta_mission_check",
+		Description: "Parse and static-check a steer program (the agent programming language, docs/steer.md) without running it or spending tokens. Returns diagnostics with line/column positions, or the mission summary when clean.",
+		InputSchema: json.RawMessage(`{
+			"type":"object",
+			"properties":{"source":{"type":"string","minLength":1,"description":"the full .steer program text"}},
+			"required":["source"],
+			"additionalProperties":false
+		}`),
+	}, func(_ context.Context, args json.RawMessage) mcp.ToolResult {
+		var p struct {
+			Source string `json:"source"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return mcp.ArgError("%v", err)
+		}
+		prog, diags, ok := checkInlineSteer(p.Source)
+		out := map[string]any{"ok": ok, "diagnostics": diags}
+		if ok {
+			out["mission"] = prog.Mission.Name
+			out["agent_fns"] = len(prog.Agents)
+			out["calls"] = len(prog.Mission.Calls())
+			out["budget"] = formatBudget(prog.Mission.Budget)
+		}
+		return mcp.TextResult(jsonDump(out))
+	})
+
+	mustRegister(mcp.Tool{
+		Name:        "uta_mission_run",
+		Description: "Execute a steer program (the agent programming language). The program's own budget declaration bounds spend — a mission without a token or dollar ceiling refuses to compile. Every agent call is journaled as a subtask of the returned session.",
+		InputSchema: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"source":{"type":"string","minLength":1,"description":"the full .steer program text"},
+				"worker":{"type":"string","description":"default worker for agent fns without a worker clause"},
+				"resume_session":{"type":"string","description":"replay a prior mission run's journal; completed matching calls are not re-paid"}
+			},
+			"required":["source"],
+			"additionalProperties":false
+		}`),
+	}, func(ctx context.Context, args json.RawMessage) mcp.ToolResult {
+		var p struct {
+			Source        string `json:"source"`
+			Worker        string `json:"worker"`
+			ResumeSession string `json:"resume_session"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return mcp.ArgError("%v", err)
+		}
+		prog, diags, ok := checkInlineSteer(p.Source)
+		if !ok {
+			return mcp.ErrorResult("program did not compile: " + jsonDump(diags))
+		}
+		dets := app.Registry.DetectAll(ctx)
+		avail := availableProviders(app.Registry.Names(), dets)
+		if len(avail) == 0 {
+			return mcp.ErrorResult("no provider on PATH")
+		}
+		worker := p.Worker
+		if worker == "" {
+			worker = avail[0]
+		} else if !containsString(avail, worker) {
+			return mcp.ArgError("provider %q is not available (detected: %s)", worker, strings.Join(avail, ", "))
+		}
+		if p.ResumeSession != "" {
+			resolved, err := app.Store.ResolveSessionID(p.ResumeSession)
+			if err != nil {
+				return mcp.ArgError("resume_session: %v", err)
+			}
+			p.ResumeSession = resolved
+		}
+		bus := trajectory.NewBus()
+		sup := engine.New(engine.Deps{
+			Store: app.Store, Blobs: app.Blobs,
+			Recorder: trajectory.NewRecorder(app.Store),
+			Bus:      bus, Registry: app.Registry,
+		})
+		res, err := sup.RunMission(ctx, engine.MissionRequest{
+			Program:         prog,
+			SourceFile:      "mcp-inline.steer",
+			DefaultWorker:   worker,
+			Available:       avail,
+			Workdir:         app.ProjectRoot,
+			Env:             app.ProjectSubtaskEnv(),
+			ResumeSessionID: p.ResumeSession,
+		})
+		bus.Shutdown()
+		if err != nil {
+			return mcp.ErrorResult(fmt.Sprintf("mission %s (session %s): %v", res.Status, res.SessionID, err))
+		}
+		return mcp.TextResult(jsonDump(map[string]any{
+			"session_id":   res.SessionID,
+			"status":       res.Status,
+			"final_answer": res.FinalAnswer,
+			"calls":        len(res.Subtasks),
+		}))
+	})
+
+	mustRegister(mcp.Tool{
 		Name:        "uta_improve_pick",
 		Description: "Inspect (do not execute) the next idea the improve loop would pick. Useful for an MCP client that wants to schedule its own execution.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),

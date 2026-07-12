@@ -58,6 +58,29 @@ func loadSteerProgram(path string, errw io.Writer) (prog *steer.Program, warning
 	return prog, warnings, !steer.HasErrors(diags)
 }
 
+// checkInlineSteer parses + checks steer source that never touched disk
+// (the MCP tools receive program text inline). Diagnostics come back as
+// structured values rather than rendered text.
+func checkInlineSteer(source string) (*steer.Program, []map[string]any, bool) {
+	toDiag := func(d steer.Diag) map[string]any {
+		sev := "error"
+		if d.Warning {
+			sev = "warning"
+		}
+		return map[string]any{"line": d.Pos.Line, "col": d.Pos.Col, "severity": sev, "message": d.Msg}
+	}
+	prog, pd := steer.Parse("inline.steer", source)
+	if pd != nil {
+		return nil, []map[string]any{toDiag(*pd)}, false
+	}
+	diags := steer.Check(prog, source)
+	out := make([]map[string]any, len(diags))
+	for i, d := range diags {
+		out[i] = toDiag(d)
+	}
+	return prog, out, !steer.HasErrors(diags)
+}
+
 // completeSteerFiles restricts shell completion for mission commands to
 // .steer files.
 func completeSteerFiles(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {

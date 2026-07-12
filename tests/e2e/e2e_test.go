@@ -10,12 +10,17 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/unleashtheagents/uta/internal/mcp"
 )
 
 var (
@@ -206,5 +211,49 @@ func TestE2E_ShellScriptedSession(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `ok: mission "e2e_hello"`) {
 		t.Errorf("/mission check output missing:\n%s", out.String())
+	}
+}
+
+// TestE2E_MCPMissionTools drives uta_mission_check and uta_mission_run
+// over real MCP stdio against the stub provider: an agent authors a steer
+// program inline and uta executes it under the program's own budget.
+func TestE2E_MCPMissionTools(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client, err := mcp.NewStdioClient(ctx, utaBin, []string{"serve", "--mcp"}, map[string]string{
+		"UTA_HOME": utaHome,
+	})
+	if err != nil {
+		t.Fatalf("NewStdioClient: %v", err)
+	}
+	defer client.Close()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	// check: a broken program comes back ok=false with positioned diagnostics.
+	badSrc, _ := json.Marshal(map[string]string{
+		"source": strings.Replace(e2eSteer, `greet("world")`, `gret("world")`, 1),
+	})
+	res, err := client.CallTool(ctx, "uta_mission_check", json.RawMessage(badSrc))
+	if err != nil {
+		t.Fatalf("uta_mission_check: %v", err)
+	}
+	if !strings.Contains(res.Content[0].Text, `"ok": false`) || !strings.Contains(res.Content[0].Text, "did you mean") {
+		t.Errorf("check result = %s", res.Content[0].Text)
+	}
+
+	// run: the stub executes the inline program under its declared budget.
+	goodSrc, _ := json.Marshal(map[string]string{"source": e2eSteer})
+	res, err = client.CallTool(ctx, "uta_mission_run", json.RawMessage(goodSrc))
+	if err != nil {
+		t.Fatalf("uta_mission_run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("uta_mission_run IsError: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status": "completed"`) || !strings.Contains(text, "STUB_ANSWER") {
+		t.Errorf("run result = %s", text)
 	}
 }

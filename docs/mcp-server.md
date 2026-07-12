@@ -20,6 +20,8 @@ Protocol version advertised: `2024-11-05`. JSON-RPC 2.0 over stdin/stdout.
 | `uta_trajectory_get`    | no  | replay the full event timeline for one session |
 | `uta_audit`             | yes | run one Reflector audit pass over a directory (audit-only, no auto-fix) |
 | `uta_run`               | yes | one-shot goal execution through the supervisor |
+| `uta_mission_check`     | no  | parse + static-check a steer program (inline source, zero spend) |
+| `uta_mission_run`       | yes | execute a steer program; its own budget declaration bounds spend |
 | `uta_improve_pick`      | no  | inspect the next idea the improve loop would pick |
 | `uta_whiteboard_set`    | yes | post a note to the inter-agent whiteboard |
 | `uta_whiteboard_get`    | no  | read the latest note for one key |
