@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -114,6 +116,8 @@ func newDashCmd() *cobra.Command {
 		ideaTagKey  string
 		modeFilter  string
 		asJSON      bool
+		live        bool
+		interval    time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "dash",
@@ -135,8 +139,9 @@ registered renderers — see --mode help for the current set).
 status-bar widgets or other tooling; the JSON schema includes every
 registered pane regardless of data state.
 
-` + "`uta dash`" + ` is a single render — it prints once and exits. Run it again
-to refresh; a live TUI is intentionally out of scope.`,
+` + "`uta dash`" + ` is a single render — it prints once and exits.
+` + "`uta dash --live`" + ` re-renders on an interval (default 2s) until Ctrl-C —
+a built-in watch loop, not a TUI; an interactive TUI stays out of scope.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(cmd.Context())
 			if err != nil {
@@ -153,35 +158,66 @@ to refresh; a live TUI is intentionally out of scope.`,
 			// behavior is consistent whether the operator names a profile
 			// "dev" or "growth" or "publishing" — generic-first.
 
-			data := collectDashData(app, errOut, recentLimit, alertLimit)
-
-			if asJSON {
-				return emitDashJSON(out, data, modeFilter, ideaTagKey)
-			}
-
-			if modeFilter != "" {
-				renderDashPane(out, data, modeFilter, ideaTagKey)
+			renderSnapshot := func(w io.Writer) error {
+				data := collectDashData(app, errOut, recentLimit, alertLimit)
+				if asJSON {
+					return emitDashJSON(w, data, modeFilter, ideaTagKey)
+				}
+				if modeFilter != "" {
+					renderDashPane(w, data, modeFilter, ideaTagKey)
+					return nil
+				}
+				renderDashThreads(w, errOut, app)
+				fmt.Fprintln(w)
+				renderDashSessions(w, data.Profiles, data.Stats, recentLimit)
+				fmt.Fprintln(w)
+				renderDashAlerts(w, data.Alerts)
+				fmt.Fprintln(w)
+				renderDashCost(w, data.CostBuckets24h)
+				fmt.Fprintln(w)
+				renderDashIdeas(w, data.Ideas, ideaTagKey)
+				fmt.Fprintln(w)
+				renderDashRetrospectives(w, data.Retros, app.InProject())
+				fmt.Fprintln(w)
+				for _, name := range panesToRender(data.Profiles, data.Stats) {
+					renderDashPane(w, data, name, ideaTagKey)
+					fmt.Fprintln(w)
+				}
 				return nil
 			}
 
-			renderDashThreads(out, errOut, app)
-			fmt.Fprintln(out)
-			renderDashSessions(out, data.Profiles, data.Stats, recentLimit)
-			fmt.Fprintln(out)
-			renderDashAlerts(out, data.Alerts)
-			fmt.Fprintln(out)
-			renderDashCost(out, data.CostBuckets24h)
-			fmt.Fprintln(out)
-			renderDashIdeas(out, data.Ideas, ideaTagKey)
-			fmt.Fprintln(out)
-			renderDashRetrospectives(out, data.Retros, app.InProject())
-			fmt.Fprintln(out)
-
-			for _, name := range panesToRender(data.Profiles, data.Stats) {
-				renderDashPane(out, data, name, ideaTagKey)
-				fmt.Fprintln(out)
+			if !live {
+				return renderSnapshot(out)
 			}
-			return nil
+			if asJSON {
+				return errors.New("--live and --json don't combine; poll `uta dash --json` on your own schedule instead")
+			}
+			if interval < time.Second {
+				interval = time.Second
+			}
+
+			// The watch loop: render into a buffer, clear, blit — one write
+			// per tick keeps flicker down without any TUI machinery.
+			ctx, cancel := signalContext(cmd.Context())
+			defer cancel()
+			for {
+				var buf bytes.Buffer
+				if err := renderSnapshot(&buf); err != nil {
+					return err
+				}
+				fmt.Fprint(out, "\x1b[H\x1b[2J")
+				fmt.Fprintf(out, "uta dash · live, every %s · Ctrl-C to exit · %s\n\n",
+					interval, time.Now().Format("15:04:05"))
+				if _, err := out.Write(buf.Bytes()); err != nil {
+					return err
+				}
+				select {
+				case <-ctx.Done():
+					fmt.Fprintln(out)
+					return nil
+				case <-time.After(interval):
+				}
+			}
 		},
 	}
 	cmd.Flags().IntVar(&recentLimit, "recent", 5, "recent sessions to show per mode")
@@ -189,6 +225,8 @@ to refresh; a live TUI is intentionally out of scope.`,
 	cmd.Flags().StringVar(&ideaTagKey, "idea-tag-key", "mode", "tag prefix used to group ideas (e.g. 'mode' matches 'mode:dev')")
 	cmd.Flags().StringVar(&modeFilter, "mode", "", "render only the pane for the named mode; any mode name is accepted (specialized panes exist for "+strings.Join(registeredPaneNames(), ", ")+", others get a generic ideas+sessions view)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON (full snapshot, or just the pane when --mode is set)")
+	cmd.Flags().BoolVar(&live, "live", false, "re-render on an interval until Ctrl-C (a watch loop, not a TUI)")
+	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "refresh interval for --live (minimum 1s)")
 	return cmd
 }
 
