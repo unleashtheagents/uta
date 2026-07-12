@@ -64,6 +64,11 @@ type shellBackend interface {
 	Workdir() string
 	SetWorkdir(dir string) error
 	LocalExec(ctx context.Context, cmdline string) error
+	// RunMissionFile interprets a .steer program (see docs/steer.md) with
+	// the shell's worker and workdir. checkOnly runs the static checks and
+	// spends nothing. Missions are their own sessions — the shell's
+	// attached conversation is left untouched.
+	RunMissionFile(ctx context.Context, path string, checkOnly bool) error
 	Status(w io.Writer)
 }
 
@@ -353,6 +358,20 @@ func handleShellCommand(ctx context.Context, line string, b shellBackend, out, e
 		}
 		b.SetTools(tools)
 		fmt.Fprintf(out, "pre-approved tools: %s\n", strings.Join(tools, ", "))
+	case "mission":
+		checkOnly := false
+		margs := args
+		if len(margs) > 0 && (margs[0] == "check" || margs[0] == "run") {
+			checkOnly = margs[0] == "check"
+			margs = margs[1:]
+		}
+		if len(margs) != 1 {
+			fmt.Fprintln(errw, "usage: /mission [check] <file.steer>")
+			return
+		}
+		if err := b.RunMissionFile(ctx, margs[0], checkOnly); err != nil {
+			fmt.Fprintln(errw, "mission:", err)
+		}
 	case "cd":
 		if len(args) == 0 {
 			fmt.Fprintf(out, "workdir: %s\n", firstNonEmptyStr(b.Workdir(), "(current directory)"))
@@ -395,6 +414,9 @@ agent control
                       (bare name for claude/gemini, VAR=value for others)
   /tools [t,...|none] show or set tools pre-approved for every turn
   /mode [name|none]   show, switch, or clear the active mission profile
+  /mission [check] <file.steer>
+                      run (or just static-check) a steer program with the
+                      shell's worker and workdir — see docs/steer.md
   /status             show worker, session, model, mode, and workdir
 
 terminal
@@ -726,6 +748,78 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 		fmt.Fprintln(s.out, result.FinalAnswer)
 	}
 	fmt.Fprintf(s.errw, "\n[uta] session %s status=%s%s\n", shortID(result.SessionID), result.Status, usageSummary(result.Subtasks))
+	return nil
+}
+
+// RunMissionFile interprets a .steer program from inside the shell. The
+// mission gets the shell's default worker, workdir, and mode env, but is
+// its own session — the attached conversation is not consumed.
+func (s *utaShell) RunMissionFile(parent context.Context, path string, checkOnly bool) error {
+	prog, warnings, ok := loadSteerProgram(path, s.errw)
+	if !ok {
+		return errors.New("program did not compile (fix the diagnostics above)")
+	}
+	if checkOnly {
+		suffix := ""
+		if warnings > 0 {
+			suffix = fmt.Sprintf(", %d warning(s)", warnings)
+		}
+		fmt.Fprintf(s.out, "ok: mission %q — %d agent fn(s), %d call(s), budget %s%s\n",
+			prog.Mission.Name, len(prog.Agents), len(prog.Mission.Calls()), formatBudget(prog.Mission.Budget), suffix)
+		return nil
+	}
+
+	ctx, stop := turnSignalContext(parent)
+	defer stop()
+
+	detections := s.app.Registry.DetectAll(ctx)
+	available := availableProviders(s.app.Registry.Names(), detections)
+
+	bus := trajectory.NewBus()
+	rdr := NewRenderer(s.errw, s.noColor)
+	rdr.ShowGoal("mission "+prog.Mission.Name, s.worker)
+	renderDone := rdr.Subscribe(bus)
+
+	sup := engine.New(engine.Deps{
+		Store:    s.app.Store,
+		Blobs:    s.app.Blobs,
+		Recorder: trajectory.NewRecorder(s.app.Store),
+		Bus:      bus,
+		Registry: s.app.Registry,
+	})
+
+	var rr engine.RunRequest
+	engine.ApplyProfile(&rr, s.mode)
+	env := append(rr.Env, s.app.ProjectSubtaskEnv()...)
+
+	res, err := sup.RunMission(ctx, engine.MissionRequest{
+		Program:       prog,
+		SourceFile:    filepath.Base(path),
+		DefaultWorker: s.worker,
+		Available:     available,
+		Workdir:       s.workdir,
+		Env:           env,
+		ModeName:      rr.ModeName,
+	})
+
+	bus.Shutdown()
+	<-renderDone
+
+	if err != nil {
+		if errors.Is(err, context.Canceled) && parent.Err() == nil {
+			fmt.Fprintln(s.errw, "mission cancelled.")
+			if res.SessionID != "" {
+				fmt.Fprintf(s.errw, "session: %s\n", shortID(res.SessionID))
+			}
+			return nil
+		}
+		return err
+	}
+	if res.FinalAnswer != "" {
+		fmt.Fprintln(s.out, res.FinalAnswer)
+	}
+	fmt.Fprintf(s.errw, "\n[uta] mission %s session %s status=%s calls=%d%s\n",
+		prog.Mission.Name, shortID(res.SessionID), res.Status, len(res.Subtasks), usageSummary(res.Subtasks))
 	return nil
 }
 

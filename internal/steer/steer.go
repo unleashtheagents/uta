@@ -215,3 +215,30 @@ func (p *Program) Agent(name string) *AgentFn {
 	}
 	return nil
 }
+
+// Calls returns the mission's agent calls in execution order — nested
+// arguments run before the call that consumes them. This is the static
+// plan: the runtime announces it up front and dry-run prints it.
+func (m *Mission) Calls() []*CallExpr {
+	var out []*CallExpr
+	var walk func(e Expr)
+	walk = func(e Expr) {
+		c, ok := e.(*CallExpr)
+		if !ok {
+			return
+		}
+		for _, a := range c.Args {
+			walk(a)
+		}
+		out = append(out, c)
+	}
+	for _, st := range m.Stmts {
+		switch s := st.(type) {
+		case *LetStmt:
+			walk(s.Expr)
+		case *EmitStmt:
+			walk(s.Expr)
+		}
+	}
+	return out
+}

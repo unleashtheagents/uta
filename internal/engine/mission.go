@@ -106,6 +106,22 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		"file":    req.SourceFile,
 		"worker":  req.DefaultWorker,
 	})
+	// A mission's plan is static — the program text. Announcing it up front
+	// gives live renderers real per-call progress and puts the plan on the
+	// trajectory record before any inference happens.
+	calls := m.Calls()
+	planned := make([]map[string]any, len(calls))
+	for i, c := range calls {
+		planned[i] = map[string]any{
+			"id":    fmt.Sprintf("c%d", i+1),
+			"title": c.Name,
+			"line":  c.Pos.Line,
+		}
+	}
+	s.emit(sessionID, "", trajectory.PlanProposed, map[string]any{
+		"subtasks": planned,
+		"source":   "steer",
+	})
 
 	w := &missionWalk{
 		sup:       s,
@@ -295,6 +311,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 	}))
 	w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"spec_id": specID, "tokens_in": result.TokensIn, "tokens_out": result.TokensOut,
+		"usd_cents": result.ApproxUSDCents,
 	})
 	return strings.TrimSpace(result.FinalText), nil
 }

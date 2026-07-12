@@ -107,6 +107,7 @@ Per-turn limits mirror `uta run`: `--max-parallel`, `--max-subtasks`,
 | `/model [m\|default]` | Show or pin the model the active worker runs on. Bare names map to the provider's env var (`ANTHROPIC_MODEL` for claude, `GEMINI_MODEL` for gemini); other providers need the explicit `VAR=value` form. Pins are per worker and win over a mode's `env:`. |
 | `/tools [t,...\|none]` | Show or set the tools pre-approved for every turn. |
 | `/mode [name\|none]` | Show, switch, or clear the active MissionProfile. The next turn picks up the new mode's env, gates, and budgets. |
+| `/mission [check] <file.steer>` | Run (or just static-check) a [steer program](steer.md) with the shell's worker, workdir, and mode env. The mission is its own session; the shell's conversation is untouched. |
 | `/status` | Worker, session, model, tools, mode, workdir, and project at a glance. |
 | `!<command>` | Run a local shell command in the workdir. |
 | `/cd [dir]` | Show or change the workdir agents operate in. |

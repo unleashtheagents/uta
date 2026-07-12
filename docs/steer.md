@@ -54,6 +54,13 @@ uta mission run hello.steer        # run it
 chmod +x hello.steer && ./hello.steer   # the shebang makes it a script
 ```
 
+Also available: `--print-jsonl` streams every trajectory event to stdout
+(parity with `uta run`); `--mode <name>` merges a MissionProfile's env —
+model pins, credentials — into every call, while budget authority stays
+with the program text ("cost is spoken in the sentence"); and inside
+`uta shell`, `/mission [check] <file.steer>` runs a program with the
+shell's worker and workdir.
+
 The example lives at [`examples/hello.steer`](../examples/hello.steer).
 
 ## What the interpreter gives you (v0)
@@ -92,7 +99,7 @@ agentFn    := "agent" "fn" name "(" (param ":" Type),* ")" "->" Type
               [ "costs" "<=" N ["k"] "tokens" ]
               "prompt" """…${param}…"""
 mission    := "mission" name "{" budget stmt* "}"
-budget     := "budget" (N["k"] "tokens" | "$" N | N ("min"|"s"|"h")),*
+budget     := "budget" (N["k"] "tokens" | "$" N[".NN"] | N ("min"|"s"|"h")),*
 stmt       := "let" name "=" expr | "emit" expr
 expr       := "string" | name | call(expr,*)
 ```

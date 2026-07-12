@@ -378,7 +378,24 @@ func (p *parser) parseBudget() (*BudgetDecl, *Diag) {
 			if d != nil {
 				return nil, d
 			}
-			b.USDCents = n.num * 100
+			cents := n.num * 100
+			// $1.50 — a decimal cents part must be exactly two digits, so
+			// "$1.5" is rejected rather than silently read as $1.05 or $1.50.
+			if p.tok.kind == tokDot {
+				if d := p.advance(); d != nil {
+					return nil, d
+				}
+				frac, d := p.expect(tokNumber, "as the cents part after '.'")
+				if d != nil {
+					return nil, d
+				}
+				if len(frac.text) != 2 {
+					dd := p.lx.errAt(frac.pos, "dollar amounts need exactly two cent digits (write $%d.%02d)", n.num, frac.num)
+					return nil, &dd
+				}
+				cents += frac.num
+			}
+			b.USDCents = cents
 		case p.tok.kind == tokNumber:
 			n := p.tok
 			if d := p.advance(); d != nil {

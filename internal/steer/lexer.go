@@ -25,6 +25,7 @@ const (
 	tokAssign // =
 	tokLE     // <=
 	tokDollar // $
+	tokDot    // .
 )
 
 var tokNames = map[tokKind]string{
@@ -33,6 +34,7 @@ var tokNames = map[tokKind]string{
 	tokLParen: "'('", tokRParen: "')'", tokLBrace: "'{'", tokRBrace: "'}'",
 	tokLBracket: "'['", tokRBracket: "']'", tokComma: "','", tokColon: "':'",
 	tokArrow: "'->'", tokAssign: "'='", tokLE: "'<='", tokDollar: "'$'",
+	tokDot: "'.'",
 }
 
 type token struct {
@@ -140,16 +142,18 @@ scan:
 		return token{kind: tokIdent, pos: pos, text: l.src[start:l.off]}, nil
 
 	case isDigit(c):
+		start := l.off
 		var n int64
 		for l.off < len(l.src) && isDigit(l.peekByte()) {
 			n = n*10 + int64(l.advance()-'0')
 		}
+		raw := l.src[start:l.off] // digits only, so "$1.05" keeps its leading zero
 		// "80k" → 80000, but "2min" leaves "min" for the ident scanner.
 		if l.peekByte() == 'k' && !isIdentPart(l.peekByteAt(1)) {
 			l.advance()
 			n *= 1000
 		}
-		return token{kind: tokNumber, pos: pos, num: n}, nil
+		return token{kind: tokNumber, pos: pos, text: raw, num: n}, nil
 
 	case c == '"':
 		if strings.HasPrefix(l.src[l.off:], `"""`) {
@@ -178,6 +182,8 @@ scan:
 		return token{kind: tokColon, pos: pos}, nil
 	case '$':
 		return token{kind: tokDollar, pos: pos}, nil
+	case '.':
+		return token{kind: tokDot, pos: pos}, nil
 	case '=':
 		return token{kind: tokAssign, pos: pos}, nil
 	case '-':

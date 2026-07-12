@@ -27,6 +27,7 @@ type fakeShellBackend struct {
 	tools    []string
 	workdir  string
 	newCalls int
+	missions []string // RunMissionFile calls as "run:path" / "check:path"
 }
 
 func (f *fakeShellBackend) ExecTurn(_ context.Context, goal string) error {
@@ -104,6 +105,15 @@ func (f *fakeShellBackend) Workdir() string { return f.workdir }
 
 func (f *fakeShellBackend) LocalExec(_ context.Context, cmdline string) error {
 	f.localCmds = append(f.localCmds, cmdline)
+	return nil
+}
+
+func (f *fakeShellBackend) RunMissionFile(_ context.Context, path string, checkOnly bool) error {
+	mode := "run"
+	if checkOnly {
+		mode = "check"
+	}
+	f.missions = append(f.missions, mode+":"+path)
 	return nil
 }
 
@@ -295,6 +305,30 @@ func TestDispatch_ModeShowSwitchClear(t *testing.T) {
 	dispatch(t, f, "/mode none")
 	if f.mode != "" {
 		t.Errorf("mode should be cleared, got %q", f.mode)
+	}
+}
+
+func TestDispatch_MissionRunAndCheck(t *testing.T) {
+	f := &fakeShellBackend{}
+	dispatch(t, f, "/mission hello.steer")
+	dispatch(t, f, "/mission check hello.steer")
+	dispatch(t, f, "/mission run other.steer")
+	want := []string{"run:hello.steer", "check:hello.steer", "run:other.steer"}
+	if len(f.missions) != len(want) {
+		t.Fatalf("missions = %v", f.missions)
+	}
+	for i := range want {
+		if f.missions[i] != want[i] {
+			t.Errorf("missions[%d] = %q, want %q", i, f.missions[i], want[i])
+		}
+	}
+
+	_, errw, _ := dispatch(t, f, "/mission")
+	if !strings.Contains(errw, "usage: /mission") {
+		t.Errorf("errw = %q", errw)
+	}
+	if len(f.missions) != 3 {
+		t.Errorf("usage error must not invoke a mission, got %v", f.missions)
 	}
 }
 

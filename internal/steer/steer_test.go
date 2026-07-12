@@ -290,6 +290,57 @@ func TestRenderPrompt(t *testing.T) {
 	}
 }
 
+func TestParse_DecimalDollarBudget(t *testing.T) {
+	src := `agent fn f() -> Text
+  prompt """hi"""
+mission m {
+  budget $1.50, 10k tokens
+  emit f()
+}`
+	prog := parseOK(t, src)
+	if got := prog.Mission.Budget.USDCents; got != 150 {
+		t.Errorf("USDCents = %d, want 150", got)
+	}
+
+	src = strings.Replace(src, "$1.50", "$0.05", 1)
+	prog = parseOK(t, src)
+	if got := prog.Mission.Budget.USDCents; got != 5 {
+		t.Errorf("USDCents = %d, want 5 ($0.05 must keep its leading zero)", got)
+	}
+}
+
+func TestParse_DecimalDollarBudget_RejectsOneDigitCents(t *testing.T) {
+	src := `mission m {
+  budget $1.5
+}`
+	_, d := Parse("t.steer", src)
+	if d == nil || !strings.Contains(d.Msg, "exactly two cent digits") {
+		t.Fatalf("diag = %v, want two-cent-digits error", d)
+	}
+}
+
+func TestMissionCalls_ExecutionOrder(t *testing.T) {
+	src := `agent fn a(x: Text) -> Text
+  prompt """${x}"""
+agent fn b(x: Text) -> Text
+  prompt """${x}"""
+mission m {
+  budget 10k tokens
+  let v = b(a("hi"))
+  emit a(v)
+}`
+	prog := parseOK(t, src)
+	calls := prog.Mission.Calls()
+	var names []string
+	for _, c := range calls {
+		names = append(names, c.Name)
+	}
+	want := []string{"a", "b", "a"} // nested arg runs before its consumer
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("calls = %v, want %v", names, want)
+	}
+}
+
 func renderAll(diags []Diag) string {
 	var b strings.Builder
 	for _, d := range diags {

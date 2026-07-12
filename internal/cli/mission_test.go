@@ -117,12 +117,14 @@ func TestFormatBudget(t *testing.T) {
 	}
 }
 
-func TestCountMissionCalls(t *testing.T) {
-	prog, d := steer.Parse("hello.steer", missionTestSrc)
-	if d != nil {
-		t.Fatal(d.Render())
+func TestLoadSteerProgram_CountsWarnings(t *testing.T) {
+	src := strings.Replace(missionTestSrc, "  emit greeting\n", "", 1) // missing emit + unused let → 2 warnings
+	var errw strings.Builder
+	_, warnings, ok := loadSteerProgram(writeSteer(t, src), &errw)
+	if !ok {
+		t.Fatalf("warnings must not block loading: %s", errw.String())
 	}
-	if n := countMissionCalls(prog); n != 1 {
-		t.Errorf("calls = %d, want 1", n)
+	if warnings != 2 {
+		t.Errorf("warnings = %d, want 2:\n%s", warnings, errw.String())
 	}
 }
