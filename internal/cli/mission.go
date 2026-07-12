@@ -90,11 +90,12 @@ func newMissionCheckCmd() *cobra.Command {
 
 func newMissionRunCmd() *cobra.Command {
 	var (
-		workerName  string
-		workdir     string
-		dryRun      bool
-		printJSONL  bool
-		callTimeout time.Duration
+		workerName    string
+		workdir       string
+		dryRun        bool
+		printJSONL    bool
+		callTimeout   time.Duration
+		resumeSession string
 	)
 	cmd := &cobra.Command{
 		Use:   "run <file.steer>",
@@ -183,16 +184,25 @@ func newMissionRunCmd() *cobra.Command {
 				Registry: app.Registry,
 			})
 
+			if resumeSession != "" {
+				resolved, rerr := app.Store.ResolveSessionID(resumeSession)
+				if rerr != nil {
+					return rerr
+				}
+				resumeSession = resolved
+			}
+
 			start := time.Now()
 			res, runErr := sup.RunMission(ctx, engine.MissionRequest{
-				Program:       prog,
-				SourceFile:    filepath.Base(args[0]),
-				DefaultWorker: workerName,
-				Available:     available,
-				Workdir:       workdir,
-				Env:           env,
-				CallTimeout:   callTimeout,
-				ModeName:      rr.ModeName,
+				Program:         prog,
+				SourceFile:      filepath.Base(args[0]),
+				DefaultWorker:   workerName,
+				Available:       available,
+				Workdir:         workdir,
+				Env:             env,
+				CallTimeout:     callTimeout,
+				ModeName:        rr.ModeName,
+				ResumeSessionID: resumeSession,
 			})
 
 			// Thread continuity: a mission is a session like any other, so
@@ -244,6 +254,7 @@ func newMissionRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the execution plan without calling any agent")
 	cmd.Flags().BoolVar(&printJSONL, "print-jsonl", false, "stream every trajectory event to stdout as JSONL")
 	cmd.Flags().DurationVar(&callTimeout, "call-timeout", 10*time.Minute, "timeout per agent fn call")
+	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "replay a prior mission run from its journal: completed calls with matching prompts are recovered (not re-paid), only the frontier re-runs")
 	return cmd
 }
 

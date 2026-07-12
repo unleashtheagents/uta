@@ -211,6 +211,120 @@ func TestRunMission_NoWorkerAvailable(t *testing.T) {
 	}
 }
 
+func TestRunMission_ResumeRecoversCompletedCalls(t *testing.T) {
+	deps := newTestDeps(t)
+	var callsMade []string
+	fail := true
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		callsMade = append(callsMade, prompt)
+		if strings.Contains(prompt, "SECOND") && fail {
+			return provider.RunResult{}, provider.ErrWorkerFailed
+		}
+		return provider.RunResult{FinalText: "result-for: " + prompt, TokensIn: 5, TokensOut: 5}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+
+	src := `
+agent fn first(q: Text) -> Text
+  prompt """FIRST ${q}"""
+agent fn second(q: Text) -> Text
+  prompt """SECOND ${q}"""
+
+mission twostep {
+  budget 10k tokens
+  let a = first("alpha")
+  let b = second(a)
+  emit b
+}
+`
+	req := MissionRequest{
+		Program: parseMission(t, src), SourceFile: "twostep.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	}
+	sup := New(deps)
+
+	// First run: call 1 succeeds, call 2 fails — the mission fails but
+	// call 1's payment is on the journal.
+	res1, err := sup.RunMission(context.Background(), req)
+	if err == nil || res1.Status != "failed" {
+		t.Fatalf("first run should fail at call 2: status=%q err=%v", res1.Status, err)
+	}
+	if len(callsMade) != 2 {
+		t.Fatalf("callsMade = %d, want 2", len(callsMade))
+	}
+
+	// Resume: call 1 is recovered (no provider hit), call 2 re-runs.
+	fail = false
+	callsMade = nil
+	req.ResumeSessionID = res1.SessionID
+	res2, err := sup.RunMission(context.Background(), req)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if res2.Status != "completed" {
+		t.Errorf("status = %q", res2.Status)
+	}
+	if len(callsMade) != 1 || !strings.Contains(callsMade[0], "SECOND") {
+		t.Errorf("only the frontier should re-run, got %q", callsMade)
+	}
+	if len(res2.Subtasks) != 2 {
+		t.Fatalf("subtasks = %d, want 2 (recovered + rerun)", len(res2.Subtasks))
+	}
+	var recoveredTitles int
+	for _, st := range res2.Subtasks {
+		if strings.Contains(st.Title, "(recovered)") {
+			recoveredTitles++
+		}
+	}
+	if recoveredTitles != 1 {
+		t.Errorf("recovered subtasks = %d, want 1", recoveredTitles)
+	}
+}
+
+func TestRunMission_ResumeReRunsWhenPromptChanged(t *testing.T) {
+	deps := newTestDeps(t)
+	var calls int
+	prov := &fakeProvider{name: "claude", run: func(_ context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
+		calls++
+		return provider.RunResult{FinalText: "ok"}, nil
+	}}
+	if err := deps.Registry.Register(prov, false); err != nil {
+		t.Fatal(err)
+	}
+	sup := New(deps)
+
+	src := `
+agent fn f(q: Text) -> Text
+  prompt """do ${q}"""
+mission m {
+  budget 10k tokens
+  emit f("one thing")
+}
+`
+	req := MissionRequest{
+		Program: parseMission(t, src), SourceFile: "m.steer",
+		DefaultWorker: "claude", Available: []string{"claude"},
+	}
+	res1, err := sup.RunMission(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit the program: same call shape, different argument → different
+	// prompt → the journal entry must NOT be recovered.
+	edited := strings.Replace(src, `"one thing"`, `"another thing"`, 1)
+	req.Program = parseMission(t, edited)
+	req.ResumeSessionID = res1.SessionID
+	if _, err := sup.RunMission(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (no false recovery)", calls)
+	}
+}
+
 func TestRunMission_DurationBudgetIsDeadline(t *testing.T) {
 	deps := newTestDeps(t)
 	prov := &fakeProvider{name: "claude", run: func(ctx context.Context, _ string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {

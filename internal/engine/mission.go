@@ -41,6 +41,14 @@ type MissionRequest struct {
 
 	ModeName            string
 	TransportMaxRetries int
+
+	// ResumeSessionID replays a prior mission run from its journal: calls
+	// whose rendered prompt matches a completed subtask of the prior
+	// session are recovered (result reused, budget not re-charged); only
+	// the frontier — the first mismatching or unfinished call onward —
+	// executes. A crash, a budget stop, and a Ctrl-C are all the same
+	// re-enterable state.
+	ResumeSessionID string
 }
 
 // errCallFailed wraps a provider failure with the call site so the mission
@@ -85,10 +93,27 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 	}
 	ctx = withBudget(ctx, runBudget)
 
+	// Load the prior journal for --resume-session: completed subtasks keyed
+	// by spec id, matched at call time by prompt content.
+	journal := map[string]store.Subtask{}
+	if req.ResumeSessionID != "" {
+		prior, err := s.deps.Store.SubtaskListBySession(req.ResumeSessionID, 0, 0)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("load prior session journal: %w", err)
+		}
+		for _, st := range prior {
+			if st.Status == "completed" {
+				journal[st.SpecID] = st
+			}
+		}
+	}
+
 	sessionID := uuid.NewString()
-	meta, _ := json.Marshal(map[string]any{
-		"steer": map[string]any{"mission": m.Name, "file": req.SourceFile},
-	})
+	steerMeta := map[string]any{"mission": m.Name, "file": req.SourceFile}
+	if req.ResumeSessionID != "" {
+		steerMeta["resumed_from"] = req.ResumeSessionID
+	}
+	meta, _ := json.Marshal(map[string]any{"steer": steerMeta})
 	if err := s.deps.Store.CreateSession(store.Session{
 		ID:        sessionID,
 		Goal:      "mission " + m.Name + " (" + req.SourceFile + ")",
@@ -128,6 +153,7 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		req:       req,
 		sessionID: sessionID,
 		bindings:  map[string]string{},
+		journal:   journal,
 	}
 
 	var finalAnswer string
@@ -162,6 +188,7 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		"status":       "completed",
 		"mission":      m.Name,
 		"calls":        w.calls,
+		"recovered":    w.recovered,
 		"total_tokens": runBudget.TotalTokens(),
 		"usd_cents":    runBudget.TotalUSDCents(),
 	})
@@ -201,6 +228,10 @@ type missionWalk struct {
 	sessionID string
 	bindings  map[string]string
 	calls     int // subtask ordinal counter
+	// journal holds the prior run's completed subtasks (by spec id) when
+	// resuming; recovered is the count of calls replayed from it.
+	journal   map[string]store.Subtask
+	recovered int
 }
 
 func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
@@ -239,6 +270,33 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		return "", err
 	}
 
+	w.calls++
+	specID := fmt.Sprintf("c%d-%s", w.calls, fn.Name)
+
+	// Replay: a completed prior call with the same spec id AND the same
+	// rendered prompt is recovered instead of re-run. Prompt equality is
+	// the correctness guard — if the program (or an upstream result)
+	// changed, the prompt changes, and the frontier starts here.
+	if prior, ok := w.journal[specID]; ok {
+		if text, ok := w.recoverResult(prior, prompt); ok {
+			now := time.Now()
+			subtaskID := uuid.NewString()
+			recMeta, _ := json.Marshal(map[string]any{"recovered_from": prior.ID})
+			w.sup.dbErr(w.sessionID, subtaskID, "create_subtask", w.sup.deps.Store.CreateSubtask(store.Subtask{
+				ID: subtaskID, SessionID: w.sessionID, Ord: w.calls - 1, SpecID: specID,
+				Title: callTitle(fn, call, args) + " (recovered)", PromptRef: prior.PromptRef,
+				Worker: prior.Worker, Status: "completed", StartedAt: &now, CompletedAt: &now,
+				ResultText: Truncate(text, 8000), RawOutputRef: prior.RawOutputRef,
+				MetaJSON: string(recMeta),
+			}))
+			w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
+				"spec_id": specID, "recovered": true, "recovered_from": prior.ID,
+			})
+			w.recovered++
+			return text, nil
+		}
+	}
+
 	workerName, err := resolveMissionWorker(fn, w.req.DefaultWorker, w.req.Available)
 	if err != nil {
 		return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File, err: err}
@@ -256,9 +314,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		b.PerCallMaxTokens = fn.CostTokens
 	}
 
-	w.calls++
 	subtaskID := uuid.NewString()
-	specID := fmt.Sprintf("c%d-%s", w.calls, fn.Name)
 	promptRef, _ := w.sup.deps.Blobs.Put([]byte(prompt), "txt")
 	startedAt := time.Now()
 	w.sup.dbErr(w.sessionID, subtaskID, "create_subtask", w.sup.deps.Store.CreateSubtask(store.Subtask{
@@ -303,17 +359,65 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 		return "", &errCallFailed{fn: fn.Name, pos: call.Pos, file: w.req.Program.File, err: callErr}
 	}
 
+	// The full result text goes to a blob so a future --resume-session can
+	// recover it verbatim (ResultText is display-truncated at 8000 chars).
+	finalText := strings.TrimSpace(result.FinalText)
+	resultRef := ""
+	if finalText != "" {
+		if ref, perr := w.sup.deps.Blobs.Put([]byte(finalText), "txt"); perr == nil {
+			resultRef = ref
+		}
+	}
+	callMeta, _ := json.Marshal(map[string]any{
+		"tokens_in": result.TokensIn, "tokens_out": result.TokensOut,
+		"usd_cents": result.ApproxUSDCents, "result_ref": resultRef,
+	})
 	w.sup.dbErr(w.sessionID, subtaskID, "update_subtask", w.sup.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
 		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
-		MetaJSON: subtaskUsageMeta(result.TokensIn, result.TokensOut, result.ApproxUSDCents),
+		MetaJSON: string(callMeta),
 	}))
 	w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"spec_id": specID, "tokens_in": result.TokensIn, "tokens_out": result.TokensOut,
 		"usd_cents": result.ApproxUSDCents,
 	})
-	return strings.TrimSpace(result.FinalText), nil
+	return finalText, nil
+}
+
+// recoverResult decides whether a prior subtask can stand in for the call
+// about to be made: the recorded prompt must equal the rendered prompt,
+// and the full result text must be retrievable (result_ref blob first,
+// untruncated ResultText as fallback).
+func (w *missionWalk) recoverResult(prior store.Subtask, prompt string) (string, bool) {
+	recorded, ok := w.blobString(prior.PromptRef)
+	if !ok || recorded != prompt {
+		return "", false
+	}
+	var meta struct {
+		ResultRef string `json:"result_ref"`
+	}
+	if prior.MetaJSON != "" {
+		_ = json.Unmarshal([]byte(prior.MetaJSON), &meta)
+	}
+	if text, ok := w.blobString(meta.ResultRef); ok {
+		return text, true
+	}
+	if len(prior.ResultText) < 8000 { // definitely not truncated
+		return prior.ResultText, true
+	}
+	return "", false
+}
+
+func (w *missionWalk) blobString(ref string) (string, bool) {
+	if ref == "" {
+		return "", false
+	}
+	var buf strings.Builder
+	if err := w.sup.deps.Blobs.Get(ref, &buf); err != nil {
+		return "", false
+	}
+	return buf.String(), true
 }
 
 // resolveMissionWorker picks the provider for one agent fn call: the fn's
