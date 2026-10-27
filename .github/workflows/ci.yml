@@ -106,7 +106,12 @@ jobs:
           ./uta-ci permissions init && ./uta-ci permissions status | grep -q 'deny'
           ./uta-ci nebius models > models.txt && grep -q 'Nemotron' models.txt
           ./uta-ci nebius route "add a test for internal/paths" >/dev/null
-          printf '/status\n/direct\n/status\n/help\n/permissions\nexit\n' | ./uta-ci shell --worker nebius > shell.txt
+          set +e
+          printf '/status\n/direct\n/status\n/help\n/permissions\nexit\n' | ./uta-ci shell --worker nebius > shell.txt 2> shell.err
+          rc=$?
+          set -e
+          echo "--- shell exit $rc"; cat shell.err; echo "--- stdout"; cat shell.txt
+          [ "$rc" -eq 0 ]
           grep -q 'direct (one worker' shell.txt
           ./uta-ci undo --list 2>&1 | grep -qi 'no file changes'
 
