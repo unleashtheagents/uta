@@ -29,7 +29,7 @@ const (
 	// Canonical NVIDIA Nemotron model identifiers on Nebius Token Factory.
 	NebiusModelUltra     = "nvidia/Nemotron-3-Ultra-550b-a55b"
 	NebiusModelSuper     = "nvidia/nemotron-3-super-120b-a12b"
-	NebiusModelNano      = "nvidia/Nemotron-3-Nano-30b-a3b"
+	NebiusModelNano      = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
 	NebiusModelLightning = "nvidia/Nemotron-3_5-Lightning"
 	NebiusModelSuperVL   = "nvidia/Nemotron-3.5-Super-VL"
 )
@@ -121,7 +121,7 @@ func ResolveNebiusModel(spec string) string {
 		return NebiusModelUltra
 	case "super", "nemotron-super", "nemotron-3-super", "120b":
 		return NebiusModelSuper
-	case "nano", "nemotron-nano", "nemotron-3-nano", "30b":
+	case "nano", "nemotron-nano", "nemotron-3-nano", "30b", "nvidia/nemotron-3-nano-30b-a3b":
 		return NebiusModelNano
 	case "lightning", "nemotron-lightning", "sentinel", "fast":
 		return NebiusModelLightning

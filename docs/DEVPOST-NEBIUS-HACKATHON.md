@@ -57,6 +57,25 @@ With **NVIDIA Nemotron 3** (`Ultra`, `Super`, `Nano`, `Lightning`, `Super-VL`) h
 - **Language & Storage:** Pure Go (`CGO_ENABLED=0`) with embedded SQLite (`modernc.org/sqlite`) recording every prompt, SSE token chunk, tool call (`EventToolCall`), tool result (`EventToolResult`), token count, and USD cost in a queryable trajectory store.
 - **Nebius Token Factory Provider (`internal/provider/builtin/nebius.go` & `nebius_tools.go`):** Native OpenAI-compatible client supporting both synchronous and SSE streaming completions, multi-turn session resumption, 5 Nemotron model aliases (`ultra`, `super`, `nano`, `lightning`, `vl`), `@file` expansion, progressive rule/skill injection, and autonomous tool execution.
 - **Tavily Runtime Client (`internal/tavily/tavily.go`):** Native HTTP client for `POST https://api.tavily.com/search` wired into both `uta nebius search` and the `tavily_search` agentic function tool.
+
+## Live Nebius Token Factory Benchmark Results (`uta bench`)
+
+Measured live against `https://api.tokenfactory.nebius.com/v1`:
+
+```text
+$ uta nebius ping
+Nebius Token Factory ping OK (88 ms) — 30 remote model(s) available
+
+$ uta bench
+PROVIDER     STATUS  DURATION  TOKENS_IN  TOKENS_OUT  THROUGHPUT
+nebius       ok      2.016s    1264       271         134.4 tok/s
+agy          ok      10.592s   15         0           -
+claude       ok      11.099s   36391      536         48.3 tok/s
+```
+
+- **5.5× faster wall-clock completion** (`2.016s` on Nebius Token Factory vs `11.099s` on Claude Code CLI and `10.592s` on Google Antigravity CLI).
+- **2.78× higher output token throughput** (`134.4 tok/s` vs `48.3 tok/s`).
+- **4-second autonomous tool-calling loop (`session 834eefb7`)**: `nvidia/Nemotron-3-Ultra-550b-a55b` decomposed the goal, invoked the `read_file` tool on `examples/nebius-nemotron.steer`, verified the result, and synthesized the final report in **4s (4,953 tokens)**.
 ```
 
 ---
@@ -100,10 +119,10 @@ With **NVIDIA Nemotron 3** (`Ultra`, `Super`, `Nano`, `Lightning`, `Super-VL`) h
    - `Much better`
 
 7. **What worked well with Nemotron and Nebius Token Factory?**
-   > The OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints on Nebius Token Factory allowed us to build a zero-dependency Go provider (`internal/provider/builtin/nebius.go`) with SSE streaming and multi-turn function calling (`tools` / `tool_calls`) in hours. The hybrid Mamba-2 + Transformer Sparse MoE architecture of `nvidia/nemotron-3-super-120b-a12b` (12B active parameters) and `nvidia/Nemotron-3-Nano-30b-a3b` (3B active parameters) delivered exceptional throughput (148–295 tok/s) during 3-to-8 worker parallel fan-out (`uta run --max-parallel 4`), while `nvidia/Nemotron-3-Ultra-550b-a55b` (55B active parameters) produced clean DAG subtask decompositions and multi-agent synthesis verdicts on par with proprietary frontier models at a fraction of the cost.
+   > The OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints on Nebius Token Factory (88 ms ping latency across 30 hosted models) allowed us to build a zero-dependency Go provider (`internal/provider/builtin/nebius.go`) with SSE streaming and multi-turn function calling (`tools` / `tool_calls`) in hours. In live side-by-side benchmarks (`uta bench`), Nebius Token Factory completed turns in **2.016s at 134.4 tok/s**—**5.5× faster in wall-clock latency and 2.78× higher in token throughput** than local CLI cold starts (`claude` at 11.099s / 48.3 tok/s, `agy` at 10.592s). Furthermore, `nvidia/Nemotron-3-Ultra-550b-a55b` executed a complete multi-turn agentic `read_file` tool loop + synthesis in just **4 seconds** (`session 834eefb7`), while `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` completed 3-stage plan + worker + synthesis runs in **7 seconds** (`session 9d6a5b0e`).
 
 8. **What was frustrating, broken, or harder than expected?**
-   > 1. Model ID casing across the catalog varies slightly (`nvidia/Nemotron-3-Ultra-550b-a55b` vs lowercase `nvidia/nemotron-3-super-120b-a12b` vs underscore `nvidia/Nemotron-3_5-Lightning`), which can trip up CLI users typing model names manually. We solved this in `uta` by building a canonical alias resolver (`ResolveNebiusModel`: `ultra`, `super`, `nano`, `lightning`, `vl`) and live `/v1/models` discovery (`uta nebius ping`).
+   > 1. Model ID casing and prefixes across the live `/v1/models` catalog vary slightly (`nvidia/Nemotron-3-Ultra-550b-a55b` vs lowercase `nvidia/nemotron-3-super-120b-a12b` vs `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` with the `NVIDIA-` prefix vs underscore `nvidia/Nemotron-3_5-Lightning`), which can trip up developers copying model IDs from docs. We solved this in `uta` by building a canonical alias resolver (`ResolveNebiusModel`: `ultra`, `super`, `nano`, `lightning`, `vl`) that normalizes all variants and live `/v1/models` probing (`uta nebius ping`).
    > 2. When streaming (`stream: true`) is combined with multi-turn tool calls (`tools`), chunked tool argument deltas vary slightly across model families; exposing a standard `/v1/models` capability flag indicating `supports_tool_calling` and `supports_reasoning_effort` per model ID on Nebius Token Factory would make orchestrator auto-configuration even smoother.
 
 9. **Did you use any other Nebius services beyond Token Factory? If so, which ones and how was the experience?**
