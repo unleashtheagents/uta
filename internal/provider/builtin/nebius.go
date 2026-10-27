@@ -627,11 +627,21 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	var totalReasoningTokens, totalCachedTokens int64
 	reasoningRetried := false
 
-	for round := 0; round < maxNebiusToolRounds; round++ {
+	maxRounds := resolveNebiusToolRounds(opts.Env)
+	closingTurn := false
+	for round := 0; round <= maxRounds; round++ {
+		roundTools := tools
+		if round == maxRounds {
+			// Tool budget spent: one last turn without tools so the model
+			// reports instead of leaving the user with an empty answer.
+			closingTurn = true
+			roundTools = nil
+			history = append(history, nebiusChatMessage{Role: "user", Content: "You have used all tool calls available for this turn. Summarize what you did, what the current state is, and what remains, in a few sentences."})
+		}
 		chatReq := nebiusChatRequest{
 			Model:           model,
 			Messages:        history,
-			Tools:           tools,
+			Tools:           roundTools,
 			Stream:          useStream,
 			Temperature:     temperature,
 			MaxTokens:       maxTokens,
@@ -812,7 +822,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			}
 		}
 
-		if len(assistantMsg.ToolCalls) == 0 {
+		if len(assistantMsg.ToolCalls) == 0 || closingTurn {
 			break
 		}
 
@@ -865,6 +875,27 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			}
 			if !gated {
 				verdict = n.sentinelCheck(ctx, client, apiKey, baseURL, tc, opts)
+				if verdict.Blocked && !nebiusSentinelStrict(opts.Env) &&
+					(tc.Function.Name == "write_file" || tc.Function.Name == "edit_file") {
+					// File tools are path-confined and every write is
+					// checkpointed (revertible with uta undo), so a FAIL
+					// here warns instead of blocking; run_command stays
+					// hard. UTA_NEBIUS_SENTINEL_STRICT=1 restores blocking.
+					verdict.Blocked = false
+					verdict.Status = "warn"
+					if events != nil {
+						warnPayload, _ := json.Marshal(map[string]any{
+							"rule":       "nemotron_sentinel_tool_warn",
+							"severity":   "warning",
+							"message":    fmt.Sprintf("%s flagged %s (not blocked: write is checkpointed; uta undo reverts it)", verdict.Model, tc.Function.Name),
+							"tool":       tc.Function.Name,
+							"arguments":  tc.Function.Arguments,
+							"model":      verdict.Model,
+							"latency_ms": verdict.LatencyMS,
+						})
+						events <- provider.Event{Kind: provider.EventSentinelAlert, Timestamp: time.Now(), Payload: warnPayload}
+					}
+				}
 			}
 			if gated {
 				// nothing to execute

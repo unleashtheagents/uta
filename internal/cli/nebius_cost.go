@@ -108,7 +108,7 @@ func buildNebiusCostReport(sess store.Session, events []store.EventRow) nebiusCo
 				Sentinel string `json:"sentinel"`
 			}
 			_ = json.Unmarshal(ev.Payload, &pl)
-			if pl.Sentinel == "pass" || pl.Sentinel == "error" {
+			if pl.Sentinel == "pass" || pl.Sentinel == "error" || pl.Sentinel == "warn" {
 				rep.SentinelChecks++
 			}
 		case "subtask_stdout":

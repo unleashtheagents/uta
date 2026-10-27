@@ -111,7 +111,11 @@ func (r *termLineReader) ReadLine(prompt string) (string, error) {
 		return sc.Text(), nil
 	}
 	defer term.Restore(int(r.in.Fd()), old)
-	line, rerr := editLine(r.in, r.out, prompt, r.history)
+	width := 0
+	if cols, _, werr := term.GetSize(int(r.out.Fd())); werr == nil && cols > 0 {
+		width = cols
+	}
+	line, rerr := editLineWidth(r.in, r.out, prompt, r.history, width)
 	return line, rerr
 }
 
@@ -148,17 +152,65 @@ func (r *termLineReader) Close() {
 // ←/→/Home/End (and Ctrl-B/F/A/E), ↑/↓ history (Ctrl-P/N), Ctrl-K/U/W
 // kills, Ctrl-L clear screen, Ctrl-C interrupt, Ctrl-D EOF on empty line.
 func editLine(r io.Reader, w io.Writer, prompt string, history []string) (string, error) {
+	return editLineWidth(r, w, prompt, history, 0)
+}
+
+// editLineWidth is editLine with a known terminal width, so a line longer
+// than the terminal is redrawn in place across its wrapped rows instead of
+// leaving one stale row per keystroke behind. width <= 0 disables wrap
+// handling (tests, unknown terminals).
+func editLineWidth(r io.Reader, w io.Writer, prompt string, history []string, width int) (string, error) {
 	br := bufio.NewReader(r)
 	var buf []rune
 	cur := 0
 	histIdx := len(history) // one past the end = "the line being typed"
 	var pending []rune      // the in-progress line, saved while browsing history
+	promptLen := len([]rune(prompt))
+	curRow := 0 // row (within the wrapped line) the cursor was left on by the last redraw
 
 	redraw := func() {
-		fmt.Fprintf(w, "\r%s%s\x1b[K", prompt, string(buf))
-		if back := len(buf) - cur; back > 0 {
-			fmt.Fprintf(w, "\x1b[%dD", back)
+		if width <= 0 {
+			fmt.Fprintf(w, "\r%s%s\x1b[K", prompt, string(buf))
+			if back := len(buf) - cur; back > 0 {
+				fmt.Fprintf(w, "\x1b[%dD", back)
+			}
+			return
 		}
+		// Go back to the first row of the line, clear everything below,
+		// and paint prompt+buffer; the terminal wraps for us.
+		if curRow > 0 {
+			fmt.Fprintf(w, "\x1b[%dA", curRow)
+		}
+		fmt.Fprintf(w, "\r\x1b[J%s%s", prompt, string(buf))
+		end := promptLen + len(buf)
+		endRow := end / width
+		if end > 0 && end%width == 0 {
+			// The cursor is parked at the end of the previous row (pending
+			// wrap); force the wrap so row arithmetic stays exact.
+			fmt.Fprint(w, "\r\n")
+		}
+		pos := promptLen + cur
+		targetRow, targetCol := pos/width, pos%width
+		if up := endRow - targetRow; up > 0 {
+			fmt.Fprintf(w, "\x1b[%dA", up)
+		}
+		fmt.Fprint(w, "\r")
+		if targetCol > 0 {
+			fmt.Fprintf(w, "\x1b[%dC", targetCol)
+		}
+		curRow = targetRow
+	}
+	// finishLine moves the cursor below the whole wrapped line before the
+	// caller prints the newline that ends editing.
+	finishLine := func() {
+		if width <= 0 {
+			return
+		}
+		endRow := (promptLen + len(buf)) / width
+		if down := endRow - curRow; down > 0 {
+			fmt.Fprintf(w, "\x1b[%dB", down)
+		}
+		curRow = 0
 	}
 	setLine := func(s string) {
 		buf = []rune(s)
@@ -178,9 +230,11 @@ func editLine(r io.Reader, w io.Writer, prompt string, history []string) (string
 		}
 		switch c {
 		case '\r', '\n':
+			finishLine()
 			fmt.Fprint(w, "\r\n")
 			return string(buf), nil
 		case 0x03: // Ctrl-C
+			finishLine()
 			fmt.Fprint(w, "^C\r\n")
 			return "", errInterrupted
 		case 0x04: // Ctrl-D
@@ -234,6 +288,7 @@ func editLine(r io.Reader, w io.Writer, prompt string, history []string) (string
 			redraw()
 		case 0x0c: // Ctrl-L — clear screen, keep line
 			fmt.Fprint(w, "\x1b[H\x1b[2J")
+			curRow = 0
 			redraw()
 		case 0x10: // Ctrl-P — history up
 			if histIdx > 0 {

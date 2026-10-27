@@ -20,7 +20,20 @@ import (
 	"github.com/unleashtheagents/uta/internal/textdiff"
 )
 
-const maxNebiusToolRounds = 6
+// maxNebiusToolRounds caps tool-calling rounds per turn; UTA_NEBIUS_MAX_TOOL_ROUNDS
+// overrides it. When the cap is hit the model gets one closing turn without
+// tools so the user always receives a report of what was done.
+const maxNebiusToolRounds = 12
+
+func resolveNebiusToolRounds(env []string) int {
+	if v := resolveEnvKey(env, "UTA_NEBIUS_MAX_TOOL_ROUNDS"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return maxNebiusToolRounds
+}
 
 type nebiusToolSpec struct {
 	Type     string             `json:"type"`

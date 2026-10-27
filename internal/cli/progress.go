@@ -36,6 +36,9 @@ type Renderer struct {
 	// running tracks in-flight subtask ids; assistant text streams as
 	// prose only while exactly one is running (dots otherwise).
 	running map[string]bool
+	// streaming is true while assistant prose is being written inline on a
+	// gutter line; the next dot, tool call or interjection closes it.
+	streaming bool
 }
 
 const (
@@ -118,6 +121,7 @@ func (r *Renderer) endPhaseLocked(suffixGreen, suffixDim string) {
 	if r.phase == "" {
 		return
 	}
+	r.endStreamLocked()
 	parts := []string{r.green("✓")}
 	if suffixGreen != "" {
 		parts = append(parts, r.green(suffixGreen))
@@ -133,10 +137,21 @@ func (r *Renderer) dotLocked(marker string) {
 	if r.phase == "" {
 		return
 	}
+	r.endStreamLocked()
 	if marker == "" {
 		marker = r.dim(".")
 	}
 	fmt.Fprint(r.w, marker)
+}
+
+// endStreamLocked closes an open prose line and restores the phase label
+// so dots keep a home. No-op when nothing is streaming.
+func (r *Renderer) endStreamLocked() {
+	if !r.streaming {
+		return
+	}
+	r.streaming = false
+	fmt.Fprintf(r.w, "\n  %s ", r.dim(r.phase+"…"))
 }
 
 // interjectLocked prints a full line mid-phase (budget warnings, alerts)
@@ -148,19 +163,32 @@ func (r *Renderer) interjectLocked(line string) {
 		fmt.Fprintf(r.w, "  %s\n", line)
 		return
 	}
+	if r.streaming {
+		r.streaming = false
+		fmt.Fprintln(r.w)
+	}
 	fmt.Fprintf(r.w, "\n  %s\n", line)
 	fmt.Fprintf(r.w, "  %s ", r.dim(r.phase+"…"))
 }
 
-// streamTextLocked prints one assistant text block as dim, gutter-marked
-// prose inside the current phase, then restores the phase label so dots
-// keep a home. Caller must hold r.mu and ensure a phase is active.
+// streamTextLocked writes assistant prose inline on dim, gutter-marked
+// lines inside the current phase. Chunks arrive as the model generates
+// them, so the text flows like a terminal stream; the phase label returns
+// only when something else (a dot, a tool call) interrupts. Caller must
+// hold r.mu and ensure a phase is active.
 func (r *Renderer) streamTextLocked(text string) {
-	fmt.Fprintln(r.w)
-	for _, ln := range strings.Split(strings.TrimSpace(text), "\n") {
-		fmt.Fprintf(r.w, "  %s %s\n", r.dim("│"), r.dim(ln))
+	if !r.streaming {
+		r.streaming = true
+		fmt.Fprintf(r.w, "\n  %s ", r.dim("│"))
+		text = strings.TrimLeft(text, "\n")
 	}
-	fmt.Fprintf(r.w, "  %s ", r.dim(r.phase+"…"))
+	lines := strings.Split(text, "\n")
+	for i, ln := range lines {
+		if i > 0 {
+			fmt.Fprintf(r.w, "\n  %s ", r.dim("│"))
+		}
+		fmt.Fprint(r.w, r.dim(ln))
+	}
 }
 
 // usageSuffix renders the accumulated token/cost totals for the final
@@ -463,6 +491,9 @@ func truncateRunes(s string, n int) string {
 
 // toolCallLocked prints "  ⚙ run_command go test ./..." on its own line.
 func (r *Renderer) toolCallLocked(tool, arg string) {
+	if r.streaming {
+		r.streaming = false
+	}
 	fmt.Fprintln(r.w)
 	if arg != "" {
 		fmt.Fprintf(r.w, "  %s %s %s\n", r.dim("⚙"), r.bold(tool), r.dim(arg))
@@ -474,6 +505,10 @@ func (r *Renderer) toolCallLocked(tool, arg string) {
 // diffLocked prints a unified diff with +/- coloring, capped so a large
 // rewrite does not flood the terminal.
 func (r *Renderer) diffLocked(diff string) {
+	if r.streaming {
+		r.streaming = false
+		fmt.Fprintln(r.w)
+	}
 	const maxLines = 60
 	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
 	for i, ln := range lines {

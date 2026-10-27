@@ -35,3 +35,6 @@ CLAUDE.md
 uta-test
 scripts/
 .aider*
+
+# hackathon submission notes (local only)
+docs/nebius_nvidia_hackathon.json

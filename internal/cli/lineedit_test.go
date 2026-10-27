@@ -169,3 +169,31 @@ func TestNewLineReader_NonTTYFallsBackToScanner(t *testing.T) {
 		t.Errorf("prompt not written: %q", out.String())
 	}
 }
+
+// A line longer than the terminal must be redrawn in place: every redraw
+// first climbs back to the first row of the wrapped line and clears below,
+// and Enter moves below the last row before the newline.
+func TestEditLineWidth_WrappedRedraw(t *testing.T) {
+	var out strings.Builder
+	in := strings.NewReader("abcdefghij\r") // prompt "> " (2) + 10 chars = 12 columns on an 8-wide terminal
+	line, err := editLineWidth(in, &out, "> ", nil, 8)
+	if err != nil || line != "abcdefghij" {
+		t.Fatalf("line=%q err=%v", line, err)
+	}
+	got := out.String()
+	// Once the text wraps onto row 1, redraws must start with "move up 1 row".
+	if !strings.Contains(got, "\x1b[1A\r\x1b[J> abcdefghi") {
+		t.Fatalf("expected an in-place redraw from the first row, got %q", got)
+	}
+	// The 7th character lands exactly at column 8: the forced wrap keeps row arithmetic exact.
+	if !strings.Contains(got, "> abcdef\r\n") {
+		t.Fatalf("expected a forced wrap at the column boundary, got %q", got)
+	}
+	// Never clear with the single-row sequence when width is known.
+	if strings.Contains(got, "\x1b[K") {
+		t.Fatalf("width-aware redraw must not use the single-row clear, got %q", got)
+	}
+	if !strings.HasSuffix(got, "\r\n") {
+		t.Fatalf("Enter should end with a newline, got %q", got)
+	}
+}
