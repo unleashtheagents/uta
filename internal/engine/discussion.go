@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/unleashtheagents/uta/internal/budget"
+	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 )
@@ -278,7 +279,7 @@ func (s *Supervisor) Discuss(ctx context.Context, req DiscussionRequest) (Discus
 	if !req.SkipSynthesis {
 		synth, _ := s.deps.Registry.Get(req.SynthWorker)
 		s.emit(sessionID, "", trajectory.SynthesisStarted, map[string]any{"synth": req.SynthWorker})
-		synthCtx, synthCancel := context.WithTimeout(ctx, req.TurnTimeout)
+		synthCtx, synthCancel := context.WithTimeout(withRole(ctx, provider.RoleSynthesis), req.TurnTimeout)
 		final, synthErr := s.callProvider(synthCtx, sessionID, "", synth, renderDiscussionSynthPrompt(req, res.Turns), carrier)
 		synthCancel()
 		res.TokensIn += final.TokensIn

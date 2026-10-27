@@ -342,3 +342,49 @@ func TestNebius_AgenticToolLoopAndFetchModels(t *testing.T) {
 		t.Errorf("expected EventToolCall (%v) and EventToolResult (%v)", sawToolCall, sawToolResult)
 	}
 }
+
+func TestNebius_RoleTierRouting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "model": req.Model,
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+				"message": map[string]string{"role": "assistant", "content": req.Model}}},
+			"usage": map[string]int64{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name   string
+		role   provider.Role
+		env    []string
+		prompt string
+		want   string
+	}{
+		{"planner->ultra", provider.RolePlanner, nil, "plan", NebiusModelUltra},
+		{"synthesis->ultra", provider.RoleSynthesis, nil, "merge", NebiusModelUltra},
+		{"judge->ultra", provider.RoleJudge, nil, "verify", NebiusModelUltra},
+		{"worker->super", provider.RoleWorker, nil, "code", NebiusModelSuper},
+		{"empty role->super", "", nil, "code", NebiusModelSuper},
+		{"compact->nano", provider.RoleCompact, nil, "compact", NebiusModelNano},
+		{"sentinel->lightning", provider.RoleSentinel, nil, "check", NebiusModelLightning},
+		{"explicit NEBIUS_MODEL wins", provider.RolePlanner, []string{"NEBIUS_MODEL=nano"}, "plan", NebiusModelNano},
+		{"routing off -> default", provider.RolePlanner, []string{"UTA_NEBIUS_ROUTING=0"}, "plan", DefaultNebiusModel},
+		{"prompt directive wins", provider.RolePlanner, nil, "[model:lightning] plan", NebiusModelLightning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Nebius{BaseURL: srv.URL + "/v1", APIKey: "k"}
+			res, err := n.RunHeadless(context.Background(), tc.prompt, provider.RunOptions{Role: tc.role, Env: tc.env}, nil)
+			if err != nil {
+				t.Fatalf("RunHeadless: %v", err)
+			}
+			if res.FinalText != tc.want {
+				t.Errorf("model = %q, want %q", res.FinalText, tc.want)
+			}
+		})
+	}
+}

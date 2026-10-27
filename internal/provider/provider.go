@@ -62,7 +62,28 @@ type RunOptions struct {
 	// `--mcp-config <path>`); providers without CapMCP ignore it. Empty
 	// means "no MCP servers attached to this run".
 	MCPConfigPath string
+
+	// Role names the orchestration role this call plays (RolePlanner,
+	// RoleWorker, RoleSynthesis, RoleJudge, RoleCompact, RoleSentinel). The
+	// engine sets it on every call so multi-tier providers can pick a model
+	// per role (the Nebius provider maps planner/synthesis/judge to
+	// Nemotron Ultra, workers to Super, compaction to Nano, sentinel checks
+	// to Lightning) without the prompt author spelling out a model. Empty
+	// is treated as RoleWorker. Providers that drive a single CLI ignore it.
+	Role Role
 }
+
+// Role is the orchestration role of one provider call. See RunOptions.Role.
+type Role string
+
+const (
+	RolePlanner   Role = "planner"
+	RoleWorker    Role = "worker"
+	RoleSynthesis Role = "synthesis"
+	RoleJudge     Role = "judge"
+	RoleCompact   Role = "compact"
+	RoleSentinel  Role = "sentinel"
+)
 
 // RunResult is the terminal value of one RunHeadless call. RawOutput holds
 // the entire raw stdout the provider emitted (line-delimited JSON for stream

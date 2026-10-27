@@ -299,6 +299,25 @@ func withHitlState(ctx context.Context, h *hitlState) context.Context {
 	return context.WithValue(ctx, hitlStateKey{}, h)
 }
 
+// roleCtxKey carries the provider.Role of the call being made. Planner,
+// synthesis and judge paths wrap their context with withRole so callProvider
+// can stamp RunOptions.Role; anything that does not is a worker call.
+type roleCtxKey struct{}
+
+func withRole(ctx context.Context, r provider.Role) context.Context {
+	return context.WithValue(ctx, roleCtxKey{}, r)
+}
+
+func roleFromContext(ctx context.Context) provider.Role {
+	if ctx == nil {
+		return provider.RoleWorker
+	}
+	if r, ok := ctx.Value(roleCtxKey{}).(provider.Role); ok && r != "" {
+		return r
+	}
+	return provider.RoleWorker
+}
+
 func runCancelFromContext(ctx context.Context) context.CancelCauseFunc {
 	if ctx == nil {
 		return nil
@@ -608,7 +627,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	} else {
 		s.emit(sessionID, "", trajectory.SynthesisStarted, map[string]any{"synth": synthName})
 		synthPrompt := RenderSynthPrompt(req.Goal, outcomes)
-		synthCtx, synthCancel := context.WithTimeout(ctx, req.SubtaskTimeout)
+		synthCtx, synthCancel := context.WithTimeout(withRole(ctx, provider.RoleSynthesis), req.SubtaskTimeout)
 		final, synthErr := s.callProvider(synthCtx, sessionID, "", synth, synthPrompt, req)
 		synthCancel()
 		if synthErr == nil {
@@ -653,7 +672,7 @@ func (s *Supervisor) runPlanner(ctx context.Context, sessionID string, planner p
 	}
 	s.emit(sessionID, "", trajectory.PlanRequested, map[string]any{"planner": planner.Name(), "chars": len(prompt)})
 
-	plannerCtx, cancel := context.WithTimeout(ctx, req.SubtaskTimeout)
+	plannerCtx, cancel := context.WithTimeout(withRole(ctx, provider.RolePlanner), req.SubtaskTimeout)
 	defer cancel()
 
 	result, err := s.callProvider(plannerCtx, sessionID, "", planner, prompt, req)
@@ -803,6 +822,7 @@ func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID stri
 		PreApproveTools: req.PreApproveTools,
 		MaxRetries:      maxRetries,
 		MCPConfigPath:   req.MCPConfigPath,
+		Role:            roleFromContext(ctx),
 	}
 	gate := capability.NewGate(req.AllowedTools, req.DeniedTools)
 	hState := hitlStateFromContext(ctx)

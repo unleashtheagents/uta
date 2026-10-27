@@ -794,7 +794,11 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 		}
 		carrier.DeniedTools = pol.DeniedTools
 	}
-	callCtx, cancel := context.WithTimeout(ctx, w.req.CallTimeout)
+	callRole := provider.RoleWorker
+	if w.verdictMode {
+		callRole = provider.RoleJudge
+	}
+	callCtx, cancel := context.WithTimeout(withRole(ctx, callRole), w.req.CallTimeout)
 	result, callErr := w.sup.callProvider(callCtx, w.sessionID, subtaskID, prov, prompt, carrier)
 	cancel()
 

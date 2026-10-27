@@ -257,7 +257,34 @@ type nebiusChatResponse struct {
 
 func (n *Nebius) Name() string { return "nebius" }
 
+// NebiusModelForRole returns the Nemotron tier the coordinator assigns to an
+// orchestration role when no explicit model was configured: Ultra plans,
+// synthesizes and judges (the 10% tier); Super does worker fan-out (the 90%
+// tier); Nano compacts; Lightning runs sentinel checks.
+func NebiusModelForRole(role provider.Role) string {
+	switch role {
+	case provider.RolePlanner, provider.RoleSynthesis, provider.RoleJudge:
+		return NebiusModelUltra
+	case provider.RoleCompact:
+		return NebiusModelNano
+	case provider.RoleSentinel:
+		return NebiusModelLightning
+	default:
+		return NebiusModelSuper
+	}
+}
+
+// resolveConfig resolves credentials, endpoint and model. An explicitly
+// configured model (Nebius.Model, NEBIUS_MODEL in the process env or in
+// opts.Env) always wins. Otherwise the model follows the call's role via
+// NebiusModelForRole unless UTA_NEBIUS_ROUTING=0 pins DefaultNebiusModel.
+// routing reports which path chose the model: "explicit", "role" or "default".
 func (n *Nebius) resolveConfig(env []string) (apiKey, baseURL, model string) {
+	apiKey, baseURL, model, _ = n.resolveConfigForRole(env, "")
+	return apiKey, baseURL, model
+}
+
+func (n *Nebius) resolveConfigForRole(env []string, role provider.Role) (apiKey, baseURL, model, routing string) {
 	apiKey = n.APIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("NEBIUS_API_KEY")
@@ -294,8 +321,19 @@ func (n *Nebius) resolveConfig(env []string) (apiKey, baseURL, model string) {
 		baseURL = DefaultNebiusBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+	routing = "explicit"
+	if strings.TrimSpace(model) == "" {
+		routingEnv := resolveEnvKey(env, "UTA_NEBIUS_ROUTING")
+		if role != "" && routingEnv != "0" && !strings.EqualFold(routingEnv, "off") && !strings.EqualFold(routingEnv, "false") {
+			model = NebiusModelForRole(role)
+			routing = "role"
+		} else {
+			model = DefaultNebiusModel
+			routing = "default"
+		}
+	}
 	model = ResolveNebiusModel(model)
-	return strings.TrimSpace(apiKey), baseURL, model
+	return strings.TrimSpace(apiKey), baseURL, model, routing
 }
 
 func resolveEnvKey(env []string, key string) string {
@@ -350,11 +388,19 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		defer cancel()
 	}
 
-	apiKey, baseURL, model := n.resolveConfig(opts.Env)
+	role := opts.Role
+	if role == "" {
+		role = provider.RoleWorker
+	}
+	apiKey, baseURL, model, routing := n.resolveConfigForRole(opts.Env, role)
 	if apiKey == "" {
 		return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius: %w: NEBIUS_API_KEY is not set", provider.ErrAuth)
 	}
-	prompt, model = extractPromptModelOverride(prompt, model)
+	if cleaned, override := extractPromptModelOverride(prompt, model); override != model {
+		prompt, model, routing = cleaned, override, "prompt"
+	} else {
+		prompt = cleaned
+	}
 
 	if sessionID == "" {
 		sessionID = "nebius-" + uuid.NewString()
@@ -409,6 +455,8 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			"session_id": sessionID,
 			"model":      model,
 			"provider":   "nebius",
+			"role":       string(role),
+			"routing":    routing,
 		})
 		events <- provider.Event{
 			Kind:      provider.EventSessionID,

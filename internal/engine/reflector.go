@@ -17,6 +17,7 @@ import (
 	"github.com/unleashtheagents/uta/internal/engine/capability"
 	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/paths"
+	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 )
@@ -332,7 +333,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				defer func() { <-sem }()
 
 				start := time.Now()
-				subCtx, subCancel := context.WithTimeout(ctx, req.CriticTimeout)
+				subCtx, subCancel := context.WithTimeout(withRole(ctx, provider.RoleJudge), req.CriticTimeout)
 				result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, prompt, RunRequest{
 					Workdir: req.Workdir, Env: req.Env, SubtaskTimeout: req.CriticTimeout,
 					PreApproveTools: req.PreApproveTools,
