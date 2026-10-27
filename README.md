@@ -63,7 +63,7 @@ uta mission fmt examples/hello.steer                  # canonical formatting (di
 |---|---|---|---|---|
 | `ultra` | `nvidia/Nemotron-3-Ultra-550b-a55b` | Hybrid Mamba-2 + Transformer MoE (550B / 55B active) | 1M | **Planner, synthesizer, judge (the 10% tier)** — DAG decomposition, final synthesis, `judge … require k of n` verifiers, reflector critics |
 | `super` | `nvidia/nemotron-3-super-120b-a12b` | Hybrid Mamba-2 + Transformer MoE (120B / 12B active) | 1M | **Worker swarm (the 90% tier)** — parallel coding subtasks with the agentic tool loop |
-| `nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | Hybrid Mamba-2 + Transformer MoE (30B / 3B active) | 1M | **Compaction tier** — context compaction and summaries |
+| `nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | Hybrid Mamba-2 + Transformer MoE (30B / 3B active) | 1M | **Compaction tier** — `--compact-over N` / `synthesis.compact_over` distils oversized worker outputs before Ultra synthesizes |
 | `lightning` | `nvidia/Nemotron-3_5-Lightning` | Latent Mamba-Attention (30B / 3.5B active) | 256K | **Sentinel** — PASS/FAIL verdict on every `write_file`, `edit_file`, `run_command` before it executes (~300 ms measured) |
 | `vl` | `nvidia/Nemotron-3.5-Super-VL` | Multimodal Vision-Language MoE (120B / 12B + ViT) | 512K | **Multimodal analyst** — diagrams and UI screenshots |
 
@@ -92,6 +92,7 @@ uta nebius search "NVIDIA Nemotron 3 Mamba-2 MoE benchmarks"
 uta run -g "add a table-driven test for internal/paths and run go test ./..." --worker nebius --pre-approve "*" -y
 uta nebius cost <session-id>                          # tokens and USD per tier/role vs all-Ultra
 uta run -f examples/hello-nemotron/uta.yaml -y        # four Nemotron tiers in parallel
+uta run -g "<big task>" --worker nebius --compact-over 6000 -y   # Nano compacts long worker outputs before Ultra synthesizes
 uta mission run examples/nebius-nemotron.steer        # steer mission on Nebius
 uta bench                                             # latency, throughput and cost side by side
 ```

@@ -259,20 +259,27 @@ func nebiusReasoningEffortForModel(model string) string {
 		return "high"
 	case NebiusModelSuper, NebiusModelSuperVL:
 		return "medium"
-	case NebiusModelNano:
-		return "low"
-	case NebiusModelLightning:
+	case NebiusModelNano, NebiusModelLightning:
+		// Measured live: Nano with reasoning on spent its entire 8192-token
+		// output budget thinking and returned empty content. The small tiers
+		// do transformation work (compaction, verdicts); they answer directly.
 		return "none"
 	}
 	return ""
 }
 
-func resolveReasoningEffort(env []string, model string) string {
+// resolveReasoningEffort picks the reasoning_effort for a call. The compact
+// role always answers without a thinking phase: compaction is a rewrite, and
+// a thinking budget there only competes with the digest for output tokens.
+func resolveReasoningEffort(env []string, model string, role provider.Role) string {
 	if v := strings.ToLower(resolveEnvKey(env, "UTA_NEBIUS_REASONING_EFFORT")); v != "" {
 		if v == "default" {
 			return ""
 		}
 		return v
+	}
+	if role == provider.RoleCompact || role == provider.RoleSentinel {
+		return "none"
 	}
 	return nebiusReasoningEffortForModel(model)
 }
@@ -515,7 +522,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	if sessionID == "" {
 		sessionID = "nebius-" + uuid.NewString()
 	}
-	reasoningEffort := resolveReasoningEffort(opts.Env, model)
+	reasoningEffort := resolveReasoningEffort(opts.Env, model, role)
 
 	// Expand @file mentions inside opts.Workdir (inspired by Google Antigravity & Claude Code).
 	effectivePrompt := prompt
@@ -606,6 +613,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 	}
 	var totalReasoningTokens, totalCachedTokens int64
+	reasoningRetried := false
 
 	for round := 0; round < maxNebiusToolRounds; round++ {
 		chatReq := nebiusChatRequest{
@@ -680,7 +688,9 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 				strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
 			if isSSE {
 				// Incremental: deltas reach the listener as they arrive.
-				sseText, sseThink, sseIn, sseOut, rawBytes = parseNebiusSSEStream(resp.Body, model, events)
+				var sseReason int64
+				sseText, sseThink, sseIn, sseOut, rawBytes, sseReason = parseNebiusSSEStream(resp.Body, model, events)
+				totalReasoningTokens += sseReason
 				_ = resp.Body.Close()
 				streamed = true
 				break
@@ -698,6 +708,22 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 		lastRawBytes = rawBytes
 
+		if streamed && strings.TrimSpace(sseText) == "" && reasoningEffort != "none" && !reasoningRetried {
+			// The whole output budget went to thinking. Redo this turn once
+			// with reasoning off rather than hand back an empty answer.
+			totalTokensIn += sseIn
+			totalTokensOut += sseOut
+			reasoningRetried = true
+			reasoningEffort = "none"
+			if events != nil {
+				pl, _ := json.Marshal(map[string]any{"type": "retry", "model": model, "attempt": 1,
+					"reason": "empty content with reasoning on; retrying with reasoning_effort=none",
+					"text":   "[nebius retry] empty content with reasoning on; retrying with reasoning_effort=none"})
+				events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: pl}
+			}
+			round--
+			continue
+		}
 		if streamed {
 			finalText = sseText
 			totalTokensIn += sseIn
@@ -748,6 +774,18 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			assistantMsg.Role = "assistant"
 		}
 		assistantMsg.Content = stripThinkTags(assistantMsg.Content)
+		if strings.TrimSpace(assistantMsg.Content) == "" && len(assistantMsg.ToolCalls) == 0 && reasoningEffort != "none" && !reasoningRetried {
+			reasoningRetried = true
+			reasoningEffort = "none"
+			if events != nil {
+				pl, _ := json.Marshal(map[string]any{"type": "retry", "model": model, "attempt": 1,
+					"reason": "empty content with reasoning on; retrying with reasoning_effort=none",
+					"text":   "[nebius retry] empty content with reasoning on; retrying with reasoning_effort=none"})
+				events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: pl}
+			}
+			round--
+			continue
+		}
 		if think := strings.TrimSpace(assistantMsg.thinking()); think != "" && events != nil {
 			thinkPayload, _ := json.Marshal(map[string]any{
 				"type":             "reasoning",
@@ -897,7 +935,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 // parseNebiusSSE parses a complete SSE body. Kept for callers and tests that
 // already hold the bytes; the live path uses parseNebiusSSEStream.
 func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (finalText string, tokensIn, tokensOut int64) {
-	text, _, in, out, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
+	text, _, in, out, _, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
 	return text, in, out
 }
 
@@ -907,7 +945,7 @@ func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (fin
 // returned as thinking; usage arrives on the final chunk when the request
 // asked for stream_options.include_usage. raw holds every byte read so the
 // caller can persist the exchange.
-func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Event) (finalText, thinking string, tokensIn, tokensOut int64, raw []byte) {
+func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Event) (finalText, thinking string, tokensIn, tokensOut int64, raw []byte, reasoningTokens int64) {
 	var buf, think, rawBuf, pending strings.Builder
 	// Token deltas are coalesced into readable flushes (a line, ~80 chars,
 	// or 60ms of silence) so a progress renderer that prints one line per
@@ -951,6 +989,9 @@ func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Even
 		if chunk.Usage.CompletionTokens > 0 {
 			tokensOut = chunk.Usage.CompletionTokens
 		}
+		if chunk.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
+			reasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		for _, c := range chunk.Choices {
 			if t := c.Delta.thinking(); t != "" {
 				think.WriteString(t)
@@ -983,7 +1024,7 @@ func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Even
 		}
 	}
 	flush()
-	return stripThinkTags(strings.TrimSpace(buf.String())), think.String(), tokensIn, tokensOut, []byte(rawBuf.String())
+	return stripThinkTags(strings.TrimSpace(buf.String())), think.String(), tokensIn, tokensOut, []byte(rawBuf.String()), reasoningTokens
 }
 
 // nebiusSleep waits for the retry delay, reporting the retry on the event

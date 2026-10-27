@@ -45,6 +45,9 @@ type WorkflowSynthesis struct {
 	Worker string `yaml:"worker"`
 	Mode   string `yaml:"mode"`   // merge | skip
 	Prompt string `yaml:"prompt"` // optional override; reserved for v2
+	// CompactOver compacts subtask outputs longer than this many characters
+	// with the synthesizer provider's compact tier before synthesis (0 = off).
+	CompactOver int `yaml:"compact_over"`
 }
 
 type WorkflowSubtask struct {
@@ -223,6 +226,7 @@ defaults:
 synthesis:
   worker: claude          # who writes the final answer (defaults to worker)
   mode: merge             # 'merge' = synthesize; 'skip' = join subtask outputs verbatim
+  # compact_over: 6000    # compact subtask outputs longer than N chars first (nebius: Nemotron 3 Nano)
 
 # subtasks (OPTIONAL): if present, the planner step is skipped and these run
 # as-is. Mix workers per subtask; declare 'needs' for ordering; attach a

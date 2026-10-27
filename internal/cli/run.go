@@ -50,6 +50,7 @@ func newRunCmd() *cobra.Command {
 		workerName     string
 		plannerName    string
 		synthName      string
+		compactOver    int
 		maxParallel    int
 		maxSubtasks    int
 		subtaskTimeout time.Duration
@@ -127,6 +128,9 @@ func newRunCmd() *cobra.Command {
 				}
 				if strings.EqualFold(wf.Synthesis.Mode, "skip") {
 					skipSynth = true
+				}
+				if compactOver == 0 && wf.Synthesis.CompactOver > 0 {
+					compactOver = wf.Synthesis.CompactOver
 				}
 				if strategyFlag == "" {
 					strategyFlag = wf.InferStrategy()
@@ -301,6 +305,7 @@ func newRunCmd() *cobra.Command {
 				PriorOutcomes:      priorOutcomes,
 				ResumedFromSession: resumeSession,
 				SkipSynthesis:      skipSynth,
+				CompactOutputsOver: compactOver,
 				Strategy:           strategyFlag,
 				Env:                subtaskEnv,
 				MaxWallSeconds:     maxWallSeconds,
@@ -430,6 +435,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workerName, "worker", "", "default worker provider (claude|gemini|...)")
 	cmd.Flags().StringVar(&plannerName, "planner", "", "planner provider (defaults to worker)")
 	cmd.Flags().StringVar(&synthName, "synth", "", "synthesizer provider (defaults to worker)")
+	cmd.Flags().IntVar(&compactOver, "compact-over", 0, "compact subtask outputs longer than N chars with the synthesizer's compact tier (nebius: Nemotron 3 Nano) before synthesis; 0 = off")
 	cmd.Flags().IntVar(&maxParallel, "max-parallel", 4, "maximum concurrent subtasks")
 	cmd.Flags().IntVar(&maxSubtasks, "max-subtasks", 6, "hard cap on subtasks the planner may propose")
 	cmd.Flags().DurationVar(&subtaskTimeout, "subtask-timeout", 10*time.Minute, "per-subtask timeout")

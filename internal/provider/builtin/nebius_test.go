@@ -716,16 +716,55 @@ func TestNebius_ReasoningSeparatedFromAnswer(t *testing.T) {
 }
 
 func TestNebius_ReasoningEffortOverride(t *testing.T) {
-	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=LOW"}, NebiusModelUltra); got != "low" {
+	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=LOW"}, NebiusModelUltra, provider.RoleWorker); got != "low" {
 		t.Errorf("override = %q", got)
 	}
-	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=default"}, NebiusModelUltra); got != "" {
+	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=default"}, NebiusModelUltra, provider.RoleWorker); got != "" {
 		t.Errorf("default should unset the field, got %q", got)
+	}
+	if got := resolveReasoningEffort(nil, NebiusModelUltra, provider.RoleCompact); got != "none" {
+		t.Errorf("compact role must not think, got %q", got)
+	}
+	if got := resolveReasoningEffort(nil, NebiusModelNano, provider.RoleWorker); got != "none" {
+		t.Errorf("nano default = %q, want none", got)
 	}
 	if got := stripThinkTags("<THINK>a</THINK> b"); got != "b" {
 		t.Errorf("stripThinkTags = %q", got)
 	}
 	if got := stripThinkTags("plain"); got != "plain" {
 		t.Errorf("stripThinkTags(plain) = %q", got)
+	}
+}
+
+func TestNebius_EmptyContentRetriesWithoutReasoning(t *testing.T) {
+	var efforts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		efforts = append(efforts, req.ReasoningEffort)
+		w.Header().Set("Content-Type", "application/json")
+		content := ""
+		if req.ReasoningEffort == "none" {
+			content = "the digest"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "model": req.Model,
+			"choices": []map[string]any{{"index": 0, "finish_reason": "length",
+				"message": map[string]any{"role": "assistant", "content": content, "reasoning_content": "thinking forever"}}},
+			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 8192,
+				"completion_tokens_details": map[string]int64{"reasoning_tokens": 8192}},
+		})
+	}))
+	defer srv.Close()
+	n := &Nebius{BaseURL: srv.URL + "/v1", APIKey: "k"}
+	res, err := n.RunHeadless(context.Background(), "compact this", provider.RunOptions{Role: provider.RoleSynthesis, Env: []string{"NEBIUS_STREAM=0"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FinalText != "the digest" {
+		t.Errorf("FinalText = %q", res.FinalText)
+	}
+	if len(efforts) != 2 || efforts[0] != "high" || efforts[1] != "none" {
+		t.Errorf("efforts = %v, want [high none]", efforts)
 	}
 }

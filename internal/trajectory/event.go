@@ -50,6 +50,7 @@ const (
 	HITLRequested          Kind = "hitl_requested"
 	HITLApproved           Kind = "hitl_approved"
 	HITLDenied             Kind = "hitl_denied"
+	OutputCompacted        Kind = "output_compacted"
 	SynthesisStarted       Kind = "synthesis_started"
 	SynthesisCompleted     Kind = "synthesis_completed"
 	HandoffStarted         Kind = "handoff_started"

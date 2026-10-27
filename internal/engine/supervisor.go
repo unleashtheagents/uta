@@ -117,6 +117,14 @@ type RunRequest struct {
 	// calling the synthesizer provider. Used when synthesis.mode=skip in YAML.
 	SkipSynthesis bool
 
+	// CompactOutputsOver, when > 0, compacts any subtask result longer than
+	// this many characters before synthesis by calling the synthesizer
+	// provider in the compact role (on Nebius that is Nemotron 3 Nano), so
+	// the expensive synthesis tier reads distilled findings instead of raw
+	// worker transcripts. 0 disables. Set by --compact-over or
+	// synthesis.compact_over in uta.yaml.
+	CompactOutputsOver int
+
 	// Strategy chooses the orchestration shape. "" or "fanout" runs every
 	// subtask in parallel (the original v0.1.0 behavior). "dag" honors
 	// SubtaskSpec.Needs and SubtaskSpec.Gate.
@@ -652,6 +660,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		finalRef = ref
 		s.emit(sessionID, "", trajectory.SynthesisCompleted, map[string]any{"mode": "skip", "chars": len(finalText)})
 	} else {
+		outcomes = s.compactOutcomes(ctx, sessionID, synth, outcomes, req)
 		s.emit(sessionID, "", trajectory.SynthesisStarted, map[string]any{"synth": synthName})
 		synthPrompt := RenderSynthPrompt(req.Goal, outcomes)
 		synthCtx, synthCancel := context.WithTimeout(withRole(ctx, provider.RoleSynthesis), req.SubtaskTimeout)
@@ -1470,4 +1479,51 @@ func (s *Supervisor) runFanout(ctx context.Context, sessionID string, plan Plan,
 
 	abortedByFailFast := anyFailed && req.FailFast && subCtx.Err() != nil
 	return outcomes, anyFailed, abortedByFailFast, nil
+}
+
+// compactPromptHeader asks the compact-tier model for a faithful digest.
+const compactPromptHeader = `You are the compaction step of an agent orchestrator called uta. A worker produced the output below for the subtask named in the first line. Rewrite it as a compact digest for the synthesizer: keep every concrete finding, decision, file path, identifier, command, number and open issue; drop repetition, narration and filler. Preserve code blocks that carry results verbatim. Do not add anything that is not in the source. Target at most %d characters.
+
+`
+
+// compactOutcomes shortens oversized subtask results via the compact role
+// before synthesis. A compaction failure leaves the original result in
+// place, so synthesis still has the full picture.
+func (s *Supervisor) compactOutcomes(ctx context.Context, sessionID string, prov provider.AgentProvider, outcomes []SubtaskOutcome, req RunRequest) []SubtaskOutcome {
+	limit := req.CompactOutputsOver
+	if limit <= 0 || prov == nil {
+		return outcomes
+	}
+	target := limit / 2
+	if target < 400 {
+		target = 400
+	}
+	out := make([]SubtaskOutcome, len(outcomes))
+	copy(out, outcomes)
+	for i := range out {
+		o := out[i]
+		if o.Failed || o.Skipped || len(o.Result) <= limit {
+			continue
+		}
+		prompt := fmt.Sprintf(compactPromptHeader, target) + "Subtask: " + o.Title + "\n\n" + o.Result
+		cctx, cancel := context.WithTimeout(withRole(ctx, provider.RoleCompact), req.SubtaskTimeout)
+		res, err := s.callProvider(cctx, sessionID, o.ID, prov, prompt, req)
+		cancel()
+		if err != nil || strings.TrimSpace(res.FinalText) == "" {
+			msg := "empty result"
+			if err != nil {
+				msg = err.Error()
+			}
+			s.emit(sessionID, o.ID, trajectory.OutputCompacted, map[string]any{
+				"subtask": o.ID, "chars_before": len(o.Result), "error": msg, "kept": "original",
+			})
+			continue
+		}
+		s.emit(sessionID, o.ID, trajectory.OutputCompacted, map[string]any{
+			"subtask": o.ID, "chars_before": len(o.Result), "chars_after": len(res.FinalText),
+			"tokens_in": res.TokensIn, "tokens_out": res.TokensOut, "usd_cents": res.ApproxUSDCents,
+		})
+		out[i].Result = strings.TrimSpace(res.FinalText)
+	}
+	return out
 }

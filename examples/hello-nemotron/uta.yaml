@@ -11,6 +11,7 @@ defaults:
 synthesis:
   worker: nebius
   mode: merge
+  compact_over: 1200   # Nemotron 3 Nano compacts any worker output longer than this before Ultra synthesizes
 
 env:
   UTA_NEBIUS_INJECT_RULES: "1"
