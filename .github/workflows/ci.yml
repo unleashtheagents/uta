@@ -94,12 +94,21 @@ jobs:
       - name: binary smoke
         shell: bash
         run: |
+          # No provider CLIs and no real key on the runner: everything below
+          # is offline. The dummy key only makes the nebius provider "available"
+          # so the shell and the model catalog can be exercised without a call.
           go build -o ./uta-ci ./cmd/uta
+          export UTA_HOME="${{ runner.temp }}/uta-smoke" NEBIUS_API_KEY=ci-dummy-not-a-real-key
           ./uta-ci --version
-          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci doctor || true
-          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci permissions status
-          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci nebius models | head -8
-          printf '/status\n/direct\n/help\nexit\n' | UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci shell --worker nebius >/dev/null
+          ./uta-ci --help >/dev/null
+          ./uta-ci doctor || echo "doctor exit $? (no agent CLIs on the runner, expected)"
+          ./uta-ci permissions status
+          ./uta-ci permissions init && ./uta-ci permissions status | grep -q 'deny'
+          ./uta-ci nebius models > models.txt && grep -q 'Nemotron' models.txt
+          ./uta-ci nebius route "add a test for internal/paths" >/dev/null
+          printf '/status\n/direct\n/status\n/help\n/permissions\nexit\n' | ./uta-ci shell --worker nebius > shell.txt
+          grep -q 'direct (one worker' shell.txt
+          ./uta-ci undo --list 2>&1 | grep -qi 'no file changes'
 
   test-windows:
     # Informational: the hook and run_command paths shell out to sh, which the
