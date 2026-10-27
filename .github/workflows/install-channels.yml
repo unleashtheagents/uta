@@ -40,8 +40,10 @@ jobs:
           brew install unleashtheagents/tap/uta
           uta --version | grep -q "${{ needs.latest.outputs.version }}"
           brew test unleashtheagents/tap/uta
-          UTA_HOME="$RUNNER_TEMP/h" uta permissions status
-          printf '/status\nexit\n' | UTA_HOME="$RUNNER_TEMP/h" uta shell --worker nebius >/dev/null
+          export UTA_HOME="$RUNNER_TEMP/h" NEBIUS_API_KEY=ci-dummy-not-a-real-key  # offline: makes the nebius worker selectable, no call is made
+          uta permissions status
+          printf '/status\nexit\n' | uta shell --worker nebius > shell.txt
+          grep -q 'worker:  nebius' shell.txt
 
   install-sh:
     needs: latest
