@@ -769,13 +769,25 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	n.sessions[sessionID] = history
 	n.mu.Unlock()
 
-	if events != nil && (totalReasoningTokens > 0 || totalCachedTokens > 0) {
+	if totalTokensIn <= 0 {
+		totalTokensIn = estimateTokens(effectivePrompt)
+	}
+	if totalTokensOut <= 0 {
+		totalTokensOut = estimateTokens(finalText)
+	}
+	usd, _ := NebiusEstimateUSD(opts.Env, model, totalTokensIn, totalTokensOut)
+
+	if events != nil {
 		statPayload, _ := json.Marshal(map[string]any{
 			"type":             "usage",
 			"model":            model,
+			"role":             string(role),
+			"tokens_in":        totalTokensIn,
+			"tokens_out":       totalTokensOut,
 			"reasoning_tokens": totalReasoningTokens,
 			"cached_tokens":    totalCachedTokens,
-			"text":             fmt.Sprintf("[nebius usage] reasoning_tokens=%d cached_tokens=%d", totalReasoningTokens, totalCachedTokens),
+			"usd":              usd,
+			"text":             fmt.Sprintf("[nebius usage] model=%s role=%s in=%d out=%d reasoning=%d cached=%d usd=%.6f", model, role, totalTokensIn, totalTokensOut, totalReasoningTokens, totalCachedTokens, usd),
 		})
 		events <- provider.Event{
 			Kind:      provider.EventStdoutChunk,
@@ -784,14 +796,6 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 	}
 
-	if totalTokensIn <= 0 {
-		totalTokensIn = estimateTokens(effectivePrompt)
-	}
-	if totalTokensOut <= 0 {
-		totalTokensOut = estimateTokens(finalText)
-	}
-	inRate, outRate := nebiusPriceFromEnv()
-
 	return provider.RunResult{
 		SessionID:      sessionID,
 		FinalText:      finalText,
@@ -799,7 +803,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		ExitCode:       0,
 		TokensIn:       totalTokensIn,
 		TokensOut:      totalTokensOut,
-		ApproxUSDCents: estimateUSDCents(totalTokensIn, totalTokensOut, inRate, outRate),
+		ApproxUSDCents: nebiusEstimateUSDCents(opts.Env, model, totalTokensIn, totalTokensOut),
 	}, nil
 }
 

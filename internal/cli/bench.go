@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/unleashtheagents/uta/internal/provider"
+	"github.com/unleashtheagents/uta/internal/provider/builtin"
 )
 
 type benchResult struct {
@@ -19,6 +21,8 @@ type benchResult struct {
 	TokensIn   int64         `json:"tokens_in"`
 	TokensOut  int64         `json:"tokens_out"`
 	TokPerSec  float64       `json:"tok_per_sec"`
+	USDCents   int64         `json:"usd_cents"`
+	USD        float64       `json:"usd,omitempty"` // precise estimate where the provider has list prices (nebius)
 	Status     string        `json:"status"`
 	Err        string        `json:"error,omitempty"`
 }
@@ -73,6 +77,18 @@ surfacing a side-by-side comparative table to help choose optimal planner and wo
 					DurationMs: dur.Milliseconds(),
 					TokensIn:   res.TokensIn,
 					TokensOut:  res.TokensOut,
+					USDCents:   res.ApproxUSDCents,
+				}
+				if pName == "nebius" {
+					model := builtin.ResolveNebiusModel(os.Getenv("NEBIUS_MODEL"))
+					if os.Getenv("NEBIUS_MODEL") == "" {
+						model = builtin.NebiusModelForRole(provider.RoleWorker)
+					}
+					if usd, ok := builtin.NebiusEstimateUSD(nil, model, res.TokensIn, res.TokensOut); ok {
+						br.USD = usd
+					}
+				} else if res.ApproxUSDCents > 0 {
+					br.USD = float64(res.ApproxUSDCents) / 100
 				}
 
 				if rErr != nil {
@@ -98,15 +114,19 @@ surfacing a side-by-side comparative table to help choose optimal planner and wo
 
 			fmt.Fprintln(cmd.OutOrStdout())
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "PROVIDER\tSTATUS\tDURATION\tTOKENS_IN\tTOKENS_OUT\tTHROUGHPUT")
+			fmt.Fprintln(tw, "PROVIDER\tSTATUS\tDURATION\tTOKENS_IN\tTOKENS_OUT\tTHROUGHPUT\tCOST")
 			for _, r := range results {
 				tpStr := "-"
 				if r.TokPerSec > 0 {
 					tpStr = fmt.Sprintf("%.1f tok/s", r.TokPerSec)
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
+				costStr := "-"
+				if r.USD > 0 {
+					costStr = fmt.Sprintf("$%.4f", r.USD)
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
 					r.Provider, r.Status, r.Duration.Round(time.Millisecond),
-					r.TokensIn, r.TokensOut, tpStr)
+					r.TokensIn, r.TokensOut, tpStr, costStr)
 			}
 			return tw.Flush()
 		},
