@@ -30,6 +30,11 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// One connection: SQLite has a single writer anyway, and a pool of
+	// connections turns concurrent writers into SQLITE_BUSY on Windows
+	// even with busy_timeout set. No code path holds a Tx while using the
+	// pool, so this cannot deadlock.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)

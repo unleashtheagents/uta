@@ -190,7 +190,7 @@ func TestLoad_MalformedErrors(t *testing.T) {
 }
 
 func TestPath_Format(t *testing.T) {
-	if got := Path("/tmp/x"); got != "/tmp/x/"+Filename {
+	if got := Path("/tmp/x"); got != filepath.Join("/tmp/x", Filename) {
 		t.Errorf("Path = %q", got)
 	}
 }

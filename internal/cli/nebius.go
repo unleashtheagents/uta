@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/unleashtheagents/uta/internal/paths"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,7 +250,7 @@ multimodal visual analysis — alongside local Claude Code and Google Antigravit
 
 func runNebiusStatus(cmd *cobra.Command, asJSON bool) error {
 	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
+	home, _ := paths.UserHome()
 	rep := buildNebiusStatus(cwd, home)
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())

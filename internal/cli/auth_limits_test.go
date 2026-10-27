@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestCredentialFileEditing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 { // no POSIX modes on Windows
 		t.Errorf("credentials file mode = %o, want 600", st.Mode().Perm())
 	}
 	data, _ := os.ReadFile(path)

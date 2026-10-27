@@ -3,7 +3,7 @@ name: ci
 # Guards main and every pull request:
 #   lint          gofmt, go vet, staticcheck, govulncheck, go mod tidy drift
 #   test          unit + e2e on Linux and macOS (pure Go, CGO_ENABLED=0), coverage summary
-#   test-windows  same suite on Windows (informational until the sh-based paths are ported)
+#   test-windows  same suite on Windows (required)
 #   race          unit tests under the race detector on Linux
 #   build         the full goreleaser matrix as a snapshot (darwin/linux/windows x amd64/arm64),
 #                 smoke-tested, uploaded as artifacts, plus the container image build
@@ -118,10 +118,9 @@ jobs:
           grep -qi 'no file changes' undo.txt
 
   test-windows:
-    # Informational: the hook and run_command paths shell out to sh, which the
-    # Windows runner only has through Git Bash. Build must pass; tests report.
+    # Required. Shell-based paths (run_command, hooks, verify) use the sh that
+    # Git for Windows puts on PATH; POSIX file-mode assertions are skipped.
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -137,6 +136,10 @@ jobs:
         run: go test -count=1 ./...
         env:
           UTA_HOME: ${{ runner.temp }}\uta-home
+      - name: e2e (real binary, stub provider)
+        run: go test -count=1 -tags e2e ./tests/e2e/
+        env:
+          UTA_HOME: ${{ runner.temp }}\uta-home-e2e
 
   race:
     runs-on: ubuntu-latest

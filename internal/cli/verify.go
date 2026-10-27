@@ -125,10 +125,7 @@ func execVerifyCommand(ctx context.Context, cmdline, workdir string, timeout tim
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	shell, flag := "/bin/sh", "-c"
-	if runtime.GOOS == "windows" {
-		shell, flag = "cmd", "/C"
-	}
+	shell, flag := systemShell()
 	c := exec.CommandContext(cctx, shell, flag, cmdline)
 	c.Dir = workdir
 	var buf bytes.Buffer
@@ -198,4 +195,17 @@ func runRepairTurn(ctx context.Context, cfg verifyConfig, failure string) error 
 	bus.Shutdown()
 	<-renderDone
 	return err
+}
+
+// systemShell picks the interpreter for user-supplied command lines: sh
+// everywhere it exists (Git for Windows ships one), cmd as the last resort
+// so a bare Windows box still runs `go test ./...`.
+func systemShell() (shell, flag string) {
+	if runtime.GOOS != "windows" {
+		return "/bin/sh", "-c"
+	}
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p, "-c"
+	}
+	return "cmd", "/C"
 }

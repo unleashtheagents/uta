@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -64,7 +65,7 @@ func TestMissionFmt_WriteIsCanonicalAndIdempotent(t *testing.T) {
 	if !strings.HasPrefix(string(once), "#!/usr/bin/env -S uta mission run\n") {
 		t.Errorf("shebang not preserved:\n%s", once)
 	}
-	if info, _ := os.Stat(path); info.Mode().Perm() != 0o755 {
+	if info, _ := os.Stat(path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Errorf("file mode not preserved: %v", info.Mode().Perm())
 	}
 	// A formatted file is a fixed point: the second pass diffs nothing.

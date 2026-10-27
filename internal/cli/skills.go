@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/unleashtheagents/uta/internal/paths"
 	"os"
 	"text/tabwriter"
 
@@ -49,7 +50,7 @@ sessions.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, _ := os.Getwd()
-			home, _ := os.UserHomeDir()
+			home, _ := paths.UserHome()
 			cat := skills.Discover(cwd, home)
 			it, ok := cat.Find(args[0])
 			if !ok {
@@ -68,7 +69,7 @@ sessions.`,
 
 func runSkillsList(cmd *cobra.Command, asJSON bool) error {
 	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
+	home, _ := paths.UserHome()
 	cat := skills.Discover(cwd, home)
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())

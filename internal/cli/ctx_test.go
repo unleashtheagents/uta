@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -34,6 +35,9 @@ func TestSanitizeCtxName(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "backslash-as-name-on-unix" && runtime.GOOS == "windows" {
+				t.Skip("backslash is a path separator on Windows")
+			}
 			got, err := sanitizeCtxName(tc.in)
 			if tc.wantErr {
 				if err == nil {

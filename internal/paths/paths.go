@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ProjectStateName is the directory uta creates inside a project root.
@@ -34,7 +35,7 @@ func Home() (string, error) {
 		}
 		return h, nil
 	}
-	u, err := os.UserHomeDir()
+	u, err := UserHome()
 	if err != nil {
 		return "", err
 	}
@@ -46,6 +47,17 @@ func Home() (string, error) {
 		return "", err
 	}
 	return p, nil
+}
+
+// UserHome is the user's home directory. HOME wins when set, on every OS,
+// so Git Bash on Windows, containers and tests that point HOME somewhere
+// get the same answer as the shell; otherwise os.UserHomeDir decides
+// (USERPROFILE on Windows).
+func UserHome() (string, error) {
+	if h := os.Getenv("HOME"); h != "" {
+		return h, nil
+	}
+	return os.UserHomeDir()
 }
 
 // DB returns the path to the SQLite database file inside any state dir.
@@ -88,7 +100,7 @@ func FindProjectRoot(start string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	homeDir, _ := os.UserHomeDir()
+	homeDir, _ := UserHome()
 	for {
 		// Don't conflate the global ~/.uta with a project state dir. If we're
 		// AT the user's home directory and a .uta exists there, treat that
@@ -153,11 +165,26 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		cleanup()
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := renameWithRetry(tmpName, path); err != nil {
 		cleanup()
 		return err
 	}
 	return nil
+}
+
+// renameWithRetry replaces path with tmp. On Windows a reader that has the
+// target open makes the rename fail with a sharing violation for a few
+// milliseconds; a handful of short retries hides that without changing the
+// atomic-replace semantics anywhere else.
+func renameWithRetry(tmp, path string) error {
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		if err = os.Rename(tmp, path); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(5+attempt*5) * time.Millisecond)
+	}
+	return err
 }
 
 // CredentialsFile returns the path to the user-level credentials file inside

@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unleashtheagents/uta/internal/paths"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -525,7 +525,7 @@ func handleShellCommand(ctx context.Context, line string, b shellBackend, out, e
 		}
 		fmt.Fprintf(out, "nebius model: %s\n", resolved)
 	case "skills", "rules":
-		home, _ := os.UserHomeDir()
+		home, _ := paths.UserHome()
 		cat := skills.Discover(b.Workdir(), home)
 		if len(cat.Items) == 0 {
 			fmt.Fprintln(out, "no workspace rules or skills discovered.")
@@ -805,10 +805,7 @@ func (s *utaShell) Agents(ctx context.Context, w io.Writer) error {
 }
 
 func (s *utaShell) LocalExec(ctx context.Context, cmdline string) error {
-	sh, flag := "/bin/sh", "-c"
-	if runtime.GOOS == "windows" {
-		sh, flag = "cmd", "/C"
-	}
+	sh, flag := systemShell()
 	c := exec.CommandContext(ctx, sh, flag, cmdline)
 	c.Dir = s.workdir
 	c.Stdout = s.out

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -223,7 +224,7 @@ func TestApplyMCPBridge_PopulatesConfigPathOnSuccessfulProbe(t *testing.T) {
 		t.Skipf("repo root not found: %v", err)
 	}
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "mcp_stub_bin")
+	bin := filepath.Join(tmp, "mcp_stub_bin"+exeSuffix())
 	build := exec.Command("go", "build", "-o", bin, "./tests/mcp_stub")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
@@ -269,7 +270,7 @@ func TestApplyMCPBridgeToResume_HappyPath(t *testing.T) {
 		t.Skipf("repo root not found: %v", err)
 	}
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "mcp_stub_bin")
+	bin := filepath.Join(tmp, "mcp_stub_bin"+exeSuffix())
 	build := exec.Command("go", "build", "-o", bin, "./tests/mcp_stub")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
@@ -304,7 +305,7 @@ func TestApplyMCPBridgeToReflector_HappyPath(t *testing.T) {
 		t.Skipf("repo root not found: %v", err)
 	}
 	tmp := t.TempDir()
-	bin := filepath.Join(tmp, "mcp_stub_bin")
+	bin := filepath.Join(tmp, "mcp_stub_bin"+exeSuffix())
 	build := exec.Command("go", "build", "-o", bin, "./tests/mcp_stub")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
@@ -360,3 +361,11 @@ func errfmt(s string) error { return &simpleErr{s} }
 type simpleErr struct{ s string }
 
 func (e *simpleErr) Error() string { return e.s }
+
+// exeSuffix is what `go build -o` needs on Windows to produce a runnable file.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}

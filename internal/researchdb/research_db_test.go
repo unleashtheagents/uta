@@ -268,7 +268,7 @@ func TestParse_MalformedFrontmatterErrors(t *testing.T) {
 
 func TestPath_Format(t *testing.T) {
 	got := Path("/tmp/ctx")
-	want := "/tmp/ctx/" + Filename
+	want := filepath.Join("/tmp/ctx", Filename)
 	if got != want {
 		t.Errorf("Path = %q, want %q", got, want)
 	}

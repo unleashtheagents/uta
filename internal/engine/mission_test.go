@@ -350,6 +350,10 @@ func TestRunMission_ParForRunsBranchesConcurrently(t *testing.T) {
 	var mu sync.Mutex
 	var prompts []string
 	inflight, peak := 0, 0
+	// Every branch waits (up to a deadline) for the others to arrive, so
+	// the overlap check does not depend on how fast the walk sets each
+	// branch up (SQLite on a slow CI disk can take longer than any sleep).
+	allIn := make(chan struct{})
 	prov := &fakeProvider{name: "claude", run: func(_ context.Context, prompt string, _ provider.RunOptions, _ chan<- provider.Event) (provider.RunResult, error) {
 		mu.Lock()
 		prompts = append(prompts, prompt)
@@ -357,8 +361,14 @@ func TestRunMission_ParForRunsBranchesConcurrently(t *testing.T) {
 		if inflight > peak {
 			peak = inflight
 		}
+		if inflight == 3 {
+			close(allIn)
+		}
 		mu.Unlock()
-		time.Sleep(30 * time.Millisecond)
+		select {
+		case <-allIn:
+		case <-time.After(2 * time.Second):
+		}
 		mu.Lock()
 		inflight--
 		mu.Unlock()
