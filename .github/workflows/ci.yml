@@ -30,8 +30,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Latest stable patch release, not the go.mod floor: govulncheck
           # flags stdlib CVEs fixed in newer patch releases, and users get
@@ -62,8 +62,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Latest stable patch release, not the go.mod floor: govulncheck
           # flags stdlib CVEs fixed in newer patch releases, and users get
@@ -82,7 +82,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           go tool cover -func=coverage.out | sort -k3 -n | awk 'NR<=15' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}
           path: coverage.out
@@ -122,8 +122,8 @@ jobs:
     # Git for Windows puts on PATH; POSIX file-mode assertions are skipped.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Latest stable patch release, not the go.mod floor: govulncheck
           # flags stdlib CVEs fixed in newer patch releases, and users get
@@ -144,8 +144,8 @@ jobs:
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Latest stable patch release, not the go.mod floor: govulncheck
           # flags stdlib CVEs fixed in newer patch releases, and users get
@@ -161,10 +161,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Latest stable patch release, not the go.mod floor: govulncheck
           # flags stdlib CVEs fixed in newer patch releases, and users get
@@ -172,7 +172,7 @@ jobs:
           go-version: stable
           check-latest: true
       - name: goreleaser snapshot (full matrix, no publish)
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --snapshot --clean --skip=publish
@@ -184,7 +184,7 @@ jobs:
           ls -la dist/*.tar.gz dist/*.zip dist/checksums.txt
           echo "### Release matrix" >> "$GITHUB_STEP_SUMMARY"
           (cd dist && ls -1 *.tar.gz *.zip | sed 's/^/- /') >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: uta-snapshot-${{ github.sha }}
           path: |
@@ -193,7 +193,7 @@ jobs:
             dist/checksums.txt
           retention-days: 7
       - name: container image (build only)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
