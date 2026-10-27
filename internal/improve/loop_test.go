@@ -121,8 +121,8 @@ func TestApplyProfile_PopulatesLoopFields(t *testing.T) {
 			HITLTokenThreshold: 80,
 			HITLSeverity:       "high",
 		},
-		Memory:           profile.MemoryConfig{Consolidate: true, TopK: 5},
-		OnComplete:       []profile.Handoff{{TargetMode: "ops", PromptTemplate: "deploy"}},
+		Memory:          profile.MemoryConfig{Consolidate: true, TopK: 5},
+		OnComplete:      []profile.Handoff{{TargetMode: "ops", PromptTemplate: "deploy"}},
 		MaxHandoffDepth: 3,
 	}
 	req := &LoopRequest{PreApproveTools: []string{"Read", "Bash(rm *)"}}
