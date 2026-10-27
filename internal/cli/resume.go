@@ -83,7 +83,7 @@ the follow-up instructions.`,
 			recorder := trajectory.NewRecorder(app.Store)
 			deps := engine.Deps{
 				Store: app.Store, Blobs: app.Blobs, Recorder: recorder,
-				Bus: bus, Registry: app.Registry,
+				Bus: bus, Registry: app.Registry, Usage: app.Usage,
 				Memory:     memory.NewFromEnv(app.Store.DB),
 				Whiteboard: whiteboard.New(app.Store.DB),
 			}

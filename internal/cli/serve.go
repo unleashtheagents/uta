@@ -389,7 +389,7 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		recorder := trajectory.NewRecorder(app.Store)
 		sup := engine.New(engine.Deps{
 			Store: app.Store, Blobs: app.Blobs, Recorder: recorder,
-			Bus: bus, Registry: app.Registry,
+			Bus: bus, Registry: app.Registry, Usage: app.Usage,
 			Memory:     memory.NewFromEnv(app.Store.DB),
 			Whiteboard: whiteboard.New(app.Store.DB),
 		})
@@ -465,7 +465,7 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		recorder := trajectory.NewRecorder(app.Store)
 		sup := engine.New(engine.Deps{
 			Store: app.Store, Blobs: app.Blobs, Recorder: recorder,
-			Bus: bus, Registry: app.Registry,
+			Bus: bus, Registry: app.Registry, Usage: app.Usage,
 			Memory:     memory.NewFromEnv(app.Store.DB),
 			Whiteboard: whiteboard.New(app.Store.DB),
 		})
@@ -584,7 +584,7 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		sup := engine.New(engine.Deps{
 			Store: app.Store, Blobs: app.Blobs,
 			Recorder: trajectory.NewRecorder(app.Store),
-			Bus:      bus, Registry: app.Registry,
+			Bus:      bus, Registry: app.Registry, Usage: app.Usage,
 		})
 		res, err := sup.RunMission(ctx, engine.MissionRequest{
 			Program:         prog,

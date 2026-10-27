@@ -378,7 +378,7 @@ func newMissionRunCmd() *cobra.Command {
 				Blobs:    app.Blobs,
 				Recorder: trajectory.NewRecorder(app.Store),
 				Bus:      bus,
-				Registry: app.Registry,
+				Registry: app.Registry, Usage: app.Usage,
 			})
 
 			if resumeSession != "" {

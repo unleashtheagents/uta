@@ -51,6 +51,33 @@ type Deps struct {
 	// nil, the supervisor skips the planner-prompt "shared notes from
 	// other modes" injection. CLI front-ends wire this from store.DB.
 	Whiteboard *whiteboard.Store
+	// Usage is the user-level spend guard. Optional — when nil, calls are
+	// neither limited nor recorded beyond the per-run budget. CLI
+	// front-ends wire a limits.Guard backed by ~/.uta/limits.yaml and the
+	// usage ledger so daily / monthly caps hold across projects.
+	Usage UsageHook
+}
+
+// UsageHook is consulted around every provider call. BeforeCall returning
+// an error aborts the call (the error should wrap provider.ErrQuota so
+// failover and retry policy treat it like an upstream quota refusal);
+// AfterCall records what the call consumed.
+type UsageHook interface {
+	BeforeCall(ctx context.Context, providerName string) error
+	AfterCall(ctx context.Context, rec UsageRecord)
+}
+
+// UsageRecord is what AfterCall receives for one provider call.
+type UsageRecord struct {
+	Ts        time.Time
+	Provider  string
+	Role      provider.Role
+	SessionID string
+	SubtaskID string
+	TokensIn  int64
+	TokensOut int64
+	USDCents  int64
+	Err       error
 }
 
 // RunRequest is what the user (via CLI flags or a YAML workflow) is asking
@@ -832,6 +859,16 @@ func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID stri
 		hState = &hitlState{triggers: capability.NewGate(nil, nil)}
 	}
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if s.deps.Usage != nil {
+			if limitErr := s.deps.Usage.BeforeCall(ctx, prov.Name()); limitErr != nil {
+				s.emit(sessionID, subtaskID, trajectory.BudgetExhausted, map[string]any{
+					"scope":    "provider_limit",
+					"provider": prov.Name(),
+					"error":    limitErr.Error(),
+				})
+				return provider.RunResult{}, limitErr
+			}
+		}
 		events := make(chan provider.Event, 64)
 		drainDone := make(chan struct{})
 		go func() {
@@ -844,6 +881,14 @@ func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID stri
 		result, err := prov.RunHeadless(ctx, prompt, opts, events)
 		close(events)
 		<-drainDone
+		if s.deps.Usage != nil && (result.TokensIn > 0 || result.TokensOut > 0 || result.ApproxUSDCents > 0) {
+			s.deps.Usage.AfterCall(ctx, UsageRecord{
+				Ts: time.Now(), Provider: prov.Name(), Role: opts.Role,
+				SessionID: sessionID, SubtaskID: subtaskID,
+				TokensIn: result.TokensIn, TokensOut: result.TokensOut,
+				USDCents: result.ApproxUSDCents, Err: err,
+			})
+		}
 
 		// Charge usage to the budget regardless of err — the provider may
 		// have racked up tokens even on a partial failure. AddOutcome

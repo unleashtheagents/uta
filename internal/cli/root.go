@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/config"
+	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/orgstate"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/provider"
@@ -67,6 +68,9 @@ type App struct {
 	Blobs        *store.Blobs
 	Registry     *provider.Registry
 	UserPersonas []*config.Persona
+	// Usage is the user-level spend guard (~/.uta/limits.yaml + usage
+	// ledger), handed to every engine.Deps so caps hold across projects.
+	Usage engine.UsageHook
 }
 
 func (a *App) Close() {
@@ -110,6 +114,7 @@ func newApp(_ context.Context) (*App, error) {
 	// project detection entirely when the user has explicitly set it — that
 	// preserves the v0.2 ergonomics for ad-hoc runs.
 	app := &App{GlobalHome: globalHome, StateDir: globalHome}
+	app.Usage = loadUsageGuard(globalHome, os.Stderr)
 	if os.Getenv("UTA_HOME") == "" {
 		cwd, _ := os.Getwd()
 		if root, ok := paths.FindProjectRoot(cwd); ok {
@@ -231,7 +236,7 @@ func Execute() {
 		&cobra.Group{ID: "data", Title: "Memory & Data:"},
 		&cobra.Group{ID: "integrate", Title: "Integrations:"},
 	)
-	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newProvidersCmd(), newNebiusCmd())
+	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newAuthCmd(), newLimitsCmd(), newProvidersCmd(), newNebiusCmd())
 	addTo("orchestrate", newRunCmd(), newPRCmd(), newShellCmd(), newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
 	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newReplayCmd(), newBenchCmd(), newPerfCmd(), newDashCmd())
 	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd(), newSkillsCmd())

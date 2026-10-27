@@ -115,7 +115,7 @@ func makeEvalRunner(app *App) eval.RunFunc {
 		sup := engine.New(engine.Deps{
 			Store: app.Store, Blobs: app.Blobs,
 			Recorder: trajectory.NewRecorder(app.Store),
-			Bus:      bus, Registry: app.Registry,
+			Bus:      bus, Registry: app.Registry, Usage: app.Usage,
 			Memory:     memory.NewFromEnv(app.Store.DB),
 			Whiteboard: whiteboard.New(app.Store.DB),
 		})

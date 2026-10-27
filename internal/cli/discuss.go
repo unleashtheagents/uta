@@ -152,7 +152,7 @@ The debate is recorded as a normal session: each turn is a subtask, so
 				Blobs:    app.Blobs,
 				Recorder: trajectory.NewRecorder(app.Store),
 				Bus:      bus,
-				Registry: app.Registry,
+				Registry: app.Registry, Usage: app.Usage,
 			}
 			start := time.Now()
 			res, runErr := engine.New(deps).Discuss(ctx, req)

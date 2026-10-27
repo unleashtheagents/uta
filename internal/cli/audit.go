@@ -290,11 +290,11 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 
 			recorder := trajectory.NewRecorder(app.Store)
 			sup := engine.New(engine.Deps{
-				Store:      app.Store,
-				Blobs:      app.Blobs,
-				Recorder:   recorder,
-				Bus:        bus,
-				Registry:   app.Registry,
+				Store:    app.Store,
+				Blobs:    app.Blobs,
+				Recorder: recorder,
+				Bus:      bus,
+				Registry: app.Registry, Usage: app.Usage,
 				Memory:     memory.NewFromEnv(app.Store.DB),
 				Whiteboard: whiteboard.New(app.Store.DB),
 			})
