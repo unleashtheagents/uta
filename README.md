@@ -81,14 +81,17 @@ uta mission fmt examples/hello.steer                  # canonical formatting (di
 #### What the coordinator actually does
 
 1. **Role-tier routing, executed by the engine.** Every provider call carries its orchestration role (planner, worker, synthesis, judge, compact, sentinel). With `--worker nebius` the Supervisor plans and synthesizes on **Nemotron 3 Ultra**, fans subtasks out to **Nemotron 3 Super**, and judges with Ultra — without any `[model:…]` tags in prompts. `NEBIUS_MODEL=<tier>` or an inline `[model:ultra]` pins a model; `UTA_NEBIUS_ROUTING=0` turns routing off. The trajectory's `session_id` events record `role` and `routing` so you can prove which tier ran each call.
-2. **Agentic tool loop on a real repository.** Worker turns get `read_file`, `list_dir` and `tavily_search` by default, so Nemotron can inspect the repo and ground itself in live web sources without any flags. `--pre-approve "*"` (or `UTA_NEBIUS_AGENTIC=1`) adds `write_file`, `edit_file` and `run_command` for full autonomy, gated by the sentinel; every call and result is recorded in SQLite. Tool calls stream too.
+2. **Agentic tool loop on a real repository.** Nemotron gets nine tools: `read_file`, `list_dir`, `search_files` (regex, like `grep -rn`), `glob` (`**/*.go`), `tavily_search`, `tavily_extract` (read a page in full), `write_file`, `edit_file` (unique-match replace, refuses ambiguous targets) and `run_command`. Read-only tools run without asking; the rest go through the permissions gate below and the Lightning sentinel. Every call, result and file diff is recorded in SQLite, and the progress view shows each tool call and a colored diff of each edit as it happens.
 3. **Nemotron Lightning sentinel.** Before any tool call that can change the workspace or run code, **Nemotron 3.5 Lightning** returns a PASS/FAIL verdict (reasoning off, temperature 0, 8 tokens). FAIL blocks the call, the agent sees the refusal as its tool result, and a `sentinel_alert` lands in the trajectory and in `uta dash`. Live on Token Factory a `curl … | sh` was blocked in 216 ms. `UTA_NEBIUS_SENTINEL=0` disables.
 4. **Per-tier reasoning policy.** Nemotron 3 thinks by default; `uta` sets `reasoning_effort` per tier (Ultra high, Super medium, Nano low, Lightning none), keeps `reasoning_content` out of answers (recorded as a `reasoning` event), strips leaked `<think>` blocks and reports reasoning and prompt-cache tokens per turn. `UTA_NEBIUS_REASONING_EFFORT` overrides.
 5. **Real dollar budgets and a cost report.** Built-in Nemotron list prices make `budget … $1` in steer and `--budget-usd` in `uta run` enforce on Nebius calls. `uta nebius cost <session>` folds a run into tokens and USD per tier and role and compares it with an all-Ultra counterfactual — a live coding run came out at $0.0123 vs $0.0271, a 54.7% saving.
 6. **Robust on the shared endpoint.** Retries with backoff on 429/5xx (honouring `Retry-After`, `UTA_NEBIUS_MAX_RETRIES`), `NEBIUS_SERVICE_TIER` passthrough, and incremental SSE streaming so answers appear as Nemotron generates them.
 7. **Keys and spend caps as first-class config.** `uta auth set nebius` stores the key in `~/.uta/credentials.env` (0600, outside every repo, prompted without echo). `uta limits set nebius --daily-usd 5 --monthly-usd 50` caps what the key may spend across every project on the machine; every call is ledgered and refused with a quota error once a cap is hit.
 8. **Tavily grounding.** `uta nebius search` and the `tavily_search` tool call `POST https://api.tavily.com/search` live; both persist citations to `.uta/context/RESEARCH_DATABASE.md`, and the cost report and run footer count Tavily searches per run.
-9. **Rules, skills and `@file` context.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md` and progressive `SKILL.md` skills are discovered and injected (`UTA_NEBIUS_INJECT_RULES=1`); `@path/to/file` mentions expand before the turn is sent.
+9. **Rules, skills and `@file` context.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md` and progressive `SKILL.md` skills are discovered and injected (`UTA_NEBIUS_INJECT_RULES=1`); `@path/to/file` and `@dir/` mentions attach the file or listing before the turn is sent, in the shell for every worker.
+10. **Permissions, prompts and hooks.** `.uta/permissions.yaml` (per repo) and `~/.uta/permissions.yaml` (global) hold `allow` / `ask` / `deny` patterns in the `tool(glob)` grammar uta already uses for mission profiles: `run_command(go test *)`, `write_file(.env*)`. Deny beats ask beats allow; unmatched write/edit/run calls ask. In a terminal the prompt offers **[y] once, [s] this run, [a] always** (which saves the rule); piped runs deny with the exact `uta permissions allow '...'` to add. `pre_tool` hooks can block a call (exit 2) and `post_tool` hooks can push lint or test feedback back to the model (exit 2). `uta permissions init|status|allow|ask|deny`.
+11. **Checkpoints and undo.** Before any `write_file` or `edit_file` the gate snapshots the file into the content-addressed blob store and records a checkpoint on the session. `uta undo [session]` restores every touched file (new files removed), `uta undo --diff` shows the net change, `--dry-run` and `--list` preview. In the shell: `/diff`, `/rewind`.
+12. **Vision with Nemotron Super-VL.** `uta nebius see shot.png "what is wrong here"` and the shell's `/image` send a screenshot, diagram or photo to **Nemotron 3.5 Super-VL**; the shell attaches the answer to your next goal, so "fix what this screenshot shows" works. Counted against the daily cap like every other call.
 
 ```sh
 uta auth set nebius                                   # store the Token Factory key (prompted, no echo)
@@ -100,7 +103,12 @@ uta nebius models                                     # the five Nemotron tiers 
 uta nebius route "design a 90/10 multi-agent router with Nemotron"
 uta nebius search "NVIDIA Nemotron 3 Mamba-2 MoE benchmarks"
 
-uta run -g "add a table-driven test for internal/paths and run go test ./..." --worker nebius --pre-approve "*" -y
+uta run -g "add a table-driven test for internal/paths and run go test ./..." --worker nebius   # asks before each write / command
+uta permissions init                                  # starter .uta/permissions.yaml: allow go test, deny rm -rf, hooks
+uta permissions allow 'run_command(go test *)'        # or answer [a]lways at the prompt
+uta undo --diff                                       # what the last run changed; uta undo restores it
+uta nebius see shot.png "what is broken in this UI?"  # Nemotron Super-VL reads the image
+uta nebius extract https://docs.nebius.com/...        # Tavily Extract: read a page in full
 uta nebius cost <session-id>                          # tokens and USD per tier/role vs all-Ultra
 uta run -f examples/hello-nemotron/uta.yaml -y        # four Nemotron tiers in parallel
 uta run -g "<big task>" --worker nebius --compact-over 6000 -y   # Nano compacts long worker outputs before Ultra synthesizes
@@ -108,9 +116,9 @@ uta mission run examples/nebius-nemotron.steer        # steer mission on Nebius
 uta bench                                             # latency, throughput and cost side by side
 ```
 
-Environment knobs: `NEBIUS_API_KEY`, `NEBIUS_MODEL`, `NEBIUS_BASE_URL`, `NEBIUS_SYSTEM_PROMPT`, `NEBIUS_STREAM`, `NEBIUS_SERVICE_TIER`, `UTA_NEBIUS_ROUTING`, `UTA_NEBIUS_SENTINEL`, `UTA_NEBIUS_SENTINEL_MODEL`, `UTA_NEBIUS_REASONING_EFFORT`, `UTA_NEBIUS_MAX_TOKENS`, `UTA_NEBIUS_TEMPERATURE`, `UTA_NEBIUS_MAX_RETRIES`, `UTA_NEBIUS_AGENTIC`, `UTA_NEBIUS_INJECT_RULES`, `UTA_NEBIUS_PRICING`, `UTA_NEBIUS_{INPUT,OUTPUT}_CENTS_PER_KTOK`.
+Environment knobs: `NEBIUS_API_KEY`, `NEBIUS_MODEL`, `NEBIUS_BASE_URL`, `NEBIUS_SYSTEM_PROMPT`, `NEBIUS_STREAM`, `NEBIUS_SERVICE_TIER`, `UTA_NEBIUS_ROUTING`, `UTA_NEBIUS_SENTINEL`, `UTA_NEBIUS_SENTINEL_MODEL`, `UTA_NEBIUS_REASONING_EFFORT`, `UTA_NEBIUS_MAX_TOKENS`, `UTA_NEBIUS_TEMPERATURE`, `UTA_NEBIUS_MAX_RETRIES`, `UTA_NEBIUS_AGENTIC`, `UTA_NEBIUS_INJECT_RULES`, `UTA_NEBIUS_PRICING`, `UTA_NEBIUS_{INPUT,OUTPUT}_CENTS_PER_KTOK`, `UTA_NEBIUS_VISION_MODEL`, `UTA_TOOL_PROMPT=0` (never prompt; ask rules deny).
 
-> **Nebius × NVIDIA Global AI Hackathon (Aug 26 – Oct 30, 2026) Updates:** Built the native `nebius` Token Factory provider for all 5 Nemotron tiers with role-tier routing executed by the engine, the agentic tool loop (`read_file`, `write_file`, `edit_file`, `list_dir`, `run_command`, `tavily_search`), the Nemotron Lightning sentinel, the per-tier reasoning policy, built-in list prices with enforced dollar budgets, `uta nebius` (`status`, `models`, `route`, `search`, `ping`, `cost`), `uta auth` and `uta limits`, retries and live streaming, Tavily grounding, unified `agy`/`claude` rules and skills discovery, shell slash commands and dashboard cards, and the `examples/hello-nemotron` sample project. See [`docs/DEVPOST-NEBIUS-HACKATHON.md`](docs/DEVPOST-NEBIUS-HACKATHON.md).
+> **Nebius × NVIDIA Global AI Hackathon (Aug 26 – Oct 30, 2026) Updates:** Built the native `nebius` Token Factory provider for all 5 Nemotron tiers with role-tier routing executed by the engine, the agentic tool loop (`read_file`, `list_dir`, `search_files`, `glob`, `write_file`, `edit_file`, `run_command`, `tavily_search`, `tavily_extract`), the permissions gate (`.uta/permissions.yaml`, interactive allow/always prompts, pre/post hooks), file checkpoints with `uta undo`, Nemotron Super-VL vision (`uta nebius see`, `/image`), the Nemotron Lightning sentinel, the per-tier reasoning policy, built-in list prices with enforced dollar budgets, `uta nebius` (`status`, `models`, `route`, `search`, `ping`, `cost`), `uta auth` and `uta limits`, retries and live streaming, Tavily grounding, unified `agy`/`claude` rules and skills discovery, shell slash commands and dashboard cards, and the `examples/hello-nemotron` sample project. See [`docs/DEVPOST-NEBIUS-HACKATHON.md`](docs/DEVPOST-NEBIUS-HACKATHON.md).
 
 `uta pr` runs an autonomous dev mission on a dedicated Git branch (`uta/<slug>`), validates it against verification gates, commits changes, and opens a Pull Request via `gh pr create` with a structured trajectory summary.
 
@@ -124,8 +132,9 @@ moderator synthesizes agreements, disagreements, and a verdict. See
 `uta shell` is a persistent, terminal-style prompt on top of the same
 engine: type a goal and it fans out; type again and the conversation
 continues. Its slash commands are a superset of what the underlying agent
-CLIs offer — `/model`, `/tools`, `/clear` work like in claude/agy, plus
-uta-level control like `/worker`, `/mode`, `/agents`, and `@agy <goal>`
+CLIs offer — `/model`, `/tools`, `/clear`, `@file` mentions, `/image`,
+`/diff` and `/rewind` work like in claude/agy, plus uta-level control like
+`/worker`, `/mode`, `/agents`, `/cost`, `/permissions`, and `@agy <goal>`
 to route one turn to a specific agent. See [`docs/shell.md`](docs/shell.md).
 
 `uta mission` is the v0 interpreter for **steer**, the programming language

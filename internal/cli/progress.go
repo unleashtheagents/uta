@@ -255,9 +255,45 @@ func (r *Renderer) handle(ev trajectory.Event) {
 		}
 		r.dotLocked("")
 
-	case trajectory.SubtaskStdout,
-		trajectory.SubtaskToolCall,
-		trajectory.SubtaskToolResult:
+	case trajectory.SubtaskToolCall:
+		// Single-stream case: name the tool and its argument so the user
+		// sees what the agent is doing, Claude Code style. Parallel runs
+		// keep dots.
+		if r.phase != "" && len(r.running) == 1 && r.running[ev.SubtaskID] {
+			var p struct {
+				Tool      string `json:"tool_name"`
+				Arguments string `json:"arguments"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err == nil && p.Tool != "" {
+				r.toolCallLocked(p.Tool, toolArgSummary(p.Arguments))
+				return
+			}
+		}
+		r.dotLocked("")
+
+	case trajectory.SubtaskToolResult:
+		if r.phase != "" && len(r.running) == 1 && r.running[ev.SubtaskID] {
+			var p struct {
+				Tool    string `json:"tool_name"`
+				Output  string `json:"output"`
+				IsError bool   `json:"is_error"`
+				Diff    string `json:"diff"`
+				Path    string `json:"path"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err == nil {
+				switch {
+				case p.Diff != "":
+					r.diffLocked(p.Diff)
+					return
+				case p.IsError:
+					r.interjectLocked(r.red("  ✗ " + p.Tool + ": " + firstLine(p.Output)))
+					return
+				}
+			}
+		}
+		r.dotLocked("")
+
+	case trajectory.SubtaskStdout:
 		r.dotLocked("")
 
 	case trajectory.SubtaskCompleted:
@@ -304,8 +340,25 @@ func (r *Renderer) handle(ev trajectory.Event) {
 		r.interjectLocked(r.red("✗ " + msg))
 
 	case trajectory.CapabilityGateDenied:
-		// Yellow "x" marks a tool call the active MissionProfile's
-		// capability gate denied. The full payload is in the trajectory.
+		// A tool call the permissions gate or the active MissionProfile's
+		// capability gate denied. Name it; the full payload is in the trajectory.
+		var p struct {
+			Tool    string `json:"tool"`
+			Summary string `json:"summary"`
+			Reason  string `json:"reason"`
+			Source  string `json:"source"`
+		}
+		if err := json.Unmarshal(ev.Payload, &p); err == nil && p.Tool != "" {
+			line := fmt.Sprintf("denied %s", p.Tool)
+			if p.Summary != "" {
+				line += ": " + truncateRunes(p.Summary, 80)
+			}
+			if p.Reason != "" {
+				line += " (" + truncateRunes(p.Reason, 100) + ")"
+			}
+			r.interjectLocked(r.yellow("⊘ " + line))
+			return
+		}
 		r.dotLocked(r.yellow("x"))
 
 	case trajectory.SynthesisStarted:
@@ -369,5 +422,67 @@ func (r *Renderer) finish() {
 	if r.phase != "" {
 		fmt.Fprintln(r.w)
 		r.phase = ""
+	}
+}
+
+// toolArgSummary pulls the one argument worth showing for a tool call.
+func toolArgSummary(arguments string) string {
+	var args map[string]any
+	if json.Unmarshal([]byte(arguments), &args) != nil {
+		return ""
+	}
+	for _, k := range []string{"command", "path", "query", "pattern"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return truncateRunes(strings.TrimSpace(v), 100)
+		}
+	}
+	if v, ok := args["urls"].([]any); ok && len(v) > 0 {
+		if u, ok := v[0].(string); ok {
+			return truncateRunes(u, 100)
+		}
+	}
+	return ""
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// toolCallLocked prints "  ⚙ run_command go test ./..." on its own line.
+func (r *Renderer) toolCallLocked(tool, arg string) {
+	fmt.Fprintln(r.w)
+	if arg != "" {
+		fmt.Fprintf(r.w, "  %s %s %s\n", r.dim("⚙"), r.bold(tool), r.dim(arg))
+	} else {
+		fmt.Fprintf(r.w, "  %s %s\n", r.dim("⚙"), r.bold(tool))
+	}
+}
+
+// diffLocked prints a unified diff with +/- coloring, capped so a large
+// rewrite does not flood the terminal.
+func (r *Renderer) diffLocked(diff string) {
+	const maxLines = 60
+	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	for i, ln := range lines {
+		if i >= maxLines {
+			fmt.Fprintf(r.w, "    %s\n", r.dim(fmt.Sprintf("… %d more diff lines (/diff shows all)", len(lines)-maxLines)))
+			break
+		}
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+			fmt.Fprintf(r.w, "    %s\n", r.bold(ln))
+		case strings.HasPrefix(ln, "@@"):
+			fmt.Fprintf(r.w, "    %s\n", r.cyan(ln))
+		case strings.HasPrefix(ln, "+"):
+			fmt.Fprintf(r.w, "    %s\n", r.green(ln))
+		case strings.HasPrefix(ln, "-"):
+			fmt.Fprintf(r.w, "    %s\n", r.red(ln))
+		default:
+			fmt.Fprintf(r.w, "    %s\n", r.dim(ln))
+		}
 	}
 }

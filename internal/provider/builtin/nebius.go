@@ -818,8 +818,42 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 
 			var toolOutput string
 			var isErr bool
-			verdict := n.sentinelCheck(ctx, client, apiKey, baseURL, tc, opts)
-			if verdict.Blocked {
+			var outcome nebiusToolOutcome
+			var verdict sentinelVerdict
+			gateReq := provider.ToolRequest{
+				Tool:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+				Summary:   nebiusToolSummary(tc),
+				Workdir:   opts.Workdir,
+			}
+			gated := false
+			if opts.ToolGate != nil {
+				decision, gerr := opts.ToolGate.Check(ctx, gateReq)
+				if gerr != nil {
+					return provider.RunResult{}, fmt.Errorf("nebius tool gate: %w", gerr)
+				}
+				if !decision.Allow {
+					gated = true
+					toolOutput = fmt.Sprintf("denied by uta permissions (%s): %s", decision.Source, decision.Reason)
+					isErr = true
+					if events != nil {
+						pl, _ := json.Marshal(map[string]any{
+							"tool":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+							"summary":   gateReq.Summary,
+							"reason":    decision.Reason,
+							"source":    decision.Source,
+						})
+						events <- provider.Event{Kind: provider.EventToolDenied, Timestamp: time.Now(), Payload: pl}
+					}
+				}
+			}
+			if !gated {
+				verdict = n.sentinelCheck(ctx, client, apiKey, baseURL, tc, opts)
+			}
+			if gated {
+				// nothing to execute
+			} else if verdict.Blocked {
 				toolOutput = fmt.Sprintf("blocked by Nemotron sentinel (%s, %d ms): %s", verdict.Model, verdict.LatencyMS, verdict.Reason)
 				isErr = true
 				if events != nil {
@@ -839,15 +873,26 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 					}
 				}
 			} else {
-				toolOutput, isErr = executeNebiusToolCall(ctx, tc, opts)
+				outcome = executeNebiusTool(ctx, tc, opts)
+				toolOutput, isErr = outcome.Output, outcome.IsErr
+				if opts.ToolGate != nil {
+					if extra := opts.ToolGate.After(ctx, gateReq, toolOutput, isErr); strings.TrimSpace(extra) != "" {
+						toolOutput += "\n\n" + extra
+					}
+				}
 			}
 
 			if events != nil {
 				trMap := map[string]any{
 					"tool_call_id": tc.ID,
 					"tool_name":    tc.Function.Name,
+					"summary":      gateReq.Summary,
 					"output":       toolOutput,
 					"is_error":     isErr,
+				}
+				if outcome.Diff != "" {
+					trMap["diff"] = outcome.Diff
+					trMap["path"] = outcome.Path
 				}
 				if verdict.Checked {
 					trMap["sentinel"] = verdict.Status

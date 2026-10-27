@@ -27,8 +27,26 @@ type fakeShellBackend struct {
 	tools    []string
 	workdir  string
 	newCalls int
-	missions []string // RunMissionFile calls as "run:path" / "check:path"
+	missions []string        // RunMissionFile calls as "run:path" / "check:path"
+	agents   map[string]bool // HasAgent answers; nil means every name is an agent
+	images   []string        // Vision calls as "path|prompt"
 }
+
+func (f *fakeShellBackend) HasAgent(name string) bool {
+	if f.agents == nil {
+		return true
+	}
+	return f.agents[name]
+}
+func (f *fakeShellBackend) Vision(_ context.Context, w io.Writer, path, prompt string) error {
+	f.images = append(f.images, path+"|"+prompt)
+	fmt.Fprintln(w, "vision ok")
+	return nil
+}
+func (f *fakeShellBackend) Diff(w io.Writer) error        { fmt.Fprintln(w, "diff ok"); return nil }
+func (f *fakeShellBackend) Rewind(w io.Writer) error      { fmt.Fprintln(w, "rewind ok"); return nil }
+func (f *fakeShellBackend) Cost(w io.Writer) error        { fmt.Fprintln(w, "cost ok"); return nil }
+func (f *fakeShellBackend) Permissions(w io.Writer) error { fmt.Fprintln(w, "perms ok"); return nil }
 
 func (f *fakeShellBackend) ExecTurn(_ context.Context, goal string) error {
 	f.turns = append(f.turns, goal)
@@ -480,5 +498,38 @@ func TestUtaShell_SetModelSpecForms(t *testing.T) {
 	s.worker = "custom-wrapper"
 	if got := s.Model(); got != "MY_MODEL=some-model" {
 		t.Errorf("other worker's pin should survive, got %q", got)
+	}
+}
+
+func TestDispatch_AtFileGoesToWorkerWhenNotAnAgent(t *testing.T) {
+	f := &fakeShellBackend{agents: map[string]bool{"gemini": true}}
+	dispatch(t, f, "@main.go explain this file")
+	if len(f.turnsAs) != 0 || len(f.turns) != 1 || f.turns[0] != "@main.go explain this file" {
+		t.Fatalf("file ref should go to ExecTurn untouched (the backend expands it): turns=%v turnsAs=%v", f.turns, f.turnsAs)
+	}
+	dispatch(t, f, "@gemini check it")
+	if len(f.turnsAs) != 1 {
+		t.Fatalf("known agent still routes: %v", f.turnsAs)
+	}
+}
+
+func TestDispatch_NewShellCommands(t *testing.T) {
+	f := &fakeShellBackend{}
+	for _, c := range []struct{ line, want string }{
+		{"/diff", "diff ok"}, {"/rewind", "rewind ok"}, {"/undo", "rewind ok"},
+		{"/cost", "cost ok"}, {"/permissions", "perms ok"},
+		{"/image shot.png what is wrong", "vision ok"},
+	} {
+		out, errw, _ := dispatch(t, f, c.line)
+		if !strings.Contains(out, c.want) || errw != "" {
+			t.Errorf("%s: out=%q errw=%q", c.line, out, errw)
+		}
+	}
+	if len(f.images) != 1 || f.images[0] != "shot.png|what is wrong" {
+		t.Fatalf("images = %v", f.images)
+	}
+	_, errw, _ := dispatch(t, f, "/image")
+	if !strings.Contains(errw, "usage: /image") {
+		t.Fatalf("usage expected, got %q", errw)
 	}
 }

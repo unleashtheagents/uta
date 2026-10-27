@@ -71,6 +71,18 @@ type shellBackend interface {
 	// attached conversation is left untouched.
 	RunMissionFile(ctx context.Context, path string, checkOnly bool) error
 	Status(w io.Writer)
+	// HasAgent reports whether name is a registered provider, so "@x text"
+	// can be told apart from an @file reference.
+	HasAgent(name string) bool
+	// Vision sends an image to the vision tier and keeps the answer as
+	// context for the next turn.
+	Vision(ctx context.Context, w io.Writer, imagePath, prompt string) error
+	// Diff shows what the last run changed; Rewind restores it; Cost shows
+	// what it cost.
+	Diff(w io.Writer) error
+	Rewind(w io.Writer) error
+	Cost(w io.Writer) error
+	Permissions(w io.Writer) error
 }
 
 func newShellCmd() *cobra.Command {
@@ -234,7 +246,7 @@ func dispatchShellLine(ctx context.Context, line string, b shellBackend, out, er
 			fmt.Fprintln(errw, "!:", err)
 		}
 		return false
-	case strings.HasPrefix(line, "@"):
+	case strings.HasPrefix(line, "@") && isAgentRoute(line, b):
 		rest := strings.TrimSpace(line[1:])
 		agent, goal, _ := strings.Cut(rest, " ")
 		goal = strings.TrimSpace(goal)
@@ -255,6 +267,19 @@ func dispatchShellLine(ctx context.Context, line string, b shellBackend, out, er
 		}
 		return false
 	}
+}
+
+// isAgentRoute decides whether a line starting with "@" addresses an agent
+// ("@gemini check this") or references a file ("@main.go explain this").
+// Known agent names win; anything else is a file reference and goes to the
+// active worker with the file attached.
+func isAgentRoute(line string, b shellBackend) bool {
+	rest := strings.TrimSpace(line[1:])
+	name, _, _ := strings.Cut(rest, " ")
+	if name == "" {
+		return true // let the usage message fire
+	}
+	return b.HasAgent(name)
 }
 
 func handleShellCommand(ctx context.Context, line string, b shellBackend, out, errw io.Writer) {
@@ -397,6 +422,30 @@ func handleShellCommand(ctx context.Context, line string, b shellBackend, out, e
 		fmt.Fprintf(out, "workdir: %s\n", b.Workdir())
 	case "status":
 		b.Status(out)
+	case "diff":
+		if err := b.Diff(out); err != nil {
+			fmt.Fprintln(errw, "diff:", err)
+		}
+	case "rewind", "undo":
+		if err := b.Rewind(out); err != nil {
+			fmt.Fprintln(errw, "rewind:", err)
+		}
+	case "cost":
+		if err := b.Cost(out); err != nil {
+			fmt.Fprintln(errw, "cost:", err)
+		}
+	case "permissions", "perms":
+		if err := b.Permissions(out); err != nil {
+			fmt.Fprintln(errw, "permissions:", err)
+		}
+	case "image", "see":
+		if len(args) == 0 {
+			fmt.Fprintln(errw, "usage: /image <path.png|jpg> [question]   (Nemotron Super-VL reads it; the answer is attached to your next goal)")
+			return
+		}
+		if err := b.Vision(ctx, out, args[0], strings.Join(args[1:], " ")); err != nil {
+			fmt.Fprintln(errw, "image:", err)
+		}
 	case "compact":
 		prev := b.SessionShort()
 		b.NewConversation()
@@ -466,6 +515,14 @@ conversation
   <text>              send a goal to the active agent; the first input starts
                       a run, later inputs continue the same conversation
   @<agent> <text>     route one turn to a specific agent (e.g. @gemini ...)
+  @<file> <text>      attach a file or directory to the goal (@main.go, @src/)
+                      also works inline: "explain @pkg/a.go against @README.md"
+  /image <png> [q]    Nemotron Super-VL reads a screenshot or diagram; the
+                      answer rides along with your next goal
+  /diff               what the last run changed, as a colored diff
+  /rewind             put every file the last run touched back (uta undo)
+  /cost               per-tier cost report for the last run (uta nebius cost)
+  /permissions        effective tool rules (uta permissions status)
   /new  /clear        start a fresh conversation
   /compact            compact and reset the active conversation context window
   /use <session-id>   attach to an existing session (/resume works too)
@@ -518,6 +575,11 @@ type utaShell struct {
 	maxSubtasks    int
 	subtaskTimeout time.Duration
 	runTimeout     time.Duration
+
+	// pendingContext is text (/image analyses) prepended to the next goal.
+	pendingContext []string
+	// lastSession is the most recent completed turn, for /diff /rewind /cost.
+	lastSession string
 }
 
 func (s *utaShell) SessionShort() string {
@@ -726,9 +788,21 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 	ctx, stop := turnSignalContext(parent)
 	defer stop()
 
+	shown := goal
+	expanded, attached := expandFileRefs(goal, s.effectiveWorkdir())
+	if len(attached) > 0 {
+		fmt.Fprintf(s.errw, "[uta] attached: %s\n", strings.Join(attached, ", "))
+		goal = expanded
+	}
+	if len(s.pendingContext) > 0 {
+		goal = strings.Join(s.pendingContext, "\n\n") + "\n\n" + goal
+		fmt.Fprintf(s.errw, "[uta] with %d image analysis attached\n", len(s.pendingContext))
+		s.pendingContext = nil
+	}
+
 	bus := trajectory.NewBus()
 	rdr := NewRenderer(s.errw, s.noColor)
-	rdr.ShowGoal(goal, worker)
+	rdr.ShowGoal(shown, worker)
 	renderDone := rdr.Subscribe(bus)
 
 	sup := engine.New(engine.Deps{
@@ -749,9 +823,12 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 		modelEnv = []string{m}
 	}
 	gate := &hitl.Gate{StateDir: s.app.StateDir, Stdin: s.stdin, Stderr: s.errw}
+	toolGate, err := newToolGate(s.app, s.effectiveWorkdir(), s.preApprove, s.stdin, s.errw)
+	if err != nil {
+		return fmt.Errorf("permissions: %w", err)
+	}
 
 	var result engine.RunResult
-	var err error
 	if s.sessionID == "" {
 		req := engine.RunRequest{
 			Goal:            goal,
@@ -764,6 +841,7 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 			Workdir:         s.workdir,
 			Env:             env,
 			HITL:            gate,
+			ToolGate:        toolGate,
 		}
 		engine.ApplyProfile(&req, s.mode)
 		req.Env = append(req.Env, modelEnv...)
@@ -785,6 +863,7 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 			Workdir:         s.workdir,
 			Env:             env,
 			HITL:            gate,
+			ToolGate:        toolGate,
 		}
 		engine.ApplyProfileToResume(&req, s.mode)
 		req.Env = append(req.Env, modelEnv...)
@@ -799,6 +878,7 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 
 	if result.SessionID != "" {
 		s.sessionID = result.SessionID
+		s.lastSession = result.SessionID
 		if terr := state.TouchActiveSession(s.app.StateDir, result.SessionID); terr != nil {
 			fmt.Fprintln(s.errw, "warn: update active thread:", terr)
 		}

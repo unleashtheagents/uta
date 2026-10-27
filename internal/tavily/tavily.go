@@ -155,3 +155,109 @@ func FormatMarkdown(sr SearchResponse) string {
 	}
 	return strings.TrimSpace(b.String())
 }
+
+// ExtractResult is one page returned by Tavily Extract.
+type ExtractResult struct {
+	URL        string `json:"url"`
+	RawContent string `json:"raw_content"`
+}
+
+// ExtractResponse is the structured response from Tavily POST /extract.
+type ExtractResponse struct {
+	Results []ExtractResult `json:"results"`
+	Failed  []struct {
+		URL   string `json:"url"`
+		Error string `json:"error"`
+	} `json:"failed_results,omitempty"`
+	ResponseTime float64 `json:"response_time,omitempty"`
+}
+
+// Extract fetches the readable content of up to 20 URLs through the Tavily
+// Extract API. It is what lets an agent read a page a search surfaced
+// instead of guessing from the snippet.
+func (c *Client) Extract(ctx context.Context, urls []string) (ExtractResponse, error) {
+	var clean []string
+	for _, u := range urls {
+		if u = strings.TrimSpace(u); u != "" {
+			clean = append(clean, u)
+		}
+	}
+	if len(clean) == 0 {
+		return ExtractResponse{}, errors.New("tavily: at least one url is required")
+	}
+	if len(clean) > 20 {
+		clean = clean[:20]
+	}
+	apiKey := strings.TrimSpace(c.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("TAVILY_API_KEY"))
+	}
+	if apiKey == "" {
+		return ExtractResponse{}, ErrNoAPIKey
+	}
+	baseURL := strings.TrimSpace(c.BaseURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("TAVILY_BASE_URL"))
+	}
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	body, err := json.Marshal(map[string]any{"api_key": apiKey, "urls": clean, "extract_depth": "basic"})
+	if err != nil {
+		return ExtractResponse{}, fmt.Errorf("tavily marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/extract", bytes.NewReader(body))
+	if err != nil {
+		return ExtractResponse{}, fmt.Errorf("tavily request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	hc := c.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 45 * time.Second}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return ExtractResponse{}, fmt.Errorf("tavily extract failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ExtractResponse{}, fmt.Errorf("tavily read body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ExtractResponse{}, fmt.Errorf("tavily extract (%d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var parsed ExtractResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return ExtractResponse{}, fmt.Errorf("tavily decode response: %w", err)
+	}
+	return parsed, nil
+}
+
+// FormatExtractMarkdown renders extracted pages for a model: one section
+// per URL, each body capped at maxChars so a long page cannot flood the
+// context window.
+func FormatExtractMarkdown(er ExtractResponse, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	var b strings.Builder
+	for i, r := range er.Results {
+		body := strings.TrimSpace(r.RawContent)
+		if len(body) > maxChars {
+			body = body[:maxChars] + "\n... [truncated]"
+		}
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "### %s\n\n%s", r.URL, body)
+	}
+	for _, f := range er.Failed {
+		fmt.Fprintf(&b, "\n\n(could not extract %s: %s)", f.URL, f.Error)
+	}
+	return strings.TrimSpace(b.String())
+}

@@ -63,6 +63,15 @@ type RunOptions struct {
 	// means "no MCP servers attached to this run".
 	MCPConfigPath string
 
+	// ToolGate, when non-nil, is consulted before a provider that executes
+	// tools natively (nebius) runs each tool call, and again after the call
+	// returns. It is how the CLI applies .uta/permissions.yaml allow/ask/deny
+	// rules, interactive approval, pre/post hooks and file checkpoints
+	// without the provider knowing any of those exist. Providers that drive
+	// an external CLI ignore it; a nil gate keeps the provider's built-in
+	// default (read-only tools unless PreApproveTools is set).
+	ToolGate ToolGate
+
 	// Role names the orchestration role this call plays (RolePlanner,
 	// RoleWorker, RoleSynthesis, RoleJudge, RoleCompact, RoleSentinel). The
 	// engine sets it on every call so multi-tier providers can pick a model
@@ -149,6 +158,9 @@ const (
 	// model and latency_ms; the engine persists it as a sentinel_alert
 	// trajectory event so uta dash lists it beside budget alerts.
 	EventSentinelAlert EventKind = "sentinel_alert"
+	// EventToolDenied is emitted when RunOptions.ToolGate refused a tool
+	// call. Payload: {"tool","arguments","reason","source"}.
+	EventToolDenied EventKind = "tool_denied"
 )
 
 // AgentProvider is the mandatory contract for every backend.
@@ -173,3 +185,34 @@ var (
 	ErrUnsupported  = errors.New("capability unsupported")
 	ErrQuota        = errors.New("provider quota exceeded")
 )
+
+// ToolRequest describes one native tool call a provider is about to run.
+type ToolRequest struct {
+	SessionID string // filled in by the engine; empty for direct callers
+	SubtaskID string
+	Tool      string // tool name as advertised to the model (run_command, write_file, ...)
+	Arguments string // raw JSON arguments the model produced
+	Summary   string // the one string that matters for rules: the command, the path, the query
+	Workdir   string
+}
+
+// ToolDecision is the gate's answer to a ToolRequest.
+type ToolDecision struct {
+	Allow  bool
+	Reason string // why it was denied, or which rule allowed it
+	Source string // "pre-approve" | "policy" | "prompt" | "hook" | "default"
+}
+
+// ToolGate decides whether a native tool call may run and observes its
+// result. Implementations must be safe for concurrent use: fan-out workers
+// call it from several goroutines at once.
+type ToolGate interface {
+	// Check runs before the tool executes. A returned error aborts the
+	// provider call; a Deny decision is reported back to the model as the
+	// tool's output so it can choose another route.
+	Check(ctx context.Context, req ToolRequest) (ToolDecision, error)
+	// After runs once the tool returned. Whatever it returns is appended to
+	// the output the model sees (hook feedback, for instance); empty adds
+	// nothing.
+	After(ctx context.Context, req ToolRequest, output string, isErr bool) string
+}

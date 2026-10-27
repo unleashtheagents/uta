@@ -238,9 +238,9 @@ func Execute() {
 	)
 	shellCmd := newShellCmd()
 	addTo("start", newHelloCmd(), newSetupCmd(), newDoctorCmd(), newInitCmd(), newAuthCmd(), newLimitsCmd(), newProvidersCmd(), newNebiusCmd())
-	addTo("orchestrate", newRunCmd(), newPRCmd(), shellCmd, newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
+	addTo("orchestrate", newRunCmd(), newPRCmd(), shellCmd, newMissionCmd(), newResumeCmd(), newUndoCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
 	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newReplayCmd(), newBenchCmd(), newPerfCmd(), newDashCmd())
-	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd(), newSkillsCmd())
+	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd(), newSkillsCmd(), newPermissionsCmd())
 	addTo("data", newMemoryCmd(), newRecallCmd(), newIdeasCmd(), newExportDBCmd(), newImportCmd())
 	addTo("integrate", newServeCmd())
 	// A bare `uta` in a terminal is the product, not a help page: run the

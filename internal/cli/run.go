@@ -310,6 +310,11 @@ func newRunCmd() *cobra.Command {
 					Stderr:   cmd.ErrOrStderr(),
 				},
 			}
+			toolGate, err := newToolGate(app, workdir, preApprove, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return fmt.Errorf("permissions: %w", err)
+			}
+			req.ToolGate = toolGate
 
 			mode, err := resolveActiveMode(cmd, app)
 			if err != nil {
@@ -686,6 +691,7 @@ func executeHandoffChain(
 			HandoffFrom:         currentResult.SessionID,
 			HandoffTargetMode:   match.Handoff.TargetMode,
 			HITL:                baseReq.HITL,
+			ToolGate:            baseReq.ToolGate,
 		}
 		// ApplyProfile, called below, replaces the budget fields with the
 		// chained mode's own policies — so we do not copy baseReq's caps

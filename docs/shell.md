@@ -99,6 +99,12 @@ Per-turn limits mirror `uta run`: `--max-parallel`, `--max-subtasks`,
 |---|---|
 | `<text>` | Send a goal to the active agent. First input starts a run; later inputs resume the session. |
 | `@<agent> <text>` | Route one turn to a specific agent without switching the default worker. |
+| `@<file> <text>`, `... @dir/ ...` | Attach a file (or a directory listing) to the goal. Any `@path` that exists under the workdir is attached, inline or leading; names that are agents route instead. |
+| `/image <png\|jpg> [question]` | Nemotron 3.5 Super-VL reads the image and answers; the answer is attached to your next goal. |
+| `/diff` | Colored diff of every file the last run changed (from the permissions gate's checkpoints). |
+| `/rewind` (alias `/undo`) | Restore every file the last run touched, same as `uta undo`. |
+| `/cost` | Per-tier Nebius cost report for the last run (`uta nebius cost`). |
+| `/permissions` | Effective allow / ask / deny rules and their source files. |
 | `/new`, `/clear` | Start a fresh conversation (next input starts a new run). |
 | `/use <id>`, `/resume <id>` | Attach to an existing session; short ids from `/sessions` work. |
 | `/sessions [n]` | List recent sessions (default 10). |

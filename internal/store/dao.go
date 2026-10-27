@@ -699,3 +699,73 @@ func (s *Store) SubtaskListBySession(sessionID string, limit, offset int) ([]Sub
 	}
 	return out, rows.Err()
 }
+
+// FileCheckpoint is one row of file_checkpoints: what a workspace file
+// looked like right before a tool call changed it.
+type FileCheckpoint struct {
+	ID        int64
+	SessionID string
+	SubtaskID string
+	Seq       int64
+	Ts        time.Time
+	Tool      string
+	Path      string
+	Workdir   string
+	Existed   bool
+	BeforeRef string
+}
+
+// InsertFileCheckpoint records a pre-change snapshot. seq is assigned
+// server-side as max(seq)+1 within the session so concurrent workers
+// never collide.
+func (s *Store) InsertFileCheckpoint(cp FileCheckpoint) (int64, error) {
+	existed := 0
+	if cp.Existed {
+		existed = 1
+	}
+	if cp.Ts.IsZero() {
+		cp.Ts = time.Now()
+	}
+	res, err := s.DB.Exec(`INSERT INTO file_checkpoints (session_id, subtask_id, seq, ts, tool, path, workdir, existed, before_ref)
+		VALUES (?, ?, COALESCE((SELECT MAX(seq) FROM file_checkpoints WHERE session_id = ?), 0) + 1, ?, ?, ?, ?, ?, ?)`,
+		cp.SessionID, nullable(cp.SubtaskID), cp.SessionID, cp.Ts.UnixNano(), cp.Tool, cp.Path, cp.Workdir, existed, cp.BeforeRef)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListFileCheckpoints returns a session's checkpoints in the order they
+// were taken.
+func (s *Store) ListFileCheckpoints(sessionID string) ([]FileCheckpoint, error) {
+	rows, err := s.DB.Query(`SELECT id, session_id, COALESCE(subtask_id, ''), seq, ts, tool, path, workdir, existed, before_ref
+		FROM file_checkpoints WHERE session_id = ? ORDER BY seq ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FileCheckpoint
+	for rows.Next() {
+		var cp FileCheckpoint
+		var ts int64
+		var existed int
+		if err := rows.Scan(&cp.ID, &cp.SessionID, &cp.SubtaskID, &cp.Seq, &ts, &cp.Tool, &cp.Path, &cp.Workdir, &existed, &cp.BeforeRef); err != nil {
+			return nil, err
+		}
+		cp.Ts = time.Unix(0, ts)
+		cp.Existed = existed == 1
+		out = append(out, cp)
+	}
+	return out, rows.Err()
+}
+
+// LatestCheckpointSession returns the most recent session that recorded a
+// file checkpoint, or "" when none has.
+func (s *Store) LatestCheckpointSession() (string, error) {
+	var id string
+	err := s.DB.QueryRow(`SELECT session_id FROM file_checkpoints ORDER BY ts DESC LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}

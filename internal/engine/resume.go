@@ -38,6 +38,9 @@ type ResumeRequest struct {
 	Workdir         string
 	Env             []string // additional env vars for the provider call
 
+	// ToolGate mirrors RunRequest.ToolGate for the resumed turn.
+	ToolGate provider.ToolGate
+
 	// AllowedTools / DeniedTools are the capability-gate lists active for
 	// the resumed turn. Same semantics as RunRequest's fields. Both empty
 	// disables enforcement.
@@ -167,6 +170,7 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 		Timeout:         req.SubtaskTimeout,
 		PreApproveTools: req.PreApproveTools,
 		MCPConfigPath:   req.MCPConfigPath,
+		ToolGate:        scopeToolGate(req.ToolGate, newSession, subtaskID),
 	}
 	gate := capability.NewGate(req.AllowedTools, req.DeniedTools)
 	// HITL state mirrors what Supervisor.Run installs: the approver,

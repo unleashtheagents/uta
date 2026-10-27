@@ -216,6 +216,14 @@ type RunRequest struct {
 	// via engine.ApplyProfile.
 	PerCallMaxTokens int64
 
+	// ToolGate is consulted by providers that execute tools natively
+	// (nebius) before and after every tool call. The supervisor wraps it
+	// so each request carries the session and subtask ids. Nil keeps the
+	// provider's built-in default (read-only tools unless pre-approved).
+	// Wired by the CLI from .uta/permissions.yaml; not sourced from the
+	// profile.
+	ToolGate provider.ToolGate
+
 	// HITL is the human-in-the-loop approver consulted when a tool_call
 	// matches HITLTriggers or when cumulative tokens cross
 	// HITLTokenThreshold. Nil disables HITL entirely (the gate is a no-op).
@@ -859,6 +867,7 @@ func (s *Supervisor) callProvider(ctx context.Context, sessionID, subtaskID stri
 		MaxRetries:      maxRetries,
 		MCPConfigPath:   req.MCPConfigPath,
 		Role:            roleFromContext(ctx),
+		ToolGate:        scopeToolGate(req.ToolGate, sessionID, subtaskID),
 	}
 	gate := capability.NewGate(req.AllowedTools, req.DeniedTools)
 	hState := hitlStateFromContext(ctx)
@@ -1172,6 +1181,8 @@ func mapProviderEventKind(k provider.EventKind) trajectory.Kind {
 		return trajectory.SubtaskStdout
 	case provider.EventSentinelAlert:
 		return trajectory.SentinelAlert
+	case provider.EventToolDenied:
+		return trajectory.CapabilityGateDenied
 	case provider.EventSessionID:
 		// Captured in the subtask row (provider_session_id) instead of as a trajectory event.
 		return ""
@@ -1526,4 +1537,38 @@ func (s *Supervisor) compactOutcomes(ctx context.Context, sessionID string, prov
 		out[i].Result = strings.TrimSpace(res.FinalText)
 	}
 	return out
+}
+
+// scopedToolGate stamps the session and subtask ids onto every request
+// before handing it to the caller's gate, so checkpoints and prompts can
+// name the run they belong to.
+type scopedToolGate struct {
+	inner     provider.ToolGate
+	sessionID string
+	subtaskID string
+}
+
+func scopeToolGate(g provider.ToolGate, sessionID, subtaskID string) provider.ToolGate {
+	if g == nil {
+		return nil
+	}
+	return &scopedToolGate{inner: g, sessionID: sessionID, subtaskID: subtaskID}
+}
+
+func (g *scopedToolGate) stamp(req provider.ToolRequest) provider.ToolRequest {
+	if req.SessionID == "" {
+		req.SessionID = g.sessionID
+	}
+	if req.SubtaskID == "" {
+		req.SubtaskID = g.subtaskID
+	}
+	return req
+}
+
+func (g *scopedToolGate) Check(ctx context.Context, req provider.ToolRequest) (provider.ToolDecision, error) {
+	return g.inner.Check(ctx, g.stamp(req))
+}
+
+func (g *scopedToolGate) After(ctx context.Context, req provider.ToolRequest, output string, isErr bool) string {
+	return g.inner.After(ctx, g.stamp(req), output, isErr)
 }

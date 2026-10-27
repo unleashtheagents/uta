@@ -243,7 +243,7 @@ multimodal visual analysis — alongside local Claude Code and Google Antigravit
 	}
 	pingCmd.Flags().BoolVar(&pingJSON, "json", false, "emit ping result as JSON")
 
-	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd, newNebiusCostCmd(), newNebiusDemoCmd())
+	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd, newNebiusCostCmd(), newNebiusDemoCmd(), newNebiusSeeCmd(), newNebiusExtractCmd())
 	return cmd
 }
 
@@ -287,4 +287,57 @@ func runNebiusStatus(cmd *cobra.Command, asJSON bool) error {
 	}
 	_ = tw.Flush()
 	return nil
+}
+
+// newNebiusSeeCmd sends an image to Nemotron Super-VL.
+func newNebiusSeeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "see <image.png|jpg> [question...]",
+		Short: "ask NVIDIA Nemotron Super-VL about a screenshot, diagram or photo",
+		Long: `One vision call, no planner: the image and your question go to
+Nemotron 3.5 Super-VL on Nebius Token Factory and the answer is printed.
+Inside the shell, /image does the same and attaches the answer to your next
+goal, so "fix what this screenshot shows" works. Counts against the nebius
+daily spend cap. UTA_NEBIUS_VISION_MODEL overrides the model.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+			defer cancel()
+			res, err := describeImage(ctx, app, args[0], strings.Join(args[1:], " "))
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), res.Text)
+			fmt.Fprintf(cmd.ErrOrStderr(), "[uta] %s · %d ms · %d in / %d out tokens · $%.4f\n", res.Model, res.LatencyMS, res.TokensIn, res.TokensOut, float64(res.USDCents)/100)
+			return nil
+		},
+	}
+	return cmd
+}
+
+// newNebiusExtractCmd reads pages through Tavily Extract.
+func newNebiusExtractCmd() *cobra.Command {
+	var maxChars int
+	cmd := &cobra.Command{
+		Use:   "extract <url> [url...]",
+		Short: "fetch the readable text of web pages via Tavily Extract (what the tavily_extract tool does)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			defer cancel()
+			er, err := (&tavily.Client{}).Extract(ctx, args)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), tavily.FormatExtractMarkdown(er, maxChars))
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&maxChars, "max-chars", 12000, "cap per page")
+	return cmd
 }

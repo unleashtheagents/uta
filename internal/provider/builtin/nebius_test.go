@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -778,20 +779,202 @@ func TestNebius_DefaultToolSetsByRole(t *testing.T) {
 		return out
 	}
 	ro := names(nebiusToolsFor(provider.RunOptions{Role: provider.RoleWorker}))
-	if strings.Join(ro, ",") != "read_file,list_dir,tavily_search" {
+	if strings.Join(ro, ",") != "read_file,list_dir,search_files,glob,tavily_search,tavily_extract" {
 		t.Errorf("worker default tools = %v", ro)
 	}
 	if got := nebiusToolsFor(provider.RunOptions{Role: provider.RolePlanner}); got != nil {
 		t.Errorf("planner must get no tools, got %v", names(got))
 	}
-	if got := names(nebiusToolsFor(provider.RunOptions{PreApproveTools: []string{"*"}})); len(got) != 6 {
+	full := len(DefaultNebiusTools())
+	if got := names(nebiusToolsFor(provider.RunOptions{PreApproveTools: []string{"*"}})); len(got) != full {
 		t.Errorf("pre-approved worker gets the full set, got %v", got)
+	}
+	if got := names(nebiusToolsFor(provider.RunOptions{Role: provider.RoleWorker, ToolGate: allowAllGate{}})); len(got) != full {
+		t.Errorf("a worker with a tool gate gets the full set and the gate decides, got %v", got)
+	}
+	if got := nebiusToolsFor(provider.RunOptions{Role: provider.RoleSynthesis, ToolGate: allowAllGate{}}); got != nil {
+		t.Errorf("synthesis gets no tools even with a gate, got %v", names(got))
 	}
 	if got := nebiusToolsFor(provider.RunOptions{Env: []string{"UTA_NEBIUS_AGENTIC=0"}}); got != nil {
 		t.Errorf("AGENTIC=0 disables tools, got %v", names(got))
 	}
-	if got := names(nebiusToolsFor(provider.RunOptions{Role: provider.RolePlanner, Env: []string{"UTA_NEBIUS_AGENTIC=1"}})); len(got) != 6 {
+	if got := names(nebiusToolsFor(provider.RunOptions{Role: provider.RolePlanner, Env: []string{"UTA_NEBIUS_AGENTIC=1"}})); len(got) != full {
 		t.Errorf("AGENTIC=1 forces the full set, got %v", got)
+	}
+}
+
+type allowAllGate struct{}
+
+func (allowAllGate) Check(context.Context, provider.ToolRequest) (provider.ToolDecision, error) {
+	return provider.ToolDecision{Allow: true, Source: "test"}, nil
+}
+func (allowAllGate) After(context.Context, provider.ToolRequest, string, bool) string { return "" }
+
+// recordingGate denies run_command, allows the rest, and appends feedback
+// after every executed tool.
+type recordingGate struct {
+	mu     sync.Mutex
+	checks []provider.ToolRequest
+	afters []string
+}
+
+func (g *recordingGate) Check(_ context.Context, req provider.ToolRequest) (provider.ToolDecision, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.checks = append(g.checks, req)
+	if req.Tool == "run_command" {
+		return provider.ToolDecision{Allow: false, Reason: "commands need approval", Source: "policy"}, nil
+	}
+	return provider.ToolDecision{Allow: true, Source: "policy"}, nil
+}
+
+func (g *recordingGate) After(_ context.Context, req provider.ToolRequest, output string, isErr bool) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.afters = append(g.afters, req.Tool)
+	return "hook: looks fine"
+}
+
+func TestNebius_ToolGateDeniesAndObserves(t *testing.T) {
+	dir := t.TempDir()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			// Two tool calls: one allowed write, one denied command.
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+			  {"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"hello.txt\",\"content\":\"hi\\n\"}"}},
+			  {"id":"c2","type":"function","function":{"name":"run_command","arguments":"{\"command\":\"rm -rf /\"}"}}
+			]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+		default:
+			// Echo what the model saw for the denied call so the test can check it.
+			var toolMsgs []string
+			for _, m := range req.Messages {
+				if m.Role == "tool" {
+					toolMsgs = append(toolMsgs, m.Content)
+				}
+			}
+			b, _ := json.Marshal(strings.Join(toolMsgs, " || "))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(b) + `}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+		}
+	}))
+	defer srv.Close()
+
+	gate := &recordingGate{}
+	n := &Nebius{Client: srv.Client()}
+	events := make(chan provider.Event, 64)
+	res, err := n.RunHeadless(context.Background(), "do it", provider.RunOptions{
+		Workdir:  dir,
+		Env:      []string{"NEBIUS_API_KEY=test", "NEBIUS_BASE_URL=" + srv.URL, "UTA_NEBIUS_SENTINEL=0", "UTA_NEBIUS_STREAM=0", "UTA_NEBIUS_MAX_RETRIES=0"},
+		ToolGate: gate,
+	}, events)
+	close(events)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "hello.txt")); serr != nil {
+		t.Fatalf("allowed write_file should have run: %v", serr)
+	}
+	if !strings.Contains(res.FinalText, "denied by uta permissions (policy): commands need approval") {
+		t.Fatalf("model should see the denial, got %q", res.FinalText)
+	}
+	if !strings.Contains(res.FinalText, "hook: looks fine") {
+		t.Fatalf("After() feedback should reach the model, got %q", res.FinalText)
+	}
+	if len(gate.checks) != 2 || gate.checks[0].Summary != "hello.txt" || gate.checks[1].Summary != "rm -rf /" {
+		t.Fatalf("gate checks = %+v", gate.checks)
+	}
+	if len(gate.afters) != 1 || gate.afters[0] != "write_file" {
+		t.Fatalf("After should run only for executed tools, got %v", gate.afters)
+	}
+	var denied, diffs int
+	for ev := range events {
+		switch ev.Kind {
+		case provider.EventToolDenied:
+			denied++
+		case provider.EventToolResult:
+			if strings.Contains(string(ev.Payload), `"diff"`) && strings.Contains(string(ev.Payload), "+hi") {
+				diffs++
+			}
+		}
+	}
+	if denied != 1 || diffs != 1 {
+		t.Fatalf("denied=%d diffs=%d, want 1 and 1", denied, diffs)
+	}
+}
+
+func TestNebius_SearchGlobTools(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "pkg", "sub"), 0o755)
+	os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+	os.WriteFile(filepath.Join(dir, "pkg", "a.go"), []byte("package pkg\n\nfunc Needle() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "pkg", "sub", "b.go"), []byte("package sub\n// needle in a comment\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# needle\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("needle\n"), 0o644)
+	opts := provider.RunOptions{Workdir: dir}
+
+	call := func(name, args string) (string, bool) {
+		var tc nebiusToolCall
+		tc.Function.Name = name
+		tc.Function.Arguments = args
+		return executeNebiusToolCall(context.Background(), tc, opts)
+	}
+
+	out, isErr := call("search_files", `{"pattern":"(?i)needle","glob":"*.go"}`)
+	if isErr || !strings.Contains(out, "pkg/a.go:3: func Needle() {}") || !strings.Contains(out, "pkg/sub/b.go:2:") || strings.Contains(out, "README") || strings.Contains(out, ".git") {
+		t.Fatalf("search_files = %q err=%v", out, isErr)
+	}
+	out, isErr = call("search_files", `{"pattern":"needle","path":"pkg/sub"}`)
+	if isErr || strings.Contains(out, "a.go") || !strings.Contains(out, "b.go") {
+		t.Fatalf("scoped search = %q", out)
+	}
+	out, isErr = call("search_files", `{"pattern":"["}`)
+	if !isErr {
+		t.Fatalf("bad regexp should error, got %q", out)
+	}
+	out, isErr = call("glob", `{"pattern":"**/*.go"}`)
+	if isErr || !strings.Contains(out, "pkg/a.go") || !strings.Contains(out, "pkg/sub/b.go") || strings.Contains(out, "README") {
+		t.Fatalf("glob = %q", out)
+	}
+	out, isErr = call("glob", `{"pattern":"*.md"}`)
+	if isErr || strings.TrimSpace(out) != "README.md" {
+		t.Fatalf("glob *.md = %q", out)
+	}
+	out, isErr = call("glob", `{"pattern":"../*"}`)
+	if !isErr {
+		t.Fatalf("escaping glob should error, got %q", out)
+	}
+	out, isErr = call("edit_file", `{"path":"pkg/a.go","target":"c","replacement":"x"}`)
+	if !isErr || !strings.Contains(out, "occurs 2 times") {
+		t.Fatalf("ambiguous edit should be refused, got %q err=%v", out, isErr)
+	}
+}
+
+func TestNebius_TavilyExtractTool(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/extract" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		urls, _ := body["urls"].([]any)
+		if len(urls) != 1 || urls[0] != "https://example.com/doc" {
+			t.Errorf("urls = %v", urls)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"url":"https://example.com/doc","raw_content":"Nemotron docs body"}],"failed_results":[{"url":"https://x","error":"timeout"}]}`))
+	}))
+	defer srv.Close()
+	var tc nebiusToolCall
+	tc.Function.Name = "tavily_extract"
+	tc.Function.Arguments = `{"urls":["https://example.com/doc"]}`
+	out, isErr := executeNebiusToolCall(context.Background(), tc, provider.RunOptions{Env: []string{"TAVILY_API_KEY=t", "TAVILY_BASE_URL=" + srv.URL}})
+	if isErr || !strings.Contains(out, "### https://example.com/doc") || !strings.Contains(out, "Nemotron docs body") || !strings.Contains(out, "could not extract https://x") {
+		t.Fatalf("tavily_extract = %q err=%v", out, isErr)
 	}
 }
 

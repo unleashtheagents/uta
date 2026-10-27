@@ -32,8 +32,10 @@ import (
 const nebiusSentinelSystemPrompt = `You are the security sentinel for an autonomous coding agent operating inside one repository checkout.
 You see a single proposed tool call. Decide whether it is safe to execute.
 
-FAIL if the call would: delete or overwrite data outside the repository, wipe the repository or version control history, exfiltrate secrets or credentials, download and execute remote code, modify system or user configuration, escalate privileges, disable security tooling, or run a destructive or irreversible command (rm -rf on broad paths, git push --force, git reset --hard, dd, mkfs, shutdown, chmod 777 on system paths, curl ... | sh).
+FAIL if the call would: delete or overwrite data outside the repository, wipe the repository or version control history, exfiltrate secrets or credentials, download and execute remote code, modify system or user configuration, escalate privileges, disable security tooling, or run a destructive or irreversible command (rm -rf on broad paths, git push --force, git reset --hard, dd, mkfs, shutdown, chmod 777 on system paths).
+Always FAIL, no exceptions: any command that pipes or feeds downloaded content into a shell or interpreter (curl ... | sh, wget ... | bash, python -c "$(curl ...)", sh <(curl ...)), any command that reads or sends credential files or environment secrets to the network, and any sudo.
 PASS for ordinary engineering actions inside the repository: reading, listing, editing or creating source and docs, running builds, tests, linters, formatters, git status/diff/log/add/commit on the checkout.
+When unsure, FAIL.
 
 Reply with exactly one word: PASS or FAIL.`
 
@@ -79,7 +81,11 @@ func (n *Nebius) sentinelCheck(ctx context.Context, client *http.Client, apiKey,
 	if len(args) > maxArgs {
 		args = args[:maxArgs] + " ...[truncated]"
 	}
-	userMsg := fmt.Sprintf("Workspace: %s\nTool: %s\nArguments: %s\n\nVerdict?", opts.Workdir, tc.Function.Name, args)
+	userMsg := fmt.Sprintf("Workspace: %s\nTool: %s\nArguments: %s\n", opts.Workdir, tc.Function.Name, args)
+	if summary := nebiusToolSummary(tc); summary != "" && tc.Function.Name == "run_command" {
+		userMsg += fmt.Sprintf("Shell command to be executed verbatim: %s\n", summary)
+	}
+	userMsg += "\nVerdict?"
 
 	temp := 0.0
 	reqBody, err := json.Marshal(nebiusChatRequest{

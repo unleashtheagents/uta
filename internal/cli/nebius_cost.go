@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -206,7 +207,12 @@ Nemotron 3 Ultra — the saving the 90/10 split actually delivered.`,
 }
 
 func renderNebiusCostReport(cmd *cobra.Command, rep nebiusCostReport) error {
-	out := cmd.OutOrStdout()
+	return writeNebiusCostReport(cmd.OutOrStdout(), rep)
+}
+
+// writeNebiusCostReport renders the report to any writer (the shell's /cost
+// reuses it).
+func writeNebiusCostReport(out io.Writer, rep nebiusCostReport) error {
 	short := rep.SessionID
 	if len(short) > 8 {
 		short = short[:8]
