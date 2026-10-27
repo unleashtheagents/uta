@@ -39,6 +39,12 @@ type Renderer struct {
 	// streaming is true while assistant prose is being written inline on a
 	// gutter line; the next dot, tool call or interjection closes it.
 	streaming bool
+	// width is the terminal column count (0 when not a terminal). Gutter
+	// prose and diffs are wrapped to it so no renderer-owned line ever
+	// soft-wraps in the terminal.
+	width int
+	// streamCol tracks the current column on the open gutter line.
+	streamCol int
 }
 
 const (
@@ -63,7 +69,7 @@ func NewRenderer(w io.Writer, forceNoColor bool) *Renderer {
 			color = false
 		}
 	}
-	return &Renderer{w: w, color: color, started: time.Now()}
+	return &Renderer{w: w, color: color, started: time.Now(), width: termWidth(w)}
 }
 
 // Subscribe attaches to bus and renders events as they arrive. The returned
@@ -159,6 +165,9 @@ func (r *Renderer) endStreamLocked() {
 // message, and restarts the phase label so dots keep a home. Caller must
 // hold r.mu.
 func (r *Renderer) interjectLocked(line string) {
+	if r.width > 12 {
+		line = truncateRunes(line, r.width-8)
+	}
 	if r.phase == "" {
 		fmt.Fprintf(r.w, "  %s\n", line)
 		return
@@ -177,18 +186,52 @@ func (r *Renderer) interjectLocked(line string) {
 // only when something else (a dot, a tool call) interrupts. Caller must
 // hold r.mu and ensure a phase is active.
 func (r *Renderer) streamTextLocked(text string) {
+	const gutter = 4 // "  │ "
+	// Prefer breaking at a space once past softLimit; never let the line
+	// reach the terminal edge (hardLimit), even mid-word.
+	softLimit := r.width - gutter - 26
+	hardLimit := r.width - gutter - 2
+	if r.width <= 0 {
+		softLimit, hardLimit = 1<<30, 1<<30
+	}
+	if softLimit < 20 {
+		softLimit = hardLimit - 1
+	}
 	if !r.streaming {
 		r.streaming = true
+		r.streamCol = 0
 		fmt.Fprintf(r.w, "\n  %s ", r.dim("│"))
 		text = strings.TrimLeft(text, "\n")
 	}
-	lines := strings.Split(text, "\n")
-	for i, ln := range lines {
-		if i > 0 {
-			fmt.Fprintf(r.w, "\n  %s ", r.dim("│"))
-		}
-		fmt.Fprint(r.w, r.dim(ln))
+	newGutterLine := func() {
+		fmt.Fprintf(r.w, "\n  %s ", r.dim("│"))
+		r.streamCol = 0
 	}
+	var seg strings.Builder
+	flush := func() {
+		if seg.Len() > 0 {
+			fmt.Fprint(r.w, r.dim(seg.String()))
+			seg.Reset()
+		}
+	}
+	for _, c := range text {
+		switch {
+		case c == '\n':
+			flush()
+			newGutterLine()
+		case c == ' ' && r.streamCol >= softLimit:
+			flush()
+			newGutterLine()
+		default:
+			if r.streamCol >= hardLimit {
+				flush()
+				newGutterLine()
+			}
+			seg.WriteRune(c)
+			r.streamCol++
+		}
+	}
+	flush()
 }
 
 // usageSuffix renders the accumulated token/cost totals for the final
@@ -511,7 +554,14 @@ func (r *Renderer) diffLocked(diff string) {
 	}
 	const maxLines = 60
 	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	maxCol := r.width - 8 // never reach the last column: exact-width rows leave terminals in pending-wrap
+	if r.width <= 0 {
+		maxCol = 1 << 30
+	}
 	for i, ln := range lines {
+		if rs := []rune(ln); len(rs) > maxCol {
+			ln = string(rs[:maxCol]) + "…"
+		}
 		if i >= maxLines {
 			fmt.Fprintf(r.w, "    %s\n", r.dim(fmt.Sprintf("… %d more diff lines (/diff shows all)", len(lines)-maxLines)))
 			break

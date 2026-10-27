@@ -323,6 +323,11 @@ func newRunCmd() *cobra.Command {
 				applyDirectMode(&req)
 			}
 
+			if f, ok := cmd.InOrStdin().(*os.File); ok {
+				restore := suppressEcho(f)
+				defer restore()
+			}
+
 			mode, err := resolveActiveMode(cmd, app)
 			if err != nil {
 				return err
@@ -395,7 +400,7 @@ func newRunCmd() *cobra.Command {
 
 			if printAnswer || (!printJSONL) {
 				if result.FinalAnswer != "" {
-					fmt.Fprintln(cmd.OutOrStdout(), result.FinalAnswer)
+					printWrapped(cmd.OutOrStdout(), result.FinalAnswer)
 				}
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] session %s status=%s subtasks=%d duration=%s%s\n",

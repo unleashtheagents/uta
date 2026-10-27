@@ -119,7 +119,7 @@ func (s *utaShell) Vision(ctx context.Context, w io.Writer, imagePath, prompt st
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(w, res.Text)
+	printWrapped(w, res.Text)
 	fmt.Fprintf(s.errw, "[uta] %s read %s in %d ms (%d in / %d out tokens, $%.4f) — attached to your next goal\n",
 		shortNebiusModel(res.Model), filepath.Base(imagePath), res.LatencyMS, res.TokensIn, res.TokensOut, float64(res.USDCents)/100)
 	s.pendingContext = append(s.pendingContext, fmt.Sprintf("Image analysis of %s (by %s):\n%s", imagePath, res.Model, res.Text))

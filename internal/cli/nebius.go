@@ -313,7 +313,7 @@ daily spend cap. UTA_NEBIUS_VISION_MODEL overrides the model.`,
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), res.Text)
+			printWrapped(cmd.OutOrStdout(), res.Text)
 			fmt.Fprintf(cmd.ErrOrStderr(), "[uta] %s · %d ms · %d in / %d out tokens · $%.4f\n", res.Model, res.LatencyMS, res.TokensIn, res.TokensOut, float64(res.USDCents)/100)
 			return nil
 		},

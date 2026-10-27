@@ -227,3 +227,17 @@ func TestNebius_HistoryCompaction(t *testing.T) {
 		t.Fatalf("stored history should be the compacted one, got %d messages", got)
 	}
 }
+
+// A run without an explicit workdir must still discover .mcp.json in the
+// current directory, matching where the file tools operate.
+func TestNebius_MCPDiscoveryFromCwd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"s":{"command":"/bin/echo"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	specs, src := nebiusMCPServers(provider.RunOptions{})
+	if len(specs) != 1 || specs[0].Name != "s" {
+		t.Fatalf("specs = %+v (src %q)", specs, src)
+	}
+}

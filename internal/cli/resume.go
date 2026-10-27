@@ -168,7 +168,7 @@ the follow-up instructions.`,
 				return exitWith(4)
 			}
 			if result.FinalAnswer != "" {
-				fmt.Fprintln(cmd.OutOrStdout(), result.FinalAnswer)
+				printWrapped(cmd.OutOrStdout(), result.FinalAnswer)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] session %s status=%s\n", result.SessionID, result.Status)
 			return nil

@@ -83,8 +83,14 @@ func nebiusMCPServers(opts provider.RunOptions) ([]mcpServerSpec, string) {
 			return specs, p
 		}
 	}
-	if opts.Workdir != "" {
-		p := filepath.Join(opts.Workdir, ".mcp.json")
+	dir := opts.Workdir
+	if dir == "" {
+		// A run without an explicit workdir operates on the current
+		// directory for every file tool; .mcp.json discovery must agree.
+		dir, _ = os.Getwd()
+	}
+	if dir != "" {
+		p := filepath.Join(dir, ".mcp.json")
 		if _, err := os.Stat(p); err == nil {
 			specs, err := loadMCPConfig(p)
 			if err == nil {

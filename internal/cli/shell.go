@@ -845,6 +845,10 @@ func (s *utaShell) ExecTurnAs(parent context.Context, worker, goal string) error
 func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 	ctx, stop := turnSignalContext(parent)
 	defer stop()
+	if f, ok := s.stdin.(*os.File); ok {
+		restore := suppressEcho(f)
+		defer restore()
+	}
 
 	shown := goal
 	expanded, attached := expandFileRefs(goal, s.effectiveWorkdir())
@@ -961,7 +965,7 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 		return err
 	}
 	if result.FinalAnswer != "" {
-		fmt.Fprintln(s.out, result.FinalAnswer)
+		printWrapped(s.out, result.FinalAnswer)
 	}
 	fmt.Fprintf(s.errw, "\n[uta] session %s status=%s%s\n", shortID(result.SessionID), result.Status, usageSummary(result.Subtasks))
 	if line := nebiusFooterLine(s.app, result.SessionID); line != "" {

@@ -27,6 +27,7 @@ type toolGate struct {
 	preApprove  map[string]bool
 	interactive bool
 	stdin       *bufio.Reader
+	stdinFile   *os.File // non-nil when stdin is a real terminal
 	errw        io.Writer
 	workdir     string
 	home        string
@@ -66,6 +67,7 @@ func newToolGate(app *App, workdir string, preApprove []string, stdin io.Reader,
 	}
 	if f, ok := stdin.(*os.File); ok && isatty.IsTerminal(f.Fd()) {
 		g.interactive = true
+		g.stdinFile = f
 	}
 	if v := os.Getenv("UTA_TOOL_PROMPT"); v == "0" || strings.EqualFold(v, "off") {
 		g.interactive = false
@@ -155,6 +157,10 @@ func (g *toolGate) prompt(ctx context.Context, req provider.ToolRequest, pattern
 	}
 	fmt.Fprintf(g.errw, "\n\x1b[1m[uta] %s wants %s:\x1b[0m %s\n", who, req.Tool, summary)
 	fmt.Fprintf(g.errw, "  [y] once  [s] this run  [a] always (%s)  [n] deny  > ", pattern)
+	if g.stdinFile != nil {
+		resuppress := restoreEchoDuring(g.stdinFile)
+		defer resuppress()
+	}
 
 	type ans struct {
 		line string
