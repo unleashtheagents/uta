@@ -9,7 +9,7 @@
 
 ## Step 1 — Project Overview
 
-- **Project Name:** `uta — Nebius × NVIDIA Nemotron Multi-Agent Coordinator`
+- **Project Name:** `uta-devpost-hackathon`
 - **Elevator Pitch (max 200 chars):**
   `Open-source Go CLI & steer language that coordinates NVIDIA Nemotron 3 Ultra, Super, Nano, Lightning & Super-VL on Nebius Token Factory alongside Claude Code & Antigravity with Tavily search.` *(194 chars)*
 

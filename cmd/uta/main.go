@@ -2,6 +2,12 @@
 // and the packages it pulls in; this file only wires main() to Execute().
 package main
 
-import "github.com/unleashtheagents/uta/internal/cli"
+import (
+	"github.com/unleashtheagents/uta/internal/cli"
+	"github.com/unleashtheagents/uta/internal/paths"
+)
 
-func main() { cli.Execute() }
+func main() {
+	paths.LoadCredentials()
+	cli.Execute()
+}

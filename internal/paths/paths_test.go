@@ -286,3 +286,25 @@ func TestFindProjectRoot_IgnoresDotUtaFile(t *testing.T) {
 		t.Fatalf("FindProjectRoot(%q) = (%q, true); want (_, false) — .uta file should not count", dir, got)
 	}
 }
+
+func TestLoadCredentialsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	credPath := CredentialsFile(dir)
+	content := "# comment\nexport UTA_TEST_CRED_ONE=\"alpha\"\nUTA_TEST_CRED_TWO='beta'\n"
+	if err := os.WriteFile(credPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Unsetenv("UTA_TEST_CRED_ONE")
+	t.Cleanup(func() { _ = os.Unsetenv("UTA_TEST_CRED_ONE") })
+	t.Setenv("UTA_TEST_CRED_TWO", "already-set")
+
+	if err := LoadCredentialsFromFile(credPath); err != nil {
+		t.Fatalf("LoadCredentialsFromFile: %v", err)
+	}
+	if got := os.Getenv("UTA_TEST_CRED_ONE"); got != "alpha" {
+		t.Errorf("UTA_TEST_CRED_ONE = %q, want alpha", got)
+	}
+	if got := os.Getenv("UTA_TEST_CRED_TWO"); got != "already-set" {
+		t.Errorf("UTA_TEST_CRED_TWO = %q, want already-set (existing env must win)", got)
+	}
+}

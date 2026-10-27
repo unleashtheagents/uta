@@ -14,9 +14,11 @@
 package paths
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProjectStateName is the directory uta creates inside a project root.
@@ -156,4 +158,57 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// CredentialsFile returns the path to the user-level credentials file inside
+// the global ~/.uta home directory (~/.uta/credentials.env). Keeping API keys
+// here ensures they live outside every git repository with 0600 permissions.
+func CredentialsFile(globalHome string) string {
+	return filepath.Join(globalHome, "credentials.env")
+}
+
+// LoadCredentials reads ~/.uta/credentials.env (if present) and populates any
+// environment variables that are not already defined in the current process.
+// Supports both `KEY=value` and `export KEY="value"` lines.
+func LoadCredentials() {
+	home, err := Home()
+	if err != nil {
+		return
+	}
+	_ = LoadCredentialsFromFile(CredentialsFile(home))
+}
+
+// LoadCredentialsFromFile parses a dotenv/shell file and sets any environment
+// variables not already present in os.LookupEnv.
+func LoadCredentialsFromFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		if k == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(k); !exists {
+			_ = os.Setenv(k, v)
+		}
+	}
+	return scanner.Err()
 }
