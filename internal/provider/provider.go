@@ -143,6 +143,12 @@ const (
 	EventToolCall      EventKind = "tool_call"
 	EventToolResult    EventKind = "tool_result"
 	EventError         EventKind = "error"
+	// EventSentinelAlert is emitted by providers that run an in-loop
+	// guardrail (the Nebius provider's Nemotron Lightning sentinel) when a
+	// tool call is blocked. Payload carries rule, severity, message, tool,
+	// model and latency_ms; the engine persists it as a sentinel_alert
+	// trajectory event so uta dash lists it beside budget alerts.
+	EventSentinelAlert EventKind = "sentinel_alert"
 )
 
 // AgentProvider is the mandatory contract for every backend.

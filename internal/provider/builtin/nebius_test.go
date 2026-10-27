@@ -239,13 +239,26 @@ func TestNebius_AgenticToolLoopAndFetchModels(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":[{"id":"nvidia/Nemotron-3-Ultra-550b-a55b"},{"id":"nvidia/nemotron-3-super-120b-a12b"}]}`))
 			return
 		}
-		callCount++
 		var req nebiusChatRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Model == NebiusModelLightning {
+			// Sentinel guardrail check: must run with reasoning off and a
+			// tiny token cap, and must not advertise tools.
+			if req.ReasoningEffort != "none" || req.MaxTokens == 0 || len(req.Tools) != 0 {
+				t.Errorf("unexpected sentinel request: %+v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "sentinel", "model": req.Model,
+				"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+					"message": map[string]string{"role": "assistant", "content": "PASS"}}},
+			})
+			return
+		}
+		callCount++
 		if len(req.Tools) == 0 {
 			t.Errorf("expected tools to be advertised when PreApproveTools is set")
 		}
-		w.Header().Set("Content-Type", "application/json")
 		if callCount == 1 {
 			// Round 1: Nemotron invokes write_file
 			resp := map[string]any{
@@ -386,5 +399,101 @@ func TestNebius_RoleTierRouting(t *testing.T) {
 				t.Errorf("model = %q, want %q", res.FinalText, tc.want)
 			}
 		})
+	}
+}
+
+func TestNebius_SentinelBlocksDestructiveToolCall(t *testing.T) {
+	dir := t.TempDir()
+	var sentinelPrompts []string
+	expectBlock := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		reply := func(content string) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "x", "model": req.Model,
+				"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+					"message": map[string]string{"role": "assistant", "content": content}}},
+				"usage": map[string]int64{"prompt_tokens": 5, "completion_tokens": 1},
+			})
+		}
+		if req.Model == NebiusModelLightning {
+			sentinelPrompts = append(sentinelPrompts, req.Messages[len(req.Messages)-1].Content)
+			reply("FAIL")
+			return
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "tool" {
+			if expectBlock && !strings.Contains(last.Content, "blocked by Nemotron sentinel") {
+				t.Errorf("agent should see the block as the tool result, got %q", last.Content)
+			}
+			reply("Understood, not running that.")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "tc", "model": req.Model,
+			"choices": []map[string]any{{"index": 0, "finish_reason": "tool_calls",
+				"message": map[string]any{"role": "assistant", "tool_calls": []map[string]any{{
+					"id": "call_rm", "type": "function",
+					"function": map[string]string{"name": "write_file", "arguments": `{"path":"owned.txt","content":"x"}`},
+				}}}}},
+			"usage": map[string]int64{"prompt_tokens": 5, "completion_tokens": 5},
+		})
+	}))
+	defer srv.Close()
+
+	p := &Nebius{Client: srv.Client(), BaseURL: srv.URL + "/v1", APIKey: "k"}
+	events := make(chan provider.Event, 32)
+	res, err := p.RunHeadless(context.Background(), "do the thing", provider.RunOptions{
+		Workdir: dir, PreApproveTools: []string{"*"},
+	}, events)
+	close(events)
+	if err != nil {
+		t.Fatalf("RunHeadless: %v", err)
+	}
+	if res.FinalText != "Understood, not running that." {
+		t.Errorf("FinalText = %q", res.FinalText)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "owned.txt")); statErr == nil {
+		t.Errorf("blocked write_file must not touch the workspace")
+	}
+	if len(sentinelPrompts) != 1 || !strings.Contains(sentinelPrompts[0], "write_file") {
+		t.Errorf("expected one sentinel check mentioning the tool, got %q", sentinelPrompts)
+	}
+	var sawAlert, sawBlockedResult bool
+	for ev := range events {
+		switch ev.Kind {
+		case provider.EventSentinelAlert:
+			var pl map[string]any
+			_ = json.Unmarshal(ev.Payload, &pl)
+			if pl["rule"] != "nemotron_sentinel_tool_block" || pl["severity"] != "high" || pl["tool"] != "write_file" {
+				t.Errorf("unexpected alert payload: %v", pl)
+			}
+			sawAlert = true
+		case provider.EventToolResult:
+			var pl map[string]any
+			_ = json.Unmarshal(ev.Payload, &pl)
+			if pl["sentinel"] == "fail" && pl["is_error"] == true {
+				sawBlockedResult = true
+			}
+		}
+	}
+	if !sawAlert || !sawBlockedResult {
+		t.Errorf("expected sentinel_alert and a failed tool_result (alert=%v result=%v)", sawAlert, sawBlockedResult)
+	}
+
+	// Disabled sentinel: the same call goes straight through.
+	expectBlock = false
+	events2 := make(chan provider.Event, 32)
+	_, err = p.RunHeadless(context.Background(), "again", provider.RunOptions{
+		Workdir: dir, PreApproveTools: []string{"*"}, Env: []string{"UTA_NEBIUS_SENTINEL=0"},
+	}, events2)
+	close(events2)
+	if err != nil {
+		t.Fatalf("RunHeadless (sentinel off): %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "owned.txt")); statErr != nil {
+		t.Errorf("with the sentinel disabled the write should land: %v", statErr)
 	}
 }

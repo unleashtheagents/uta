@@ -228,10 +228,13 @@ type nebiusChatMessage struct {
 }
 
 type nebiusChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []nebiusChatMessage `json:"messages"`
-	Tools    []nebiusToolSpec    `json:"tools,omitempty"`
-	Stream   bool                `json:"stream,omitempty"`
+	Model           string              `json:"model"`
+	Messages        []nebiusChatMessage `json:"messages"`
+	Tools           []nebiusToolSpec    `json:"tools,omitempty"`
+	Stream          bool                `json:"stream,omitempty"`
+	Temperature     *float64            `json:"temperature,omitempty"`
+	MaxTokens       int                 `json:"max_tokens,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 }
 
 type nebiusChatResponse struct {
@@ -603,15 +606,45 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 				}
 			}
 
-			toolOutput, isErr := executeNebiusToolCall(ctx, tc, opts)
+			var toolOutput string
+			var isErr bool
+			verdict := n.sentinelCheck(ctx, client, apiKey, baseURL, tc, opts)
+			if verdict.Blocked {
+				toolOutput = fmt.Sprintf("blocked by Nemotron sentinel (%s, %d ms): %s", verdict.Model, verdict.LatencyMS, verdict.Reason)
+				isErr = true
+				if events != nil {
+					alertPayload, _ := json.Marshal(map[string]any{
+						"rule":       "nemotron_sentinel_tool_block",
+						"severity":   "high",
+						"message":    fmt.Sprintf("%s blocked %s: %s", verdict.Model, tc.Function.Name, verdict.Reason),
+						"tool":       tc.Function.Name,
+						"arguments":  tc.Function.Arguments,
+						"model":      verdict.Model,
+						"latency_ms": verdict.LatencyMS,
+					})
+					events <- provider.Event{
+						Kind:      provider.EventSentinelAlert,
+						Timestamp: time.Now(),
+						Payload:   alertPayload,
+					}
+				}
+			} else {
+				toolOutput, isErr = executeNebiusToolCall(ctx, tc, opts)
+			}
 
 			if events != nil {
-				trPayload, _ := json.Marshal(map[string]any{
+				trMap := map[string]any{
 					"tool_call_id": tc.ID,
 					"tool_name":    tc.Function.Name,
 					"output":       toolOutput,
 					"is_error":     isErr,
-				})
+				}
+				if verdict.Checked {
+					trMap["sentinel"] = verdict.Status
+					trMap["sentinel_model"] = verdict.Model
+					trMap["sentinel_ms"] = verdict.LatencyMS
+				}
+				trPayload, _ := json.Marshal(trMap)
 				events <- provider.Event{
 					Kind:      provider.EventToolResult,
 					Timestamp: time.Now(),

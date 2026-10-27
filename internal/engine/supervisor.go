@@ -1116,6 +1116,8 @@ func mapProviderEventKind(k provider.EventKind) trajectory.Kind {
 		return trajectory.SubtaskStdout
 	case provider.EventError:
 		return trajectory.SubtaskStdout
+	case provider.EventSentinelAlert:
+		return trajectory.SentinelAlert
 	case provider.EventSessionID:
 		// Captured in the subtask row (provider_session_id) instead of as a trajectory event.
 		return ""
