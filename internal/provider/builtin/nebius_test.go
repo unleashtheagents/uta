@@ -360,6 +360,9 @@ func TestNebius_RoleTierRouting(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req nebiusChatRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if want := nebiusReasoningEffortForModel(req.Model); req.ReasoningEffort != want {
+			t.Errorf("model %s: reasoning_effort = %q, want %q", req.Model, req.ReasoningEffort, want)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "x", "model": req.Model,
@@ -495,5 +498,92 @@ func TestNebius_SentinelBlocksDestructiveToolCall(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "owned.txt")); statErr != nil {
 		t.Errorf("with the sentinel disabled the write should land: %v", statErr)
+	}
+}
+
+func TestNebius_ReasoningSeparatedFromAnswer(t *testing.T) {
+	var secondReq nebiusChatRequest
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if calls == 2 {
+			secondReq = req
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "model": req.Model,
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+				"message": map[string]any{
+					"role":              "assistant",
+					"content":           "<think>scratch</think>\n\nPASS",
+					"reasoning_content": "Let me weigh the options.",
+				}}},
+			"usage": map[string]any{
+				"prompt_tokens": 20, "completion_tokens": 60,
+				"completion_tokens_details": map[string]int64{"reasoning_tokens": 58},
+				"prompt_tokens_details":     map[string]int64{"cached_tokens": 12},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	n := &Nebius{BaseURL: srv.URL + "/v1", APIKey: "k"}
+	events := make(chan provider.Event, 32)
+	res, err := n.RunHeadless(context.Background(), "verify", provider.RunOptions{Role: provider.RoleJudge}, events)
+	close(events)
+	if err != nil {
+		t.Fatalf("RunHeadless: %v", err)
+	}
+	if res.FinalText != "PASS" {
+		t.Errorf("FinalText = %q, want the answer without thinking", res.FinalText)
+	}
+	var sawReasoning, sawUsage bool
+	for ev := range events {
+		if ev.Kind != provider.EventStdoutChunk {
+			continue
+		}
+		var pl map[string]any
+		_ = json.Unmarshal(ev.Payload, &pl)
+		switch pl["type"] {
+		case "reasoning":
+			sawReasoning = pl["text"] == "Let me weigh the options." && pl["reasoning_tokens"] == float64(58)
+		case "usage":
+			sawUsage = pl["reasoning_tokens"] == float64(58) && pl["cached_tokens"] == float64(12)
+		}
+	}
+	if !sawReasoning || !sawUsage {
+		t.Errorf("expected reasoning and usage events (reasoning=%v usage=%v)", sawReasoning, sawUsage)
+	}
+
+	// Resume: the replayed assistant turn must not carry reasoning fields.
+	if _, err := n.ResumeHeadless(context.Background(), res.SessionID, "again", provider.RunOptions{}, nil); err != nil {
+		t.Fatalf("ResumeHeadless: %v", err)
+	}
+	for _, m := range secondReq.Messages {
+		if m.Role == "assistant" {
+			if m.ReasoningContent != "" || m.Reasoning != "" {
+				t.Errorf("reasoning replayed into history: %+v", m)
+			}
+			if m.Content != "PASS" {
+				t.Errorf("history content = %q, want stripped answer", m.Content)
+			}
+		}
+	}
+}
+
+func TestNebius_ReasoningEffortOverride(t *testing.T) {
+	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=LOW"}, NebiusModelUltra); got != "low" {
+		t.Errorf("override = %q", got)
+	}
+	if got := resolveReasoningEffort([]string{"UTA_NEBIUS_REASONING_EFFORT=default"}, NebiusModelUltra); got != "" {
+		t.Errorf("default should unset the field, got %q", got)
+	}
+	if got := stripThinkTags("<THINK>a</THINK> b"); got != "b" {
+		t.Errorf("stripThinkTags = %q", got)
+	}
+	if got := stripThinkTags("plain"); got != "plain" {
+		t.Errorf("stripThinkTags(plain) = %q", got)
 	}
 }

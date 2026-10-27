@@ -225,6 +225,71 @@ type nebiusChatMessage struct {
 	Content    string           `json:"content"`
 	ToolCalls  []nebiusToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
+	// ReasoningContent / Reasoning carry Nemotron's thinking on responses.
+	// They are read from the wire and cleared before a message is replayed
+	// into the next request's history.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Reasoning        string `json:"reasoning,omitempty"`
+}
+
+// thinking returns whichever reasoning field the server populated.
+func (m nebiusChatMessage) thinking() string {
+	if strings.TrimSpace(m.ReasoningContent) != "" {
+		return m.ReasoningContent
+	}
+	return m.Reasoning
+}
+
+// forHistory strips response-only fields so the message can be sent back.
+func (m nebiusChatMessage) forHistory() nebiusChatMessage {
+	m.ReasoningContent = ""
+	m.Reasoning = ""
+	return m
+}
+
+// nebiusReasoningEffortForModel is the per-tier default for the
+// reasoning_effort request field: Ultra plans and judges with deep thinking,
+// Super and Super-VL work with moderate thinking, Nano stays light and
+// Lightning answers without a thinking phase so its verdicts are not
+// swamped by chain-of-thought. UTA_NEBIUS_REASONING_EFFORT overrides for
+// every tier; "default" leaves the field unset so the server default applies.
+func nebiusReasoningEffortForModel(model string) string {
+	switch model {
+	case NebiusModelUltra:
+		return "high"
+	case NebiusModelSuper, NebiusModelSuperVL:
+		return "medium"
+	case NebiusModelNano:
+		return "low"
+	case NebiusModelLightning:
+		return "none"
+	}
+	return ""
+}
+
+func resolveReasoningEffort(env []string, model string) string {
+	if v := strings.ToLower(resolveEnvKey(env, "UTA_NEBIUS_REASONING_EFFORT")); v != "" {
+		if v == "default" {
+			return ""
+		}
+		return v
+	}
+	return nebiusReasoningEffortForModel(model)
+}
+
+// stripThinkTags removes a leaked <think>...</think> block that some chat
+// templates place at the head of content when reasoning is on.
+func stripThinkTags(text string) string {
+	lower := strings.ToLower(text)
+	start := strings.Index(lower, "<think>")
+	if start < 0 {
+		return text
+	}
+	end := strings.Index(lower, "</think>")
+	if end < start {
+		return text
+	}
+	return strings.TrimSpace(text[:start] + text[end+len("</think>"):])
 }
 
 type nebiusChatRequest struct {
@@ -247,9 +312,15 @@ type nebiusChatResponse struct {
 		FinishReason string            `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
+		PromptTokens            int64 `json:"prompt_tokens"`
+		CompletionTokens        int64 `json:"completion_tokens"`
+		TotalTokens             int64 `json:"total_tokens"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+		PromptTokensDetails struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -408,6 +479,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	if sessionID == "" {
 		sessionID = "nebius-" + uuid.NewString()
 	}
+	reasoningEffort := resolveReasoningEffort(opts.Env, model)
 
 	// Expand @file mentions inside opts.Workdir (inspired by Google Antigravity & Claude Code).
 	effectivePrompt := prompt
@@ -460,6 +532,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			"provider":   "nebius",
 			"role":       string(role),
 			"routing":    routing,
+			"reasoning":  reasoningEffort,
 		})
 		events <- provider.Event{
 			Kind:      provider.EventSessionID,
@@ -478,12 +551,28 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	var totalTokensIn, totalTokensOut int64
 	var lastRawBytes []byte
 
+	var maxTokens int
+	if v := resolveEnvKey(opts.Env, "UTA_NEBIUS_MAX_TOKENS"); v != "" {
+		fmt.Sscanf(v, "%d", &maxTokens)
+	}
+	var temperature *float64
+	if v := resolveEnvKey(opts.Env, "UTA_NEBIUS_TEMPERATURE"); v != "" {
+		var t float64
+		if _, err := fmt.Sscanf(v, "%g", &t); err == nil {
+			temperature = &t
+		}
+	}
+	var totalReasoningTokens, totalCachedTokens int64
+
 	for round := 0; round < maxNebiusToolRounds; round++ {
 		reqBody, err := json.Marshal(nebiusChatRequest{
-			Model:    model,
-			Messages: history,
-			Tools:    tools,
-			Stream:   useStream && len(tools) == 0,
+			Model:           model,
+			Messages:        history,
+			Tools:           tools,
+			Stream:          useStream && len(tools) == 0,
+			Temperature:     temperature,
+			MaxTokens:       maxTokens,
+			ReasoningEffort: reasoningEffort,
 		})
 		if err != nil {
 			return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius marshal request: %w", err)
@@ -561,6 +650,8 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 
 		totalTokensIn += parsed.Usage.PromptTokens
 		totalTokensOut += parsed.Usage.CompletionTokens
+		totalReasoningTokens += parsed.Usage.CompletionTokensDetails.ReasoningTokens
+		totalCachedTokens += parsed.Usage.PromptTokensDetails.CachedTokens
 
 		var assistantMsg nebiusChatMessage
 		if len(parsed.Choices) > 0 {
@@ -569,7 +660,21 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		if assistantMsg.Role == "" {
 			assistantMsg.Role = "assistant"
 		}
-		history = append(history, assistantMsg)
+		assistantMsg.Content = stripThinkTags(assistantMsg.Content)
+		if think := strings.TrimSpace(assistantMsg.thinking()); think != "" && events != nil {
+			thinkPayload, _ := json.Marshal(map[string]any{
+				"type":             "reasoning",
+				"model":            model,
+				"text":             think,
+				"reasoning_tokens": parsed.Usage.CompletionTokensDetails.ReasoningTokens,
+			})
+			events <- provider.Event{
+				Kind:      provider.EventStdoutChunk,
+				Timestamp: time.Now(),
+				Payload:   thinkPayload,
+			}
+		}
+		history = append(history, assistantMsg.forHistory())
 
 		if txt := strings.TrimSpace(assistantMsg.Content); txt != "" {
 			finalText = txt
@@ -664,6 +769,21 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	n.sessions[sessionID] = history
 	n.mu.Unlock()
 
+	if events != nil && (totalReasoningTokens > 0 || totalCachedTokens > 0) {
+		statPayload, _ := json.Marshal(map[string]any{
+			"type":             "usage",
+			"model":            model,
+			"reasoning_tokens": totalReasoningTokens,
+			"cached_tokens":    totalCachedTokens,
+			"text":             fmt.Sprintf("[nebius usage] reasoning_tokens=%d cached_tokens=%d", totalReasoningTokens, totalCachedTokens),
+		})
+		events <- provider.Event{
+			Kind:      provider.EventStdoutChunk,
+			Timestamp: time.Now(),
+			Payload:   statPayload,
+		}
+	}
+
 	if totalTokensIn <= 0 {
 		totalTokensIn = estimateTokens(effectivePrompt)
 	}
@@ -710,6 +830,8 @@ func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (fin
 			if delta == "" {
 				delta = c.Message.Content
 			}
+			// Reasoning deltas arrive on reasoning_content; they are not
+			// part of the answer and are left out of the streamed text.
 			if delta != "" {
 				buf.WriteString(delta)
 				if events != nil {
@@ -727,5 +849,5 @@ func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (fin
 			}
 		}
 	}
-	return strings.TrimSpace(buf.String()), tokensIn, tokensOut
+	return stripThinkTags(strings.TrimSpace(buf.String())), tokensIn, tokensOut
 }
