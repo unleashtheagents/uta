@@ -106,6 +106,9 @@ func TestApplyProfileToResume_PopulatesEveryField(t *testing.T) {
 	if req.HITLTokenThreshold != 80 || req.HITLSeverity != "high" {
 		t.Errorf("HITL fields = (%d, %q)", req.HITLTokenThreshold, req.HITLSeverity)
 	}
+	if !req.MemoryConsolidate {
+		t.Errorf("MemoryConsolidate = false, want true")
+	}
 }
 
 func TestApplyProfileToResume_NilSafe(t *testing.T) {

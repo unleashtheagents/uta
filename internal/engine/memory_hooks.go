@@ -124,6 +124,36 @@ func (s *Supervisor) consolidateRunOutcome(sessionID string, req RunRequest, res
 	})
 }
 
+// consolidateResumeOutcome is the supervisor.Resume-side counterpart to
+// consolidateRunOutcome. Writes a single session_outcome fact from the
+// final RunResult when the active profile opted in via memory.consolidate.
+func (s *Supervisor) consolidateResumeOutcome(sessionID string, req ResumeRequest, res *RunResult) {
+	if !req.MemoryConsolidate || s.deps.Memory == nil {
+		return
+	}
+	body := fmt.Sprintf(
+		"Goal: %s\nStatus: %s\nSubtasks: 1 (resumed)",
+		strings.TrimSpace(req.Goal), res.Status,
+	)
+	fact := memory.Fact{
+		SourceMode:      req.ModeName,
+		SourceSessionID: sessionID,
+		Kind:            "session_outcome",
+		Body:            body,
+		Tags:            consolidateTagsFromGoal(req.Goal, req.ModeName),
+	}
+	id, err := s.deps.Memory.Write(fact)
+	if err != nil {
+		s.dbErr(sessionID, "", "memory_write_session_outcome", err)
+		return
+	}
+	s.emit(sessionID, "", trajectory.MemoryFactWritten, map[string]any{
+		"id":     id,
+		"kind":   fact.Kind,
+		"source": "consolidate",
+	})
+}
+
 // memorySearchTimeout caps the hybrid search (which may include one
 // embedding API round trip for the query vector). Planning-latency
 // budget, not correctness — on timeout the tag-overlap fallback runs.

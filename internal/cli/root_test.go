@@ -231,7 +231,7 @@ func TestNewApp_RegisterBuiltinProviders(t *testing.T) {
 	if app.Registry == nil {
 		t.Fatal("Registry is nil; want built-in providers registered")
 	}
-	for _, name := range []string{"claude", "gemini"} {
+	for _, name := range []string{"agy", "claude"} {
 		if _, ok := app.Registry.Get(name); !ok {
 			t.Errorf("Registry.Get(%q) not registered", name)
 		}

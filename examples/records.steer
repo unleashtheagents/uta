@@ -1,0 +1,44 @@
+#!/usr/bin/env -S uta mission run
+// records.steer — typed records: structured output, validated at the boundary.
+//
+// A `type` declaration is a contract on an agent's reply. The runtime
+// appends the expected JSON shape to the prompt, then parses and validates
+// the answer before it flows anywhere: a missing field, a wrong type, or a
+// stray code fence means a bounded retry and then a typed SchemaMismatch
+// failure — never silent garbage downstream. Field types are Text, Int,
+// or Bool; `[Finding]` means a JSON array of them.
+//
+//   uta mission check records.steer     static checks, no tokens spent
+//   uta mission run records.steer
+
+type Finding {
+  title: Text
+  detail: Text
+  blocking: Bool
+}
+
+agent fn inspect(area: Text) -> [Finding]
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Review the current directory's ${area}.
+  Report your two most important findings.
+  """
+
+agent fn triage(findings: Text) -> Finding
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Here are findings from a review, as JSON:
+
+  ${findings}
+
+  Pick the single most urgent one.
+  """
+
+mission typed_review {
+  budget 200k tokens, $1, 5min
+
+  let raw = inspect("error handling")
+  emit triage(raw)               // a [Finding] flows onward as its JSON text
+}

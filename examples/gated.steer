@@ -1,0 +1,34 @@
+#!/usr/bin/env -S uta mission run
+// gated.steer — `gate human`: mission suspension + resume via hitl approve.
+//
+// The gate stops the walk in a re-enterable state: uta writes a pending
+// HITL request, closes the session as awaiting_signature, and exits
+// cleanly. A human signs off out-of-band, then the mission resumes from
+// its journal — the draft is recovered, not re-paid.
+//
+//   uta mission run gated.steer            suspends at the gate
+//   uta hitl approve <session>             sign (or --deny to refuse)
+//   uta mission run gated.steer --resume-session <session>
+
+agent fn draft(topic: Text) -> Text
+  costs <= 20k tokens
+  prompt """
+  Draft a short release announcement about ${topic}.
+  Three sentences, plain text, no preamble.
+  """
+
+agent fn polish(text: Text) -> Text
+  costs <= 20k tokens
+  prompt """
+  Tighten this announcement without changing its meaning:
+
+  ${text}
+  """
+
+mission gated_announcement {
+  budget 100k tokens, 10min
+
+  let d = draft("the v0 steer interpreter")
+  gate human "A draft is ready on the session journal — continue to polish and publish?"
+  emit polish(d)
+}

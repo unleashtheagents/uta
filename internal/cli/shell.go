@@ -22,6 +22,8 @@ import (
 	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/memory"
 	"github.com/unleashtheagents/uta/internal/profile"
+	"github.com/unleashtheagents/uta/internal/provider/builtin"
+	"github.com/unleashtheagents/uta/internal/skills"
 	"github.com/unleashtheagents/uta/internal/state"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 	"github.com/unleashtheagents/uta/internal/whiteboard"
@@ -395,6 +397,60 @@ func handleShellCommand(ctx context.Context, line string, b shellBackend, out, e
 		fmt.Fprintf(out, "workdir: %s\n", b.Workdir())
 	case "status":
 		b.Status(out)
+	case "compact":
+		prev := b.SessionShort()
+		b.NewConversation()
+		if prev != "" {
+			fmt.Fprintf(out, "compacted conversation %s — next input starts a fresh context window.\n", prev)
+		} else {
+			fmt.Fprintln(out, "compacted conversation — next input starts a fresh context window.")
+		}
+	case "plan":
+		if len(args) == 0 {
+			fmt.Fprintln(errw, "usage: /plan <goal>")
+			return
+		}
+		goal := strings.Join(args, " ")
+		dec := builtin.RouteNebiusGoal(goal)
+		fmt.Fprintf(out, "plan (%s):\n  planner:  %s\n  worker:   %s\n  sentinel: %s\n  reason:   %s\n",
+			dec.Tier, dec.PlannerModel, dec.WorkerModel, dec.SentinelModel, dec.Reason)
+	case "nebius":
+		if len(args) == 0 || args[0] == "status" || args[0] == "models" {
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "TIER\tMODEL\tPARAMS\tROLE")
+			for _, m := range builtin.NebiusModelCatalog() {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", m.Alias, m.ID, m.Params, m.Role)
+			}
+			_ = tw.Flush()
+			return
+		}
+		if args[0] == "route" && len(args) > 1 {
+			dec := builtin.RouteNebiusGoal(strings.Join(args[1:], " "))
+			fmt.Fprintf(out, "nebius route (%s): planner=%s worker=%s sentinel=%s\n",
+				dec.Tier, dec.PlannerModel, dec.WorkerModel, dec.SentinelModel)
+			return
+		}
+		resolved := builtin.ResolveNebiusModel(args[0])
+		_ = b.SetWorker(ctx, "nebius")
+		if err := b.SetModel("NEBIUS_MODEL=" + resolved); err != nil {
+			fmt.Fprintln(errw, "nebius:", err)
+			return
+		}
+		fmt.Fprintf(out, "nebius model: %s\n", resolved)
+	case "skills", "rules":
+		home, _ := os.UserHomeDir()
+		cat := skills.Discover(b.Workdir(), home)
+		if len(cat.Items) == 0 {
+			fmt.Fprintln(out, "no workspace rules or skills discovered.")
+			return
+		}
+		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "KIND\tNAME\tECOSYSTEM\tTRIGGER\tDESCRIPTION")
+		for _, it := range cat.Items {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				it.Kind, it.Name, it.Ecosystem, it.Trigger, truncateLine(it.Description, 56))
+		}
+		_ = tw.Flush()
 	default:
 		fmt.Fprintf(errw, "unknown command /%s — try /help\n", name)
 	}
@@ -411,6 +467,7 @@ conversation
                       a run, later inputs continue the same conversation
   @<agent> <text>     route one turn to a specific agent (e.g. @gemini ...)
   /new  /clear        start a fresh conversation
+  /compact            compact and reset the active conversation context window
   /use <session-id>   attach to an existing session (/resume works too)
   /sessions [n]       list recent sessions (default 10)
 
@@ -418,7 +475,11 @@ agent control
   /agents             list agent providers and availability (* = active worker)
   /worker [name]      show or switch the active worker agent
   /model [m|default]  show or pin the model the active worker runs on
-                      (bare name for claude/gemini, VAR=value for others)
+                      (bare name for claude/gemini/nebius/agy, VAR=value for others)
+  /nebius [tier]      list or switch Nebius Token Factory NVIDIA Nemotron tiers
+                      (ultra | super | lightning | vl | route <goal>)
+  /plan <goal>        preview 90/10 Nebius × Nemotron coordinator routing for a goal
+  /skills             list discovered workspace rules (AGENTS.md, CLAUDE.md) & skills
   /tools [t,...|none] show or set tools pre-approved for every turn
   /mode [name|none]   show, switch, or clear the active mission profile
   /mission [check] <file.steer>
@@ -517,6 +578,10 @@ func modelEnvVarFor(worker string) string {
 		return "ANTHROPIC_MODEL"
 	case "gemini":
 		return "GEMINI_MODEL"
+	case "agy":
+		return "AGY_MODEL"
+	case "nebius":
+		return "NEBIUS_MODEL"
 	}
 	return ""
 }
@@ -531,6 +596,9 @@ func (s *utaShell) SetModel(spec string) error {
 	envVar := modelEnvVarFor(s.worker)
 	if envVar == "" {
 		return fmt.Errorf("no known model env var for provider %q — use /model VAR=value (see docs/model-selection.md)", s.worker)
+	}
+	if s.worker == "nebius" {
+		spec = builtin.ResolveNebiusModel(spec)
 	}
 	s.models[s.worker] = envVar + "=" + spec
 	return nil
@@ -762,8 +830,15 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 // mission gets the shell's default worker, workdir, and mode env, but is
 // its own session — the attached conversation is not consumed.
 func (s *utaShell) RunMissionFile(parent context.Context, path string, checkOnly bool) error {
-	prog, warnings, ok := loadSteerProgram(path, s.errw)
+	prog, warnings, src, ok := loadSteerProgram(path, s.errw)
 	if !ok {
+		return errors.New("program did not compile (fix the diagnostics above)")
+	}
+	policy, pds := resolveMissionPolicy(s.app, prog, src, s.errw)
+	if len(pds) > 0 {
+		for _, d := range pds {
+			fmt.Fprintln(s.errw, d.Render())
+		}
 		return errors.New("program did not compile (fix the diagnostics above)")
 	}
 	if checkOnly {
@@ -807,12 +882,20 @@ func (s *utaShell) RunMissionFile(parent context.Context, path string, checkOnly
 		Workdir:       s.workdir,
 		Env:           env,
 		ModeName:      rr.ModeName,
+		Policy:        policy,
+		HITLStateDir:  s.app.StateDir,
 	})
 
 	bus.Shutdown()
 	<-renderDone
 
 	if err != nil {
+		if errors.Is(err, engine.ErrMissionSuspended) {
+			fmt.Fprintf(s.errw, "mission suspended awaiting a human signature (session %s)\n", shortID(res.SessionID))
+			fmt.Fprintf(s.errw, "  approve: uta hitl approve %s\n", res.SessionID)
+			fmt.Fprintf(s.errw, "  resume:  uta mission run %s --resume-session %s\n", path, res.SessionID)
+			return nil
+		}
 		if errors.Is(err, context.Canceled) && parent.Err() == nil {
 			fmt.Fprintln(s.errw, "mission cancelled.")
 			if res.SessionID != "" {

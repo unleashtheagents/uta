@@ -1,0 +1,34 @@
+// Nebius Token Factory × NVIDIA Nemotron multi-agent mission.
+//
+// Run live with Nebius Token Factory:
+//   export NEBIUS_API_KEY="v1.nebius..."
+//   export NEBIUS_MODEL="nvidia/Nemotron-3-Ultra-550b-a55b"
+//   uta mission run examples/nebius-nemotron.steer
+//
+// Run deterministic offline test:
+//   uta mission test examples/nebius-nemotron.steer --script examples/nebius-nemotron.journal.yaml
+
+agent fn plan_architecture(service: Text) -> Text
+  worker any(nebius, claude, agy)
+  costs <= 80k tokens
+  prompt """
+  Using NVIDIA Nemotron-3 Ultra on Nebius Token Factory, design a low-latency
+  multi-agent architecture for ${service} with a 90/10 hybrid router and
+  sub-100ms Nemotron-3.5-Lightning sentinel guardrails.
+  """
+
+agent fn audit_guardrails(spec: Text) -> Text
+  worker any(nebius, claude, agy)
+  costs <= 60k tokens
+  prompt """
+  Audit the following architecture against OWASP Agentic ASI01-ASI10 and verify
+  deterministic spend caps:
+  ${spec}
+  """
+
+mission nebius_nemotron_pipeline {
+  budget 200k tokens, $1, 5min
+  let arch = plan_architecture("token-factory-gateway")
+  let report = audit_guardrails(arch)
+  emit report
+}

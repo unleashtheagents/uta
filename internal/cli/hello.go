@@ -48,7 +48,8 @@ func runHello(cmd *cobra.Command, app *App) error {
 
 	fmt.Fprintln(out, "What uta does")
 	fmt.Fprintln(out, "  Decomposes a goal into parallel subtasks, dispatches each to whichever")
-	fmt.Fprintln(out, "  agent CLI you have installed (Claude Code, Gemini CLI, or any YAML-")
+	fmt.Fprintln(out, "  agent CLI or cloud endpoint you have configured (Nebius Token Factory")
+	fmt.Fprintln(out, "  NVIDIA Nemotron, Claude Code, Antigravity agy, Gemini CLI, or any YAML-")
 	fmt.Fprintln(out, "  described provider), synthesizes the answers, and records every step as")
 	fmt.Fprintln(out, "  a queryable trajectory you can resume, audit, or replay.")
 	fmt.Fprintln(out)
@@ -58,8 +59,10 @@ func runHello(cmd *cobra.Command, app *App) error {
 	fmt.Fprintln(out, "Detected providers")
 	if len(avail) == 0 {
 		fmt.Fprintln(out, "  (none on PATH)")
-		fmt.Fprintln(out, "  Install at least one to run a goal end-to-end:")
+		fmt.Fprintln(out, "  Install or configure at least one to run a goal end-to-end:")
+		fmt.Fprintln(out, "    - nebius    export NEBIUS_API_KEY=\"v1.nebius...\" (Nebius Token Factory · NVIDIA Nemotron)")
 		fmt.Fprintln(out, "    - claude    https://docs.claude.com/en/docs/claude-code")
+		fmt.Fprintln(out, "    - agy       https://antigravity.google/docs/cli")
 		fmt.Fprintln(out, "    - gemini    https://github.com/google-gemini/gemini-cli")
 		fmt.Fprintln(out, "  Or drop a YAML descriptor in ~/.uta/providers/ for any other CLI.")
 	} else {

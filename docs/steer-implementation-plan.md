@@ -6,24 +6,53 @@ from zero.
 
 ## 0 · Where we actually are (verified)
 
-Done and tested:
+**M1–M7 and M8 slices (named lenses `@{Lens, …}`, `gate human … within D`, `gate choose … of […]`) are done** — implemented and tested across `internal/steer/`, `internal/engine/mission.go`, `internal/lsp/`, and `internal/cli/mission*.go`.
+
 - **Front-end** (`internal/steer/`): lexer, parser, AST, static checker.
-  v0 subset: `agent fn` (worker / costs / prompt), `mission`
-  (budget / context / let / emit / calls). RFC constructs beyond the
-  subset (`judge`, `until dry`, `gate human`, `with cap`) parse to a
-  legible "not yet implemented" diagnostic — programs written against the
-  paper degrade gracefully.
+  v0 subset: `agent fn` (worker / costs / prompt), `type` records,
+  `mission` (policy / budget / let / emit / calls), `par for`,
+  `judge … require k of n`, `gate human`, `with cap … from policy`,
+  `until dry(n)`, `retry n on E`, and mission-level `on E ->` handlers.
+  RFC constructs beyond the subset (host `fn`, `context`, `recall`,
+  `var`, `if`) parse to a legible "not yet implemented" diagnostic —
+  programs written against the paper degrade gracefully.
+- **M1 · Boundary types — done.** Record types → JSON Schema
+  (`internal/steer/schema.go`), validated at the agent boundary (P5,
+  committed); mismatch → bounded retry → typed `SchemaMismatch` that
+  `retry n on E` catches (working tree).
+- **M2 · Judgment — done.** `judge … by … require k of n` as an
+  expression, verdicts journaled with `@k` tags (P8, committed).
+- **M3 · Humans and authority — done** (working tree, P-commit pending).
+  `gate human` suspends the mission (journal state = awaiting-signature),
+  survives a process restart, and resumes via the `hitl` approve/deny
+  markers; `policy` binds a MissionProfile, resolved at **check time**;
+  `with cap C from policy P` raises a capability for exactly one block,
+  enforced through `engine/capability`; raising a capability the source
+  policy doesn't grant is a check-time diagnostic.
+- **M4 · Discovery and failure — done** (working tree, P-commit
+  pending). `until dry(n)` with a checker-mandated budget guard,
+  `retry n on E`, and `on BudgetExceeded ->` compensation with `halt`
+  as clean typed termination.
 - **Execution** (`internal/engine/mission.go`): `Supervisor.RunMission`
   walks the AST, journals to the normal session/trajectory store. Budget
   exhaustion is a typed event (tested). Mission **resume** replays the
-  journal — paid work is never re-paid (P3, committed).
-- **`par for`** — structured fan-out (P4, committed).
-- **CLI**: `uta mission run` / `uta mission check`.
+  journal — paid work is never re-paid (P3, committed). `par for`
+  structured fan-out (P4, committed) with within-mission worker failover
+  for `any()` sets (P9, committed).
+- **CLI**: `uta mission run` / `uta mission check`, steer missions over
+  MCP (P7, committed), and `uta mission test` — scripted responses, no
+  provider, no network (working tree; the start of M6).
+- **Shipped examples**: `examples/*.steer` (hello, fanout, records,
+  judge, gated), parse/check-guarded in `internal/steer/examples_test.go`
+  and executed against scripted providers in
+  `internal/engine/examples_test.go`.
 - **Capability gate** (`internal/engine/capability`): pattern-based
   allow/deny applied to every observed tool invocation — the enforcement
-  substrate `with cap` will bind to.
-- In flight (uncommitted): `internal/steer/schema.go` — record types →
-  JSON Schema at the agent boundary.
+  substrate `with cap` binds to.
+
+**Next up → M5** (the `@k` type system, statically) and the rest of
+**M6** (golden-journal assertions, replaying a recorded production
+trajectory as a regression test).
 
 Design rule carried from the papers: every milestone must keep the three
 invariants — every effect journals; no ambient authority; budget is
@@ -32,7 +61,8 @@ enforced, not advisory.
 ## 1 · Milestones
 
 Each milestone = shippable, tested, demoable with a `.steer` example in
-`examples/steer/`, and closes with `uta audit internal/steer --mode audit`.
+`examples/` (`examples/*.steer` — globbed by the examples tests), and
+closes with `uta audit internal/steer --mode audit`.
 
 ### M1 · Boundary types (finish what's in flight)
 `type` declarations → JSON Schema; agent outputs validated at the
@@ -80,7 +110,7 @@ check-time diagnostic with a fix-it hint naming the missing judge step.
 `uta mission test`: scripted/recorded mock providers, golden-journal
 assertions ("never raises git.write", "cost ≤ X", "gate fired once"),
 replay of any recorded session as a regression test.
-**Accept:** `examples/steer/` all run in CI against mocks with zero
+**Accept:** `examples/*.steer` all run in CI against mocks with zero
 network; one production trajectory converted into a passing test.
 
 ### M7 · Tooling
@@ -90,7 +120,23 @@ stdio). The time-travel debugger is a thin UI over the journal — schedule
 after M6, it reuses the same replay machinery.
 
 ### M8+ · The frontier (from the 10-areas list, in dependency order)
-1. Provenance lattice `@ {Security, Repro}` (extends M5's machinery)
+1. Provenance lattice `@ {Security, Repro}` (extends M5's machinery) —
+   landed (working tree): the runtime tags judge-passed values with their
+   standing lens set (`lenses` in the JudgeCompleted journal entry, lens =
+   the verifier's first string-literal argument, else its fn name),
+   parameter types accept `@ {…}` (its count projection is enforced by
+   the existing @k check), and the checker enforces named-lens
+   subsumption at call sites.
+   **Decision — K < N judges certify no named lens statically.** A judge
+   with `require k of n`, k < n, guarantees only the count: any k-subset
+   of verifiers may have stood, so the checker's predicted lens set is
+   empty even though the runtime journals whichever lenses actually
+   stood. Runtime truth is deliberately richer than static prediction —
+   this asymmetry is inherent to k-of-n, not a gap to close. Consequence:
+   a named-lens demand `@ {…}` is satisfiable only by a value from a
+   `require N of N` judge whose verifiers cover the demanded lenses; the
+   K < N diagnostic says exactly this so the error is actionable, not
+   mysterious.
 2. Compensation/saga semantics (extends M4)
 3. Streaming partial results (needs provider-stream plumbing — engine
    already consumes stream-json)
@@ -158,10 +204,16 @@ already in the log (P3, P4…), Co-Authored-By: uta <noreply@unleashtheagents.ai
 
 ## 3 · Risks
 
-- **Replay identity under refactors** — journal keys derived from
-  structural position break when programs are edited between runs.
-  Decide early (M3): key = hash of (construct path + args), and document
-  the invalidation rule. This is the sharpest knife in the drawer.
+- **Replay identity under refactors** — *decided (M3)*: journal keys are
+  structural spec-ids (walk-order position within the mission, per
+  construct kind), and `recoverResult` in `internal/engine/mission.go`
+  adds a prompt-equality guard — a prior result stands in for a call only
+  if the recorded prompt equals the newly rendered one. Invalidation
+  rule: editing a mission between runs invalidates exactly the journal
+  entries whose structural position or rendered prompt changed;
+  everything else replays without re-payment. Still the sharpest knife
+  in the drawer — any change to spec-id derivation is a
+  replay-compatibility break and must be treated as such.
 - **Scope creep via the papers** — the RFC promises more than v0 should
   ship. The "not yet implemented" diagnostic is the pressure valve; keep
   it honest.

@@ -13,6 +13,7 @@ import (
 	"github.com/unleashtheagents/uta/internal/engine"
 	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/memory"
+	"github.com/unleashtheagents/uta/internal/sentinel"
 	"github.com/unleashtheagents/uta/internal/state"
 	"github.com/unleashtheagents/uta/internal/trajectory"
 	"github.com/unleashtheagents/uta/internal/whiteboard"
@@ -133,10 +134,25 @@ the follow-up instructions.`,
 					defer os.Remove(req.MCPConfigPath)
 				}
 			}
+			sent := sentinel.NewSentinel(sentinel.Config{
+				BudgetWallClock: runTimeout,
+				PublishOnBus:    bus,
+				Recorder:        recorder,
+				Cancel:          cancel,
+			})
+			go sent.Watch(ctx, bus)
+
 			result, err := sup.Resume(ctx, req)
 			if result.SessionID != "" {
 				if terr := state.TouchActiveSession(app.StateDir, result.SessionID); terr != nil {
 					fmt.Fprintln(cmd.ErrOrStderr(), "warn: update active thread:", terr)
+				}
+				if mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
+					maybeWriteRetrospective(ctx, cmd, app, recorder, bus, mode, engine.RunRequest{
+						Goal: goal, ModeName: mode.Name, WorkerName: workerName,
+					}, engine.RunResult{
+						SessionID: result.SessionID, Status: result.Status,
+					})
 				}
 			}
 			bus.Shutdown()

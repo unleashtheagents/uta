@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/unleashtheagents/uta/internal/budget"
+	"github.com/unleashtheagents/uta/internal/hitl"
+	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/provider"
 	"github.com/unleashtheagents/uta/internal/steer"
 	"github.com/unleashtheagents/uta/internal/store"
@@ -47,6 +52,18 @@ type MissionRequest struct {
 	ModeName            string
 	TransportMaxRetries int
 
+	// Policy is the MissionProfile bound by the program's `policy P`
+	// declaration, resolved by the caller (profile discovery reads the
+	// filesystem; the engine stays a library). Only its capability
+	// grants apply to a mission: AllowedTools / DeniedTools feed the
+	// same capability.Gate mode profiles use, so every tool invocation
+	// observed on a worker's event stream is inspected and denials are
+	// journaled as capability_gate_denied trajectory events. Budget
+	// stays with the program text — a policy's token caps are not
+	// merged over the mission's own budget declaration. Required when
+	// the program declares a policy; nil otherwise.
+	Policy *profile.MissionProfile
+
 	// ResumeSessionID replays a prior mission run from its journal: calls
 	// whose rendered prompt matches a completed subtask of the prior
 	// session are recovered (result reused, budget not re-charged); only
@@ -54,15 +71,55 @@ type MissionRequest struct {
 	// executes. A crash, a budget stop, and a Ctrl-C are all the same
 	// re-enterable state.
 	ResumeSessionID string
+
+	// HITL, when non-nil, answers `gate human` statements synchronously
+	// (tests wire hitl.StaticApprover; a TTY front-end could wire the
+	// production gate). When nil, a gate suspends the mission instead:
+	// the walk stops with ErrMissionSuspended and a pending HITL request
+	// under HITLStateDir, and a later `uta hitl approve` +
+	// --resume-session carries the mission past it.
+	HITL hitl.Approver
+
+	// HITLStateDir is the state root under which pending gate requests
+	// and their .approved/.denied markers live — the same layout the
+	// `uta hitl` commands read (<HITLStateDir>/hitl/<session>/...).
+	// Required for the gate suspension flow; ignored when HITL is set.
+	HITLStateDir string
 }
 
 // ErrSchemaMismatch marks an agent response that failed its declared
-// record schema even after the bounded retry. errors.Is-able.
+// record schema even after the bounded retries. errors.Is-able.
 var ErrSchemaMismatch = errors.New("schema mismatch")
+
+// schemaRetries is the number of bounded repair attempts after an agent
+// response fails its declared record schema — per the M1 contract, a
+// malformed response retries twice, then fails with a typed error.
+const schemaRetries = 2
+
+// missionResultDisplayLimit is the character cap for the ResultText column —
+// a display copy of the result; the full text lives in a blob (result_ref).
+// recoverResult uses the same limit to decide whether a stored ResultText is
+// definitely untruncated, so the truncation sites and the recovery guard must
+// stay in lockstep.
+const missionResultDisplayLimit = 8000
 
 // ErrJudgeRejected marks a value that failed its k-of-n verification —
 // fewer than K verifiers let it stand. errors.Is-able.
 var ErrJudgeRejected = errors.New("judge rejected")
+
+// ErrMissionSuspended marks a mission stopped at a `gate human` awaiting a
+// human signature — a re-enterable state, not a failure. The session closes
+// as awaiting_signature; `uta hitl approve` + --resume-session continues it.
+// errors.Is-able.
+var ErrMissionSuspended = errors.New("mission suspended awaiting human signature")
+
+// ErrGateDenied marks a `gate human` a human refused to sign. errors.Is-able.
+var ErrGateDenied = errors.New("gate denied")
+
+// ErrGateTimedOut marks a `gate human "…" within D` resumed past its
+// deadline with no answer on record — the mission fails typed instead of
+// re-suspending, so `on GateTimedOut -> …` can compensate. errors.Is-able.
+var ErrGateTimedOut = errors.New("gate timed out")
 
 // errCallFailed wraps a provider failure with the call site so the mission
 // error reads like a stack frame: `greet("world") at hello.steer:13`.
@@ -89,6 +146,12 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 	m := req.Program.Mission
 	if req.CallTimeout <= 0 {
 		req.CallTimeout = 10 * time.Minute
+	}
+	// A mission that binds a policy must not run ungated: the profile is
+	// resolved by the caller (mission check already validated the name),
+	// so a nil Policy here is a wiring bug, not a condition to tolerate.
+	if m.Policy != nil && req.Policy == nil {
+		return RunResult{}, fmt.Errorf("mission %s declares `policy %s` but no MissionProfile was resolved (load the profile and set MissionRequest.Policy)", m.Name, m.Policy.Name)
 	}
 
 	// The duration budget is the mission's deadline; token/$ ceilings are
@@ -123,6 +186,9 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 
 	sessionID := uuid.NewString()
 	steerMeta := map[string]any{"mission": m.Name, "file": req.SourceFile}
+	if req.Policy != nil {
+		steerMeta["policy"] = req.Policy.Name
+	}
 	if req.ResumeSessionID != "" {
 		steerMeta["resumed_from"] = req.ResumeSessionID
 	}
@@ -166,36 +232,24 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 		maxPar = 4
 	}
 	w := &missionWalk{
-		sup:       s,
-		req:       req,
-		sessionID: sessionID,
-		bindings:  map[string]string{},
-		journal:   journal,
-		ord:       new(int64),
-		recovered: new(int64),
-		sem:       make(chan struct{}, maxPar),
-		unhealthy: &sync.Map{},
+		sup:        s,
+		req:        req,
+		sessionID:  sessionID,
+		bindings:   map[string]string{},
+		refinement: map[string]int{},
+		journal:    journal,
+		ord:        new(int64),
+		recovered:  new(int64),
+		sem:        make(chan struct{}, maxPar),
+		unhealthy:  &sync.Map{},
 	}
 
 	var finalAnswer string
-	for _, st := range m.Stmts {
-		var err error
-		switch stmt := st.(type) {
-		case *steer.LetStmt:
-			w.bindings[stmt.Name], err = w.eval(ctx, stmt.Expr)
-		case *steer.EmitStmt:
-			var val string
-			val, err = w.eval(ctx, stmt.Expr)
-			if err == nil {
-				finalAnswer = val
-				s.emit(sessionID, "", trajectory.MissionEmit, map[string]any{
-					"mission": m.Name, "chars": len(val),
-				})
-			}
+	if err := w.execStmts(ctx, m.Stmts, &finalAnswer); err != nil {
+		if errors.Is(err, ErrMissionSuspended) {
+			return s.suspendMission(sessionID, err)
 		}
-		if err != nil {
-			return s.failMission(ctx, sessionID, w, err)
-		}
+		return s.failMission(ctx, sessionID, w, err, &finalAnswer)
 	}
 
 	finalRef := ""
@@ -218,12 +272,30 @@ func (s *Supervisor) RunMission(ctx context.Context, req MissionRequest) (RunRes
 	return RunResult{SessionID: sessionID, Status: "completed", FinalAnswer: finalAnswer, Subtasks: subs}, nil
 }
 
+// suspendMission closes the session as awaiting_signature — a re-enterable
+// state, not a failure. The pending HITL request is already on disk (written
+// by evalGate); callers surface the approve/resume instructions.
+func (s *Supervisor) suspendMission(sessionID string, err error) (RunResult, error) {
+	s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "awaiting_signature", ""))
+	subs, listErr := s.deps.Store.SubtaskListBySession(sessionID, 0, 0)
+	s.dbErr(sessionID, "", "subtask_list", listErr)
+	return RunResult{SessionID: sessionID, Status: "awaiting_signature", Subtasks: subs}, err
+}
+
 // failMission classifies the walk error and closes the session under the
 // matching status: budget_exhausted, cancelled, or failed (which includes
-// blowing the mission's duration budget).
-func (s *Supervisor) failMission(ctx context.Context, sessionID string, w *missionWalk, err error) (RunResult, error) {
+// blowing the mission's duration budget). Before the session closes, a
+// matching `on E -> …` handler runs its compensation statements against
+// the walk's bindings; a `halt` in the handler consumes the error and the
+// mission terminates cleanly instead.
+func (s *Supervisor) failMission(ctx context.Context, sessionID string, w *missionWalk, err error, finalAnswer *string) (RunResult, error) {
+	halted := s.runMissionHandler(ctx, w, err, finalAnswer)
+	if halted {
+		return s.haltMission(sessionID, err, *finalAnswer)
+	}
 	if errors.Is(err, budget.ErrBudgetExceeded) {
 		res, e := s.terminateBudgetExhausted(sessionID, err)
+		res.FinalAnswer = *finalAnswer
 		return res, e
 	}
 	status := "failed"
@@ -242,12 +314,98 @@ func (s *Supervisor) failMission(ctx context.Context, sessionID string, w *missi
 	return RunResult{SessionID: sessionID, Status: status, Subtasks: subs}, err
 }
 
+// errHalt signals a `halt` statement was reached. It never escapes the
+// engine: the parser confines halt to on-handler bodies, and
+// runMissionHandler consumes it as the clean-termination signal.
+var errHalt = errors.New("mission halted")
+
+// handlerTarget maps an `on E -> …` handler's checked error name to its
+// errors.Is sentinel.
+func handlerTarget(name string) error {
+	switch name {
+	case "BudgetExceeded":
+		return budget.ErrBudgetExceeded
+	case "GateDenied":
+		return ErrGateDenied
+	case "GateTimedOut":
+		return ErrGateTimedOut
+	case "SchemaMismatch":
+		return ErrSchemaMismatch
+	case "JudgeRejected":
+		return ErrJudgeRejected
+	}
+	return nil
+}
+
+// runMissionHandler runs the first `on E -> …` handler whose typed error
+// matches the walk failure, and reports whether it reached a `halt`. The
+// compensation statements execute against the walk's bindings — the lets
+// the failed walk already bound stay visible — in their own structural
+// scope (on1.), so any agent call they make journals as a normal subtask.
+// A compensation statement that itself fails stops the handler (the
+// failing call journals its own subtask_failed) and the original error
+// still closes the mission.
+func (s *Supervisor) runMissionHandler(ctx context.Context, w *missionWalk, cause error, finalAnswer *string) bool {
+	for i, h := range w.req.Program.Mission.Handlers {
+		target := handlerTarget(h.ErrName)
+		if target == nil || !errors.Is(cause, target) {
+			continue
+		}
+		s.emit(w.sessionID, "", trajectory.HandlerTriggered, map[string]any{
+			"on": h.ErrName, "line": h.Pos.Line, "error": cause.Error(),
+		})
+		hw := &missionWalk{
+			sup: s, req: w.req, sessionID: w.sessionID,
+			bindings: w.bindings, refinement: w.refinement, journal: w.journal,
+			prefix: fmt.Sprintf("on%d.", i+1),
+			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			unhealthy:  w.unhealthy,
+			raisedCaps: nil, // a handler runs at mission scope; no raise survives the failed block
+		}
+		herr := hw.execStmts(ctx, h.Body, finalAnswer)
+		return errors.Is(herr, errHalt)
+	}
+	return false
+}
+
+// haltMission closes a mission whose on-handler ended with `halt`: a clean
+// typed termination, not a failure. The close status preserves the walk
+// error's classification — budget exhaustion still reads budget_exhausted
+// on the session — but the error itself is consumed: the program declared
+// this outcome handled, so callers get a nil error and the compensation
+// emit as the final answer.
+func (s *Supervisor) haltMission(sessionID string, cause error, finalAnswer string) (RunResult, error) {
+	status := "halted"
+	if errors.Is(cause, budget.ErrBudgetExceeded) {
+		status = "budget_exhausted"
+	}
+	finalRef := ""
+	if finalAnswer != "" {
+		if ref, err := s.deps.Blobs.Put([]byte(finalAnswer), "txt"); err == nil {
+			finalRef = ref
+		}
+	}
+	s.emit(sessionID, "", trajectory.MissionHalted, map[string]any{
+		"status": status, "reason": cause.Error(),
+	})
+	s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, status, finalRef))
+	subs, listErr := s.deps.Store.SubtaskListBySession(sessionID, 0, 0)
+	s.dbErr(sessionID, "", "subtask_list", listErr)
+	return RunResult{SessionID: sessionID, Status: status, FinalAnswer: finalAnswer, Subtasks: subs}, nil
+}
+
 // missionWalk carries the interpreter state for one mission execution.
 type missionWalk struct {
 	sup       *Supervisor
 	req       MissionRequest
 	sessionID string
 	bindings  map[string]string
+	// refinement carries the runtime @k tags: binding name → K for every
+	// let whose value passed `judge … require K of N` (directly or through
+	// a retry wrapper). This is the runtime truth the M5 static checker
+	// will merely predict. Shared with sub-walks that execute statements
+	// (until rounds, on-handlers); par and judge branches never bind lets.
+	refinement map[string]int
 	// journal holds the prior run's completed subtasks (by spec id) when
 	// resuming.
 	journal map[string]store.Subtask
@@ -267,10 +425,201 @@ type missionWalk struct {
 	// quota, dead transport) this mission; any() resolution benches them.
 	unhealthy *sync.Map
 
+	// curLet names the let binding currently being evaluated, so evalJudge
+	// can tag the JudgeCompleted journal event with the binding that
+	// receives the judged (@k) value. Propagated through retry attempts and
+	// par-for branches — a body judge produces the binding's per-item
+	// values — but deliberately not into judge verifier branches.
+	curLet string
+
 	// verdictMode marks a judge-verifier scope: evalCall appends the
 	// STANDS/REFUTED contract to the prompt instead of any schema.
 	verdictMode bool
 	judgeSeq    int // judge sequence within this scope
+	gateSeq     int // gate sequence within this scope
+	untilSeq    int // until sequence within this scope
+	retrySeq    int // retry sequence within this scope
+
+	// roundVals, when non-nil, collects the value of every let and emit
+	// this walk executes — execUntil reads it to measure a round's yield.
+	roundVals *[]string
+
+	// raisedCaps are the `with cap` raises active in this scope, appended
+	// to the policy's allow set when the call's capability gate is built.
+	// Copy-on-raise: execWith swaps in a fresh slice, so par/judge branches
+	// spawned inside the block read a stable set.
+	raisedCaps []string
+}
+
+// execStmts interprets a statement list — the mission body or a `with cap`
+// block body. finalAnswer receives the value of the last successful emit.
+func (w *missionWalk) execStmts(ctx context.Context, stmts []steer.Stmt, finalAnswer *string) error {
+	for _, st := range stmts {
+		var err error
+		switch stmt := st.(type) {
+		case *steer.LetStmt:
+			var val string
+			w.curLet = stmt.Name
+			val, err = w.eval(ctx, stmt.Expr)
+			w.curLet = ""
+			if err == nil {
+				w.bindings[stmt.Name] = val
+				if k := judgedLevel(stmt.Expr); k > 0 {
+					w.refinement[stmt.Name] = k
+				}
+				w.noteRoundVal(val)
+			}
+		case *steer.EmitStmt:
+			var val string
+			val, err = w.eval(ctx, stmt.Expr)
+			if err == nil {
+				*finalAnswer = val
+				w.noteRoundVal(val)
+				w.sup.emit(w.sessionID, "", trajectory.MissionEmit, map[string]any{
+					"mission": w.req.Program.Mission.Name, "chars": len(val),
+				})
+			}
+		case *steer.GateStmt:
+			err = w.evalGate(ctx, stmt)
+		case *steer.WithStmt:
+			err = w.execWith(ctx, stmt, finalAnswer)
+		case *steer.UntilStmt:
+			err = w.execUntil(ctx, stmt, finalAnswer)
+		case *steer.HaltStmt:
+			err = errHalt
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// judgedLevel reports the @k refinement a let binding gains from a
+// successfully evaluated expression: K when the expression is a
+// `judge … require K of N` — possibly wrapped in retries, since the value
+// only arrives if some attempt's judge passed, or reached through a
+// par-for body, since the join only arrives when every branch's judge
+// passed — and 0 otherwise.
+func judgedLevel(e steer.Expr) int {
+	for {
+		switch x := e.(type) {
+		case *steer.JudgeExpr:
+			return x.K
+		case *steer.RetryExpr:
+			e = x.Expr
+		case *steer.ParForExpr:
+			e = x.Body
+		default:
+			return 0
+		}
+	}
+}
+
+// noteRoundVal reports a produced value to the enclosing until loop's
+// round accumulator, when one is active.
+func (w *missionWalk) noteRoundVal(v string) {
+	if w.roundVals != nil {
+		*w.roundVals = append(*w.roundVals, v)
+	}
+}
+
+// execWith interprets `with cap C from policy P { ... }`: the capability
+// joins the walk's raised set for exactly the extent of the block, and the
+// raise/drop pair is journaled so the trajectory shows which calls ran
+// with elevated authority. The drop is recorded even when the block fails
+// — the authority ends either way.
+func (w *missionWalk) execWith(ctx context.Context, ws *steer.WithStmt, finalAnswer *string) error {
+	prev := w.raisedCaps
+	w.raisedCaps = append(append([]string{}, prev...), ws.Cap)
+	w.sup.emit(w.sessionID, "", trajectory.CapRaised, map[string]any{
+		"cap": ws.Cap, "policy": ws.Policy, "line": ws.Pos.Line,
+	})
+	err := w.execStmts(ctx, ws.Body, finalAnswer)
+	w.raisedCaps = prev
+	w.sup.emit(w.sessionID, "", trajectory.CapDropped, map[string]any{
+		"cap": ws.Cap, "policy": ws.Policy, "line": ws.Pos.Line,
+	})
+	return err
+}
+
+// execUntil interprets `until dry(n) { ... }` — the discovery loop. The
+// body runs in rounds; a round is dry when it yields nothing (every let and
+// emit in it produced blank text) or repeats the previous round verbatim.
+// The loop ends after n consecutive dry rounds, or when the mission budget
+// is exhausted — for a discovery loop that is a terminating condition, not
+// a failure: the yield gathered so far stays bound either way, so a
+// following emit publishes partial results. Any other body error fails the
+// mission as usual.
+//
+// After the loop, each of the body's top-level let names is rebound to its
+// accumulated non-empty round values (joined like par branches) — during
+// the loop each round sees its own fresh value, as within-round chaining
+// expects.
+func (w *missionWalk) execUntil(ctx context.Context, u *steer.UntilStmt, finalAnswer *string) error {
+	w.untilSeq++
+	untilID := w.untilSeq
+	letAccum := map[string][]string{}
+	prev, empty, rounds := "", 0, 0
+	exit := "dry"
+	for empty < u.N {
+		rounds++
+		var vals []string
+		round := &missionWalk{
+			sup: w.sup, req: w.req, sessionID: w.sessionID,
+			bindings: w.bindings, refinement: w.refinement, journal: w.journal,
+			prefix: fmt.Sprintf("%su%d.r%d.", w.prefix, untilID, rounds),
+			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			unhealthy:  w.unhealthy,
+			raisedCaps: w.raisedCaps,
+			roundVals:  &vals,
+		}
+		if err := round.execStmts(ctx, u.Body, finalAnswer); err != nil {
+			if errors.Is(err, budget.ErrBudgetExceeded) {
+				exit = "budget"
+				break
+			}
+			return err
+		}
+		result := strings.TrimSpace(strings.Join(vals, "\n\n---\n\n"))
+		if result == "" || result == prev {
+			empty++
+		} else {
+			empty = 0
+		}
+		prev = result
+		for _, st := range u.Body {
+			ls, ok := st.(*steer.LetStmt)
+			if !ok {
+				continue
+			}
+			v := strings.TrimSpace(w.bindings[ls.Name])
+			if v == "" {
+				continue
+			}
+			if acc := letAccum[ls.Name]; len(acc) > 0 && acc[len(acc)-1] == v {
+				continue // a repeated round adds nothing to the yield
+			}
+			letAccum[ls.Name] = append(letAccum[ls.Name], v)
+		}
+	}
+	// Rebind every top-level let to the loop's accumulated yield — on the
+	// budget path too, and to "" when the loop never yielded, so following
+	// statements read partial (possibly empty) results instead of a stale
+	// or missing binding.
+	for _, st := range u.Body {
+		if ls, ok := st.(*steer.LetStmt); ok {
+			v := strings.Join(letAccum[ls.Name], "\n\n---\n\n")
+			w.bindings[ls.Name] = v
+			if v != "" {
+				w.noteRoundVal(v)
+			}
+		}
+	}
+	w.sup.emit(w.sessionID, "", trajectory.UntilCompleted, map[string]any{
+		"dry": u.N, "rounds": rounds, "exit": exit, "line": u.Pos.Line,
+	})
+	return nil
 }
 
 func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
@@ -289,6 +638,8 @@ func (w *missionWalk) eval(ctx context.Context, e steer.Expr) (string, error) {
 		return w.evalParFor(ctx, x)
 	case *steer.JudgeExpr:
 		return w.evalJudge(ctx, x)
+	case *steer.RetryExpr:
+		return w.evalRetry(ctx, x)
 	default:
 		return "", fmt.Errorf("unsupported expression at line %d", e.(interface{ exprPos() steer.Pos }).exprPos().Line)
 	}
@@ -341,7 +692,7 @@ func (w *missionWalk) evalCall(ctx context.Context, call *steer.CallExpr) (strin
 				ID: subtaskID, SessionID: w.sessionID, Ord: int(atomic.AddInt64(w.ord, 1)) - 1, SpecID: specID,
 				Title: callTitle(fn, call, args) + " (recovered)", PromptRef: prior.PromptRef,
 				Worker: prior.Worker, Status: "completed", StartedAt: &now, CompletedAt: &now,
-				ResultText: Truncate(text, 8000), RawOutputRef: prior.RawOutputRef,
+				ResultText: Truncate(text, missionResultDisplayLimit), RawOutputRef: prior.RawOutputRef,
 				MetaJSON: string(recMeta),
 			}))
 			w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
@@ -427,16 +778,33 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 		SubtaskTimeout:      w.req.CallTimeout,
 		TransportMaxRetries: w.req.TransportMaxRetries,
 	}
+	// The mission's `policy P` profile installs its capability gate here:
+	// callProvider builds a capability.Gate from these lists and runs every
+	// observed tool_call through it, exactly as mode profiles do for
+	// `uta run` — denials become capability_gate_denied journal events.
+	// Active `with cap` raises extend the allow set for calls inside the
+	// block only. They apply solely when a policy gate exists — appending
+	// to an otherwise-empty allow list would *create* a deny-by-default
+	// gate where none was bound. DeniedTools still wins on overlap: a
+	// raise cannot un-deny what the policy explicitly forbids.
+	if pol := w.req.Policy; pol != nil {
+		carrier.AllowedTools = pol.AllowedTools
+		if len(w.raisedCaps) > 0 {
+			carrier.AllowedTools = append(append([]string{}, pol.AllowedTools...), w.raisedCaps...)
+		}
+		carrier.DeniedTools = pol.DeniedTools
+	}
 	callCtx, cancel := context.WithTimeout(ctx, w.req.CallTimeout)
 	result, callErr := w.sup.callProvider(callCtx, w.sessionID, subtaskID, prov, prompt, carrier)
 	cancel()
 
-	// Schema enforcement with one bounded retry: the rejection reason is
-	// fed back verbatim so the model can repair its own output. The retry
-	// is a real provider call — it charges the budget like any other.
+	// Schema enforcement with bounded retries: each rejection reason is
+	// fed back verbatim so the model can repair its own output, up to
+	// schemaRetries times. Every retry is a real provider call — it charges
+	// the budget like any other, and the charge accumulates across attempts.
 	if callErr == nil && structured {
 		validated, verr := steer.ValidateRecord(recType, result.FinalText, isList)
-		if verr != nil {
+		for attempt := 0; verr != nil && attempt < schemaRetries; attempt++ {
 			w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskStdout, map[string]any{
 				"schema_retry": verr.Error(), "spec_id": specID,
 			})
@@ -451,10 +819,13 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 			result = retryResult
 			if retryErr != nil {
 				callErr = retryErr
-			} else if validated, verr = steer.ValidateRecord(recType, result.FinalText, isList); verr != nil {
-				callErr = fmt.Errorf("response failed the %s schema after retry (%v): %w",
-					recType.Name, verr, ErrSchemaMismatch)
+				break
 			}
+			validated, verr = steer.ValidateRecord(recType, result.FinalText, isList)
+		}
+		if callErr == nil && verr != nil {
+			callErr = fmt.Errorf("response failed the %s schema after %d retries (%v): %w",
+				recType.Name, schemaRetries, verr, ErrSchemaMismatch)
 		}
 		if callErr == nil {
 			result.FinalText = validated
@@ -486,7 +857,7 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 		w.sup.dbErr(w.sessionID, subtaskID, "update_subtask", w.sup.deps.Store.UpdateSubtask(store.Subtask{
 			ID: subtaskID, ProviderSessionID: result.SessionID, Status: "failed",
 			StartedAt: &startedAt, CompletedAt: &completedAt,
-			ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+			ResultText: Truncate(result.FinalText, missionResultDisplayLimit), RawOutputRef: rawRef,
 			Error: callErr.Error(), ErrorKind: kind,
 		}))
 		w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskFailed, map[string]any{
@@ -496,7 +867,8 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 	}
 
 	// The full result text goes to a blob so a future --resume-session can
-	// recover it verbatim (ResultText is display-truncated at 8000 chars).
+	// recover it verbatim (ResultText is display-truncated at
+	// missionResultDisplayLimit chars).
 	finalText := strings.TrimSpace(result.FinalText)
 	resultRef := ""
 	if finalText != "" {
@@ -511,7 +883,7 @@ func (w *missionWalk) callOnce(ctx context.Context, fn *steer.AgentFn, call *ste
 	w.sup.dbErr(w.sessionID, subtaskID, "update_subtask", w.sup.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
-		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+		ResultText: Truncate(result.FinalText, missionResultDisplayLimit), RawOutputRef: rawRef,
 		MetaJSON: string(callMeta),
 	}))
 	w.sup.emit(w.sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
@@ -552,7 +924,9 @@ func (w *missionWalk) evalParFor(ctx context.Context, pf *steer.ParForExpr) (str
 			bindings: bindings, journal: w.journal,
 			prefix: fmt.Sprintf("%sp%d.b%d.", w.prefix, parID, i+1),
 			ord:    w.ord, recovered: w.recovered, sem: w.sem,
-			unhealthy: w.unhealthy,
+			unhealthy:  w.unhealthy,
+			raisedCaps: w.raisedCaps,
+			curLet:     w.curLet,
 		}
 		wg.Add(1)
 		go func(i int, bw *missionWalk) {
@@ -608,13 +982,20 @@ func (w *missionWalk) evalJudge(ctx context.Context, j *steer.JudgeExpr) (string
 			Name: by.Name,
 			Args: append(append([]steer.Expr{}, by.Args...), &steer.StringLit{Pos: by.Pos, Value: val}),
 		}
+		// Each verifier gets its own copy of the bindings, like evalParFor's
+		// branches — the walks run concurrently and must not share the map.
+		bindings := make(map[string]string, len(w.bindings))
+		for k, v := range w.bindings {
+			bindings[k] = v
+		}
 		branch := &missionWalk{
 			sup: w.sup, req: w.req, sessionID: w.sessionID,
-			bindings: w.bindings, journal: w.journal,
+			bindings: bindings, journal: w.journal,
 			prefix: fmt.Sprintf("%sj%d.v%d.", w.prefix, judgeID, i+1),
 			ord:    w.ord, recovered: w.recovered, sem: w.sem,
 			unhealthy:   w.unhealthy,
 			verdictMode: true,
+			raisedCaps:  w.raisedCaps,
 		}
 		wg.Add(1)
 		go func(i int, bw *missionWalk, call *steer.CallExpr) {
@@ -649,15 +1030,377 @@ func (w *missionWalk) evalJudge(ctx context.Context, j *steer.JudgeExpr) (string
 			refuted++
 		}
 	}
-	w.sup.emit(w.sessionID, "", trajectory.JudgeCompleted, map[string]any{
+	passed := stands >= j.K
+	payload := map[string]any{
 		"require": j.K, "of": j.N, "stands": stands, "refuted": refuted,
-		"unclear": unclear, "verifier_errors": failed, "passed": stands >= j.K,
-	})
+		"unclear": unclear, "verifier_errors": failed, "passed": passed,
+	}
+	if passed {
+		// The @k tag the value carries onward — journal truth for M5.
+		payload["refinement"] = j.K
+		// The named lenses that let the value stand — journal truth for the
+		// M8 provenance lattice (@ {Security, Repro}), whose static half
+		// will predict this set the way M5's checker predicts @k.
+		set := make(map[string]bool, len(j.By))
+		for i, by := range j.By {
+			if errs[i] == nil && verdicts[i] == steer.VerdictStands {
+				set[steer.LensName(by)] = true
+			}
+		}
+		lenses := make([]string, 0, len(set))
+		for l := range set {
+			lenses = append(lenses, l)
+		}
+		sort.Strings(lenses)
+		payload["lenses"] = lenses
+		if w.curLet != "" {
+			payload["binding"] = w.curLet
+		}
+	}
+	w.sup.emit(w.sessionID, "", trajectory.JudgeCompleted, payload)
 	if stands < j.K {
 		return "", fmt.Errorf("%d of %d verifier(s) let the value stand, require %d (refuted=%d, unclear=%d, errored=%d): %w",
 			stands, j.N, j.K, refuted, unclear, failed, ErrJudgeRejected)
 	}
 	return val, nil
+}
+
+// evalRetry implements `retry n on E` — bounded, typed re-evaluation. The
+// wrapped expression runs up to n+1 times; only a failure that errors.Is-
+// matches the named sentinel triggers another attempt, anything else (and
+// exhaustion) propagates the failure unchanged. Each attempt evaluates in
+// its own structural scope (…t1.a2.…), so every attempt journals its own
+// subtasks and --resume-session recovers completed attempts instead of
+// re-paying them: the walk restarts at the newest attempt with journaled
+// work, since every earlier attempt already failed.
+func (w *missionWalk) evalRetry(ctx context.Context, r *steer.RetryExpr) (string, error) {
+	target := retryTarget(r.ErrName)
+	if target == nil {
+		return "", fmt.Errorf("retry on unknown error %q at line %d (checker should have caught this)", r.ErrName, r.Pos.Line)
+	}
+	w.retrySeq++
+	retryID := w.retrySeq
+	attemptPrefix := func(attempt int) string {
+		return fmt.Sprintf("%st%d.a%d.", w.prefix, retryID, attempt)
+	}
+	start := 1
+	for a := r.N + 1; a >= 2; a-- {
+		if w.journalHasPrefix(attemptPrefix(a)) {
+			start = a
+			break
+		}
+	}
+	var lastErr error
+	for attempt := start; attempt <= r.N+1; attempt++ {
+		att := &missionWalk{
+			sup: w.sup, req: w.req, sessionID: w.sessionID,
+			bindings: w.bindings, journal: w.journal,
+			prefix: attemptPrefix(attempt),
+			ord:    w.ord, recovered: w.recovered, sem: w.sem,
+			unhealthy:  w.unhealthy,
+			raisedCaps: w.raisedCaps,
+			curLet:     w.curLet,
+		}
+		val, err := att.eval(ctx, r.Expr)
+		if err == nil {
+			return val, nil
+		}
+		lastErr = err
+		if !errors.Is(err, target) || attempt == r.N+1 {
+			break
+		}
+		w.sup.emit(w.sessionID, "", trajectory.RetryAttempt, map[string]any{
+			"on": r.ErrName, "attempt": attempt, "of": r.N + 1,
+			"line": r.Pos.Line, "error": err.Error(),
+		})
+	}
+	return "", lastErr
+}
+
+// journalHasPrefix reports whether the resume journal holds any completed
+// subtask under the given structural spec-id prefix.
+func (w *missionWalk) journalHasPrefix(prefix string) bool {
+	for spec := range w.journal {
+		if strings.HasPrefix(spec, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryTarget maps a checked `retry n on E` error name to its errors.Is
+// sentinel. BudgetExceeded is deliberately absent — the checker rejects it
+// (the budget is already spent when it fires).
+func retryTarget(name string) error {
+	switch name {
+	case "SchemaMismatch":
+		return ErrSchemaMismatch
+	case "JudgeRejected":
+		return ErrJudgeRejected
+	}
+	return nil
+}
+
+// evalGate interprets `gate human "…" [within D]`. Five ways through it,
+// tried in order:
+//
+//   - the prior journal (--resume-session) has this gate approved with the
+//     same message — recovered like any completed call;
+//   - `uta hitl approve <suspended-session>` left a .approved / .denied
+//     marker in the suspended session's HITL dir — consumed here;
+//   - the gate carries a `within D` deadline, the resumed pending file's
+//     recorded deadline has passed, and no marker answered it — the typed
+//     ErrGateTimedOut, catchable by `on GateTimedOut -> …`;
+//   - a configured Approver (MissionRequest.HITL) answers synchronously;
+//   - otherwise the gate writes a pending HITL request (with the absolute
+//     deadline when `within D` is present) under the current session and
+//     suspends the mission with ErrMissionSuspended.
+//
+// The gate's action id is its structural spec id, so a resumed run asks for
+// the same marker the suspended run announced.
+func (w *missionWalk) evalGate(ctx context.Context, g *steer.GateStmt) error {
+	msg, err := w.eval(ctx, g.Message)
+	if err != nil {
+		return err
+	}
+	w.gateSeq++
+	specID := fmt.Sprintf("%sg%d-gate", w.prefix, w.gateSeq)
+	actionName := "gate_human"
+	if len(g.Options) > 0 {
+		actionName = "gate_choose"
+	}
+
+	// Replay: an approved gate on the prior journal stays approved. The
+	// message plays the role of the prompt, so recoverResult's equality
+	// guard applies unchanged — edit the gate text and it re-asks.
+	if prior, ok := w.journal[specID]; ok {
+		if prevRes, ok := w.recoverResult(prior, msg); ok {
+			resLabel := "approved (recovered)"
+			if strings.HasPrefix(prevRes, "chosen: ") {
+				resLabel = prevRes + " (recovered)"
+			}
+			w.journalGate(specID, msg, "completed", resLabel)
+			w.sup.emit(w.sessionID, "", trajectory.HITLApproved, map[string]any{
+				"action": actionName, "action_id": specID, "recovered": true, "recovered_from": prior.ID,
+			})
+			atomic.AddInt64(w.recovered, 1)
+			return nil
+		}
+	}
+
+	if w.req.ResumeSessionID != "" && w.req.HITLStateDir != "" {
+		dir := hitl.SessionDir(w.req.HITLStateDir, w.req.ResumeSessionID)
+		if b, statErr := os.ReadFile(hitl.ApprovedPath(dir, specID)); statErr == nil {
+			choice := strings.TrimSpace(string(b))
+			consumeGateMarkers(dir, specID)
+			if len(g.Options) > 0 {
+				valid := false
+				for _, opt := range g.Options {
+					if opt == choice {
+						valid = true
+						break
+					}
+				}
+				if !valid {
+					reason := fmt.Sprintf("invalid choice %q (want one of: %s)", choice, strings.Join(g.Options, ", "))
+					if choice == "" {
+						reason = fmt.Sprintf("missing choice (want one of: %s)", strings.Join(g.Options, ", "))
+					}
+					w.journalGate(specID, msg, "failed", reason)
+					w.sup.emit(w.sessionID, "", trajectory.HITLDenied, map[string]any{
+						"action": actionName, "action_id": specID, "approver": "async", "reason": reason,
+					})
+					return fmt.Errorf("gate at %s:%d (%s): %s: %w",
+						w.req.Program.File, g.Pos.Line, truncateArg(msg), reason, ErrGateDenied)
+				}
+				w.journalGate(specID, msg, "completed", "chosen: "+choice)
+				w.sup.emit(w.sessionID, "", trajectory.HITLApproved, map[string]any{
+					"action": actionName, "action_id": specID, "approver": "async", "option": choice,
+				})
+				return nil
+			}
+			w.journalGate(specID, msg, "completed", "approved")
+			w.sup.emit(w.sessionID, "", trajectory.HITLApproved, map[string]any{
+				"action": actionName, "action_id": specID, "approver": "async",
+			})
+			return nil
+		}
+		if b, readErr := os.ReadFile(hitl.DeniedPath(dir, specID)); readErr == nil {
+			reason := strings.TrimSpace(string(b))
+			if reason == "" {
+				reason = "denied via file-drop"
+			}
+			consumeGateMarkers(dir, specID)
+			w.journalGate(specID, msg, "failed", reason)
+			w.sup.emit(w.sessionID, "", trajectory.HITLDenied, map[string]any{
+				"action": actionName, "action_id": specID, "approver": "async", "reason": reason,
+			})
+			return fmt.Errorf("gate at %s:%d (%s): %s: %w",
+				w.req.Program.File, g.Pos.Line, truncateArg(msg), reason, ErrGateDenied)
+		}
+		// No answer on record: an expired deadline fails the gate typed
+		// instead of re-suspending. The deadline is the one journaled when
+		// the mission suspended, so re-resuming never extends it.
+		if exp, ok := pendingDeadline(dir, specID); g.Within > 0 && ok && time.Now().After(exp) {
+			consumeGateMarkers(dir, specID)
+			reason := "unanswered past deadline " + exp.Format(time.RFC3339)
+			w.journalGate(specID, msg, "failed", reason)
+			w.sup.emit(w.sessionID, "", trajectory.HITLDenied, map[string]any{
+				"action": actionName, "action_id": specID, "reason": reason,
+				"deadline": exp.Format(time.RFC3339),
+			})
+			return fmt.Errorf("gate at %s:%d (%s): %s: %w",
+				w.req.Program.File, g.Pos.Line, truncateArg(msg), reason, ErrGateTimedOut)
+		}
+	}
+
+	if w.req.HITL != nil {
+		reqPayload := map[string]any{
+			"action": actionName, "action_id": specID, "prompt": msg, "line": g.Pos.Line,
+		}
+		if len(g.Options) > 0 {
+			reqPayload["options"] = g.Options
+		}
+		w.sup.emit(w.sessionID, "", trajectory.HITLRequested, reqPayload)
+		decision, aerr := w.req.HITL.Request(ctx, hitl.Request{
+			SessionID: w.sessionID, Action: actionName, Severity: "high", PromptText: msg,
+		})
+		if aerr != nil {
+			return aerr
+		}
+		if decision.Approved {
+			resLabel := "approved"
+			if len(g.Options) > 0 {
+				resLabel = "chosen: " + g.Options[0]
+			}
+			w.journalGate(specID, msg, "completed", resLabel)
+			w.sup.emit(w.sessionID, "", trajectory.HITLApproved, map[string]any{
+				"action": actionName, "action_id": decision.ActionID, "approver": decision.Approver,
+			})
+			return nil
+		}
+		reason := decision.Reason
+		if reason == "" {
+			reason = "denied"
+		}
+		w.journalGate(specID, msg, "failed", reason)
+		w.sup.emit(w.sessionID, "", trajectory.HITLDenied, map[string]any{
+			"action": actionName, "action_id": decision.ActionID, "approver": decision.Approver, "reason": reason,
+		})
+		return fmt.Errorf("gate at %s:%d (%s): %s: %w",
+			w.req.Program.File, g.Pos.Line, truncateArg(msg), reason, ErrGateDenied)
+	}
+
+	if w.req.HITLStateDir == "" {
+		return fmt.Errorf("gate human at %s:%d: no approver and no HITL state dir configured",
+			w.req.Program.File, g.Pos.Line)
+	}
+	dir := hitl.SessionDir(w.req.HITLStateDir, w.sessionID)
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+		return fmt.Errorf("gate human: hitl dir: %w", mkErr)
+	}
+	// The answer deadline starts when the gate first suspends; a resumed
+	// but still-unanswered gate carries the original deadline forward
+	// instead of restarting the clock.
+	var deadline string
+	if g.Within > 0 {
+		deadline = time.Now().UTC().Add(g.Within).Format(time.RFC3339)
+		if w.req.ResumeSessionID != "" {
+			priorDir := hitl.SessionDir(w.req.HITLStateDir, w.req.ResumeSessionID)
+			if exp, ok := pendingDeadline(priorDir, specID); ok {
+				deadline = exp.UTC().Format(time.RFC3339)
+			}
+		}
+	}
+	body, mErr := json.MarshalIndent(hitl.Pending{
+		ActionID:    specID,
+		SessionID:   w.sessionID,
+		Action:      actionName,
+		Severity:    "high",
+		Prompt:      msg,
+		RequestedAt: time.Now().UTC().Format(time.RFC3339),
+		Deadline:    deadline,
+		Options:     g.Options,
+	}, "", "  ")
+	if mErr != nil {
+		return fmt.Errorf("gate human: marshal pending: %w", mErr)
+	}
+	if wErr := os.WriteFile(hitl.PendingPath(dir, specID), body, 0o644); wErr != nil {
+		return fmt.Errorf("gate human: write pending: %w", wErr)
+	}
+	// The stable pointer lets `uta hitl approve <session>` work without
+	// --action; the per-action file above is the authoritative record.
+	_ = os.WriteFile(filepath.Join(dir, "pending.json"), body, 0o644)
+
+	w.journalGate(specID, msg, "awaiting_signature", "")
+	awaiting := map[string]any{
+		"action": actionName, "action_id": specID, "prompt": msg, "line": g.Pos.Line, "suspended": true,
+	}
+	if deadline != "" {
+		awaiting["deadline"] = deadline
+	}
+	if len(g.Options) > 0 {
+		awaiting["options"] = g.Options
+	}
+	w.sup.emit(w.sessionID, "", trajectory.HITLRequested, awaiting)
+	return fmt.Errorf("gate at %s:%d (%s): %w",
+		w.req.Program.File, g.Pos.Line, truncateArg(msg), ErrMissionSuspended)
+}
+
+// journalGate writes the gate's subtask row. PromptRef carries the gate
+// message so the resume replay applies the same prompt-equality guard as
+// agent calls; ResultText records the decision.
+func (w *missionWalk) journalGate(specID, msg, status, resultText string) {
+	subtaskID := uuid.NewString()
+	now := time.Now()
+	promptRef, _ := w.sup.deps.Blobs.Put([]byte(msg), "txt")
+	w.sup.dbErr(w.sessionID, subtaskID, "create_subtask", w.sup.deps.Store.CreateSubtask(store.Subtask{
+		ID: subtaskID, SessionID: w.sessionID, Ord: int(atomic.AddInt64(w.ord, 1)) - 1, SpecID: specID,
+		Title: "gate human (" + truncateArg(msg) + ")", PromptRef: promptRef,
+		Worker: "human", Status: status,
+	}))
+	if status == "awaiting_signature" {
+		return
+	}
+	w.sup.dbErr(w.sessionID, subtaskID, "update_subtask", w.sup.deps.Store.UpdateSubtask(store.Subtask{
+		ID: subtaskID, Status: status, StartedAt: &now, CompletedAt: &now,
+		ResultText: Truncate(resultText, missionResultDisplayLimit),
+	}))
+}
+
+// pendingDeadline reads the answer deadline a suspended gate recorded on
+// its pending file. ok is false when the file, its deadline field, or the
+// timestamp parse is missing — an undated gate never times out.
+func pendingDeadline(dir, actionID string) (time.Time, bool) {
+	b, err := os.ReadFile(hitl.PendingPath(dir, actionID))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var p hitl.Pending
+	if json.Unmarshal(b, &p) != nil || p.Deadline == "" {
+		return time.Time{}, false
+	}
+	exp, perr := time.Parse(time.RFC3339, p.Deadline)
+	if perr != nil {
+		return time.Time{}, false
+	}
+	return exp, true
+}
+
+// consumeGateMarkers clears one gate's marker and pending files after a
+// resume consumes the decision, so re-resuming the same suspended session
+// later asks again instead of replaying a stale answer.
+func consumeGateMarkers(dir, actionID string) {
+	_ = os.Remove(hitl.ApprovedPath(dir, actionID))
+	_ = os.Remove(hitl.DeniedPath(dir, actionID))
+	_ = os.Remove(hitl.PendingPath(dir, actionID))
+	// Only clear the stable pointer when it still names *this* action.
+	if b, err := os.ReadFile(filepath.Join(dir, "pending.json")); err == nil {
+		var p hitl.Pending
+		if json.Unmarshal(b, &p) == nil && p.ActionID == actionID {
+			_ = os.Remove(filepath.Join(dir, "pending.json"))
+		}
+	}
 }
 
 // recoverResult decides whether a prior subtask can stand in for the call
@@ -678,7 +1421,7 @@ func (w *missionWalk) recoverResult(prior store.Subtask, prompt string) (string,
 	if text, ok := w.blobString(meta.ResultRef); ok {
 		return text, true
 	}
-	if len(prior.ResultText) < 8000 { // definitely not truncated
+	if len(prior.ResultText) < missionResultDisplayLimit { // definitely not truncated
 		return prior.ResultText, true
 	}
 	return "", false

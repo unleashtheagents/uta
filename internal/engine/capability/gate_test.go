@@ -235,3 +235,42 @@ func TestExtractToolNameAndInput_NotJSON(t *testing.T) {
 		t.Errorf("input from non-JSON should fall back to raw payload")
 	}
 }
+
+func TestSubsumes(t *testing.T) {
+	cases := []struct {
+		grant, cap string
+		want       bool
+	}{
+		// Exact matches, with and without arg globs.
+		{"Read", "Read", true},
+		{"Bash(git push *)", "Bash(git push *)", true},
+		// Broader grant covers a narrower raise.
+		{"Bash(git push *)", "Bash(git push origin main)", true},
+		{"Bash(*)", "Bash(git status)", true},
+		{"Bash", "Bash(git push origin main)", true},
+		{"Bash(git *)", "Bash(git push *)", true},
+		{"Bash(git p?sh *)", "Bash(git push origin)", true},
+		// Tool names are case-insensitive, like the gate.
+		{"bash(git push *)", "Bash(git push origin main)", true},
+		// Narrower or unrelated grants do not cover.
+		{"Bash(git push origin main)", "Bash(git push *)", false},
+		{"Bash(git push *)", "Bash(git pull origin main)", false},
+		{"Bash(git push *)", "Bash", false},
+		{"Read", "Write", false},
+		{"Bash(git push *)", "Shell(git push origin main)", false},
+		// A grant star must cover the cap's star, not just its prefix.
+		{"Bash(git push *x)", "Bash(git push *)", false},
+		{"Bash(git push *)", "Bash(git *)", false},
+		// '?' covers exactly one char, so it cannot cover '*' or vice versa.
+		{"Bash(git push ?)", "Bash(git push *)", false},
+		{"Bash(git push *)", "Bash(git push ?)", true},
+		// Malformed patterns only subsume by exact string equality.
+		{"Bash(git push *", "Bash(git push *", true},
+		{"Bash(git push *", "Bash(git push origin)", false},
+	}
+	for _, tc := range cases {
+		if got := Subsumes(tc.grant, tc.cap); got != tc.want {
+			t.Errorf("Subsumes(%q, %q) = %v, want %v", tc.grant, tc.cap, got, tc.want)
+		}
+	}
+}

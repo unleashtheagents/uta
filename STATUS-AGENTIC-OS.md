@@ -1,9 +1,9 @@
 # Agentic OS Roadmap — Status
 
-**As of 2026-05-19.** Honest snapshot of how the 20-item Mission Profiles
-roadmap actually landed, based on the cross-model audit in
-[`AUDIT-AGENTIC-OS.md`](./AUDIT-AGENTIC-OS.md) (Claude implemented; Gemini
-audited).
+**As of 2026-08-13 (v0.14.0).** Updated snapshot of the 20-item Mission Profiles
+roadmap after closing Themes A, C, and D (`ApplyProfile*` across `run`, `resume`,
+`audit`, `improve`, and `pr`; generic-first `dash.go` panes; `MCPConfigPath`
+forwarded across `claude`, `agy`, and `gemini`; and `uta serve --web`).
 
 | | Count |
 |---|---|

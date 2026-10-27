@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/provider"
 )
@@ -35,6 +36,10 @@ func ApplyProfile(req *LoopRequest, p *profile.MissionProfile) {
 	req.HITLTriggers = append([]string(nil), p.Policies.HITLTriggers...)
 	req.HITLTokenThreshold = p.Policies.HITLTokenThreshold
 	req.HITLSeverity = p.Policies.HITLSeverity
+	req.MemoryConsolidate = p.Memory.Consolidate
+	req.MemoryTopK = p.Memory.TopK
+	req.OnComplete = append([]profile.Handoff(nil), p.OnComplete...)
+	req.MaxHandoffDepth = p.MaxHandoffDepth
 }
 
 // LoopRequest configures a self-improvement loop. Designed to be
@@ -67,6 +72,10 @@ type LoopRequest struct {
 	MaxRetries      int           // gate retries per iteration; default 1
 	PreApproveTools []string      // forwarded to providers
 
+	// HITL is the human-in-the-loop approver for tool-call gating during
+	// each iteration.
+	HITL hitl.Approver
+
 	// Profile-derived policy fields. Each iteration's inner RunRequest is
 	// constructed with these so capability gates, HITL triggers, and
 	// budget caps flow through to the supervisor identically to a
@@ -81,6 +90,10 @@ type LoopRequest struct {
 	MaxTokens          int64
 	PerCallMaxTokens   int64
 	MaxUSDCents        int64
+	MemoryConsolidate  bool
+	MemoryTopK         int
+	OnComplete         []profile.Handoff
+	MaxHandoffDepth    int
 
 	// MCPConfigPath is the path to a `.mcp.json` describing the MCP
 	// servers each iteration should see, materialized by the engine's
@@ -334,12 +347,17 @@ func executeIdea(ctx context.Context, sup *engine.Supervisor, board *Board, req 
 		ModeName:           req.ModeName,
 		AllowedTools:       req.AllowedTools,
 		DeniedTools:        req.DeniedTools,
+		HITL:               req.HITL,
 		HITLTriggers:       req.HITLTriggers,
 		HITLTokenThreshold: req.HITLTokenThreshold,
 		HITLSeverity:       req.HITLSeverity,
 		MaxTokens:          req.MaxTokens,
 		PerCallMaxTokens:   req.PerCallMaxTokens,
 		MaxUSDCents:        req.MaxUSDCents,
+		MemoryConsolidate:  req.MemoryConsolidate,
+		MemoryTopK:         req.MemoryTopK,
+		OnComplete:         req.OnComplete,
+		MaxHandoffDepth:    req.MaxHandoffDepth,
 		MCPConfigPath:      req.MCPConfigPath,
 	})
 

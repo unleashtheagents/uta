@@ -21,11 +21,13 @@ const (
 	tokRBracket
 	tokComma
 	tokColon
+	tokSemi   // ;
 	tokArrow  // ->
 	tokAssign // =
 	tokLE     // <=
 	tokDollar // $
 	tokDot    // .
+	tokAt     // @
 )
 
 var tokNames = map[tokKind]string{
@@ -33,8 +35,8 @@ var tokNames = map[tokKind]string{
 	tokString: "string", tokPrompt: "prompt block",
 	tokLParen: "'('", tokRParen: "')'", tokLBrace: "'{'", tokRBrace: "'}'",
 	tokLBracket: "'['", tokRBracket: "']'", tokComma: "','", tokColon: "':'",
-	tokArrow: "'->'", tokAssign: "'='", tokLE: "'<='", tokDollar: "'$'",
-	tokDot: "'.'",
+	tokSemi: "';'", tokArrow: "'->'", tokAssign: "'='", tokLE: "'<='", tokDollar: "'$'",
+	tokDot: "'.'", tokAt: "'@'",
 }
 
 type token struct {
@@ -180,10 +182,14 @@ scan:
 		return token{kind: tokComma, pos: pos}, nil
 	case ':':
 		return token{kind: tokColon, pos: pos}, nil
+	case ';':
+		return token{kind: tokSemi, pos: pos}, nil
 	case '$':
 		return token{kind: tokDollar, pos: pos}, nil
 	case '.':
 		return token{kind: tokDot, pos: pos}, nil
+	case '@':
+		return token{kind: tokAt, pos: pos}, nil
 	case '=':
 		return token{kind: tokAssign, pos: pos}, nil
 	case '-':

@@ -114,6 +114,7 @@ func ApplyProfileToResume(req *ResumeRequest, p *profile.MissionProfile) {
 	req.HITLTriggers = append([]string(nil), p.Policies.HITLTriggers...)
 	req.HITLTokenThreshold = p.Policies.HITLTokenThreshold
 	req.HITLSeverity = p.Policies.HITLSeverity
+	req.MemoryConsolidate = p.Memory.Consolidate
 }
 
 // MergeProfileEnv appends KEY=VALUE pairs from in to existing. Keys are

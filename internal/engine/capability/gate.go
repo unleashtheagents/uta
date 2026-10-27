@@ -51,6 +51,7 @@ type Gate struct {
 type pattern struct {
 	raw      string
 	toolName string
+	argGlob  string         // raw arg glob, "" when absent — kept for Subsumes
 	argRE    *regexp.Regexp // nil when the pattern has no (arg-glob) section
 }
 
@@ -133,6 +134,7 @@ func parsePattern(s string) *pattern {
 		p.toolName = strings.TrimSpace(s[:i])
 		argGlob := strings.TrimSpace(s[i+1 : j])
 		if argGlob != "" {
+			p.argGlob = argGlob
 			p.argRE = globToRegexp(argGlob)
 		}
 	}
@@ -155,6 +157,72 @@ func (p *pattern) matches(toolName string, input json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// Subsumes reports whether a grant pattern covers a cap pattern: every
+// tool call cap would match, grant matches too. This is how `uta mission
+// check` verifies a `with cap C from policy P` raise against P's
+// allowed_tools using the same grammar the runtime gate enforces — a
+// grant of "Bash(git push *)" backs a raise of "Bash(git push origin
+// main)". Unparseable patterns subsume only by exact string equality.
+func Subsumes(grant, cap string) bool {
+	if grant == cap {
+		return true
+	}
+	g, c := parsePattern(grant), parsePattern(cap)
+	if g == nil || c == nil {
+		return false
+	}
+	if !strings.EqualFold(g.toolName, c.toolName) {
+		return false
+	}
+	if g.argGlob == "" {
+		// A bare tool-name grant matches any invocation of the tool.
+		return true
+	}
+	if c.argGlob == "" {
+		// The cap covers every invocation; an arg-restricted grant cannot.
+		return false
+	}
+	return globCovers(g.argGlob, c.argGlob)
+}
+
+// globCovers reports whether glob g matches every string glob c matches
+// (both over the gate's * and ? wildcards) — language inclusion, decided
+// by memoized recursion over the two patterns.
+func globCovers(gs, cs string) bool {
+	g, c := []rune(gs), []rune(cs)
+	type key struct{ i, j int }
+	memo := map[key]bool{}
+	var covers func(i, j int) bool
+	covers = func(i, j int) bool {
+		k := key{i, j}
+		if v, ok := memo[k]; ok {
+			return v
+		}
+		var v bool
+		switch {
+		case i == len(g):
+			v = j == len(c)
+		case g[i] == '*':
+			// The star either stands for the rest of c's output, or absorbs
+			// one more unit of c and stays live.
+			v = covers(i+1, j) || (j < len(c) && covers(i, j+1))
+		case j == len(c):
+			v = false
+		case c[j] == '*':
+			// c can produce arbitrary text here; only a '*' in g (handled
+			// above) covers that.
+			v = false
+		case c[j] == '?':
+			v = g[i] == '?' && covers(i+1, j+1)
+		default:
+			v = (g[i] == c[j] || g[i] == '?') && covers(i+1, j+1)
+		}
+		memo[k] = v
+		return v
+	}
+	return covers(0, 0)
 }
 
 // globToRegexp converts a glob (with * and ? wildcards) into a regexp

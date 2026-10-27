@@ -1,0 +1,12 @@
+responses:
+  plan_architecture:
+    - "Nebius Token Factory 90/10 router: 90% nvidia/nemotron-3-super-120b-a12b workers, 10% nvidia/Nemotron-3-Ultra-550b-a55b planner."
+  audit_guardrails:
+    - "PASS: OWASP ASI01-ASI10 verified with nvidia/Nemotron-3_5-Lightning sentinel (<45ms)."
+expect: "PASS: OWASP ASI01-ASI10 verified with nvidia/Nemotron-3_5-Lightning sentinel (<45ms)."
+assert:
+  calls:
+    plan_architecture: 1
+    audit_guardrails: 1
+  gates_fired: 0
+  max_cost_usd: 0.05

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/improve"
 	"github.com/unleashtheagents/uta/internal/memory"
 	"github.com/unleashtheagents/uta/internal/sentinel"
@@ -176,12 +177,17 @@ means running the command again).`,
 						})
 						if rerr != nil {
 							fmt.Fprintln(cmd.ErrOrStderr(), "warn: retrospective:", rerr)
-						} else if res != nil && res.Triggered && res.Path != "" {
+						} else if res != nil && res.Path != "" {
 							fmt.Fprintf(cmd.ErrOrStderr(),
 								"[uta] retrospective for %q written to %s (after %d sessions)\n",
 								mode.Name, res.Path, res.SessionCount)
 						}
 					}
+				},
+				HITL: &hitl.Gate{
+					StateDir: app.StateDir,
+					Stdin:    cmd.InOrStdin(),
+					Stderr:   cmd.ErrOrStderr(),
 				},
 			}
 			// Apply the active MissionProfile's policies to the loop

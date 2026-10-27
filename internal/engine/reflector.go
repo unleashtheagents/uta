@@ -15,6 +15,7 @@ import (
 
 	"github.com/unleashtheagents/uta/internal/budget"
 	"github.com/unleashtheagents/uta/internal/engine/capability"
+	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/paths"
 	"github.com/unleashtheagents/uta/internal/store"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -92,8 +93,12 @@ type ReflectorRequest struct {
 	AllowedTools []string
 	DeniedTools  []string
 
-	// HITLTriggers / HITLTokenThreshold / HITLSeverity / HITL mirror
-	// RunRequest. See AllowedTools comment re: enforcement timing.
+	// HITL is the human-in-the-loop approver for tool-call gating during
+	// the audit run. Nil approver keeps the gate inert.
+	HITL hitl.Approver
+
+	// HITLTriggers / HITLTokenThreshold / HITLSeverity mirror
+	// RunRequest.
 	HITLTriggers       []string
 	HITLTokenThreshold int
 	HITLSeverity       string
@@ -210,6 +215,10 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 	ctx, cancel := context.WithTimeout(ctx, req.RunTimeout)
 	defer cancel()
 
+	hitlCtx, hitlCancel := context.WithCancelCause(ctx)
+	defer hitlCancel(nil)
+	ctx = withRunCancel(hitlCtx, hitlCancel)
+
 	// Per-run resource budget. Installed on ctx so every callProvider
 	// inside critics + reviser sees the same shared accumulator. Mirrors
 	// what Supervisor.Run does. When a cap is reached, callProvider
@@ -228,7 +237,7 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 	// the request. callProvider reads via hitlStateFromContext on every
 	// tool_call event. Nil approver leaves the gate inert.
 	ctx = withHitlState(ctx, &hitlState{
-		approver:       nil, // CLI wiring for an audit approver lands later
+		approver:       req.HITL,
 		triggers:       capability.NewGate(nil, req.HITLTriggers),
 		severity:       req.HITLSeverity,
 		tokenThreshold: req.HITLTokenThreshold,
@@ -327,6 +336,8 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, prompt, RunRequest{
 					Workdir: req.Workdir, Env: req.Env, SubtaskTimeout: req.CriticTimeout,
 					PreApproveTools: req.PreApproveTools,
+					AllowedTools:    req.AllowedTools,
+					DeniedTools:     req.DeniedTools,
 					MCPConfigPath:   req.MCPConfigPath,
 				})
 				subCancel()
@@ -384,11 +395,13 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				perCriticMu.Unlock()
 				s.emit(sessionID, subtaskID, trajectory.CriticCompleted, map[string]any{
 					"critic": c.ID, "findings": len(findings),
+					"tokens_in": result.TokensIn, "tokens_out": result.TokensOut, "usd_cents": result.ApproxUSDCents,
 				})
 				s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 					ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 					StartedAt: &start, CompletedAt: &done,
 					ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+					MetaJSON: subtaskUsageMeta(result.TokensIn, result.TokensOut, result.ApproxUSDCents),
 				}))
 			}()
 		}
@@ -497,6 +510,18 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 			s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "budget_exhausted", ""))
 			return res, firstBudgetErr
 		}
+		if cause := context.Cause(ctx); cause != nil && errors.Is(cause, ErrHITLDenied) {
+			res.Iterations = iter
+			res.Status = "hitl_denied"
+			res.StoppedBecause = "hitl_denied"
+			s.emit(sessionID, "", trajectory.RunFailed, map[string]any{
+				"reason":    "hitl denied",
+				"error":     cause.Error(),
+				"iteration": iter,
+			})
+			s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "hitl_denied", ""))
+			return res, cause
+		}
 
 		// --- aggregate ---
 		report := Aggregate(iter, perCritic)
@@ -543,6 +568,22 @@ func (s *Supervisor) RunReflector(ctx context.Context, req ReflectorRequest) (Re
 				})
 				s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "budget_exhausted", ""))
 				return res, revErr
+			}
+			if errors.Is(revErr, ErrHITLDenied) || errors.Is(context.Cause(ctx), ErrHITLDenied) {
+				cause := revErr
+				if c := context.Cause(ctx); c != nil && errors.Is(c, ErrHITLDenied) {
+					cause = c
+				}
+				res.Iterations = iter
+				res.Status = "hitl_denied"
+				res.StoppedBecause = "hitl_denied"
+				s.emit(sessionID, "", trajectory.RunFailed, map[string]any{
+					"reason":    "hitl denied (reviser)",
+					"error":     cause.Error(),
+					"iteration": iter,
+				})
+				s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "hitl_denied", ""))
+				return res, cause
 			}
 			s.emit(sessionID, "", trajectory.RunFailed, map[string]any{"reason": revErr.Error(), "iteration": iter})
 			s.dbErr(sessionID, "", "mark_session", s.deps.Store.MarkSession(sessionID, "failed", ""))
@@ -613,6 +654,8 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 	result, err := s.callProvider(subCtx, sessionID, subtaskID, prov, prompt, RunRequest{
 		Workdir: req.Workdir, Env: req.Env, SubtaskTimeout: req.ReviseTimeout,
 		PreApproveTools: req.PreApproveTools,
+		AllowedTools:    req.AllowedTools,
+		DeniedTools:     req.DeniedTools,
 		MCPConfigPath:   req.MCPConfigPath,
 	})
 	subCancel()
@@ -674,11 +717,13 @@ func (s *Supervisor) runReviser(ctx context.Context, sessionID string, ord *int,
 
 	s.emit(sessionID, subtaskID, trajectory.ReviseCompleted, map[string]any{
 		"iteration": iter, "chars": len(result.FinalText),
+		"tokens_in": result.TokensIn, "tokens_out": result.TokensOut, "usd_cents": result.ApproxUSDCents,
 	})
 	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: result.SessionID, Status: "completed",
 		StartedAt: &start, CompletedAt: &done,
 		ResultText: Truncate(result.FinalText, 8000), RawOutputRef: rawRef,
+		MetaJSON: subtaskUsageMeta(result.TokensIn, result.TokensOut, result.ApproxUSDCents),
 	}))
 	return nil
 }

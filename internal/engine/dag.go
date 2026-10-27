@@ -160,7 +160,11 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 					}
 					defer func() { <-sem }()
 				}
-				outcome := s.runDAGSubtask(ctx, sessionID, dbIDs[i], plan.Subtasks[i], provs[i], workers[i], req)
+				mu.Lock()
+				snap := append([]SubtaskOutcome(nil), outcomes...)
+				mu.Unlock()
+				upstreamSummary := buildUpstreamOutcomeSummary(snap, plan.Subtasks[i].Needs)
+				outcome := s.runDAGSubtask(ctx, sessionID, dbIDs[i], plan.Subtasks[i], provs[i], workers[i], req, upstreamSummary)
 				mu.Lock()
 				outcomes[i] = outcome
 				if outcome.Failed {
@@ -201,7 +205,7 @@ func (s *Supervisor) runDAG(ctx context.Context, sessionID string, plan Plan, re
 
 // runDAGSubtask runs one subtask, then (if present) the gate, with optional
 // retry-producer loop on gate failure.
-func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID string, spec SubtaskSpec, prov provider.AgentProvider, workerName string, req RunRequest) SubtaskOutcome {
+func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID string, spec SubtaskSpec, prov provider.AgentProvider, workerName string, req RunRequest, upstreamSummary string) SubtaskOutcome {
 	startedAt := time.Now()
 	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{ID: subtaskID, Status: "running", StartedAt: &startedAt}))
 	s.emit(sessionID, subtaskID, trajectory.SubtaskStarted, map[string]any{
@@ -222,9 +226,15 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		prompt := spec.Prompt
+		if upstreamSummary != "" {
+			prompt = upstreamSummary + prompt
+		}
 		if attempt > 0 && gateOutput != "" {
-			prompt = spec.Prompt +
-				"\n\n---\nYour previous attempt failed the verification gate (`" + spec.Gate.Cmd + "`). Captured output:\n\n" +
+			prompt = spec.Prompt
+			if upstreamSummary != "" {
+				prompt = upstreamSummary + prompt
+			}
+			prompt += "\n\n---\nYour previous attempt failed the verification gate (`" + spec.Gate.Cmd + "`). Captured output:\n\n" +
 				gateOutput +
 				"\n\nFix the underlying issue and produce a corrected result. Do not just restate the task."
 			s.emit(sessionID, subtaskID, trajectory.ProducerRetried, map[string]any{
@@ -302,11 +312,13 @@ func (s *Supervisor) runDAGSubtask(ctx context.Context, sessionID, subtaskID str
 
 	s.emit(sessionID, subtaskID, trajectory.SubtaskCompleted, map[string]any{
 		"spec_id": spec.ID, "chars": len(lastResult.FinalText), "provider_session_id": lastResult.SessionID,
+		"tokens_in": lastResult.TokensIn, "tokens_out": lastResult.TokensOut, "usd_cents": lastResult.ApproxUSDCents,
 	})
 	s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
 		ID: subtaskID, ProviderSessionID: lastResult.SessionID, Status: "completed",
 		StartedAt: &startedAt, CompletedAt: &completedAt,
 		ResultText: Truncate(lastResult.FinalText, 8000), RawOutputRef: rawRef,
+		MetaJSON: subtaskUsageMeta(lastResult.TokensIn, lastResult.TokensOut, lastResult.ApproxUSDCents),
 	}))
 	return SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: workerName, Result: lastResult.FinalText}
 }
@@ -362,4 +374,39 @@ func errString(e error) string {
 		return ""
 	}
 	return e.Error()
+}
+
+// buildUpstreamOutcomeSummary formats the results of completed upstream subtasks
+// listed in needs into a Markdown section that is prepended to a dependent subtask's prompt.
+func buildUpstreamOutcomeSummary(outcomes []SubtaskOutcome, needs []string) string {
+	if len(needs) == 0 {
+		return ""
+	}
+	outcomeMap := make(map[string]SubtaskOutcome, len(outcomes))
+	for _, o := range outcomes {
+		if o.ID != "" {
+			outcomeMap[o.ID] = o
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Upstream Dependency Outcomes\n\n")
+	written := 0
+	for _, depID := range needs {
+		out, ok := outcomeMap[depID]
+		if !ok || strings.TrimSpace(out.Result) == "" || out.Skipped || out.Failed {
+			continue
+		}
+		title := out.Title
+		if title == "" {
+			title = depID
+		}
+		fmt.Fprintf(&sb, "### Output from subtask %s (%s):\n%s\n\n", depID, title, strings.TrimSpace(out.Result))
+		written++
+	}
+	if written == 0 {
+		return ""
+	}
+	sb.WriteString("---\n\n")
+	return sb.String()
 }

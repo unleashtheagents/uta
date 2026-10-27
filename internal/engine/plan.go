@@ -72,6 +72,54 @@ func RenderPlannerPrompt(goal string, maxSubtasks int) string {
 	return fmt.Sprintf(plannerPromptTmpl, maxSubtasks, strings.TrimSpace(goal))
 }
 
+const dagPlannerPromptTmpl = `You are the planning step of an agent orchestrator called uta.
+
+Your job: decompose the user's goal into between 1 and %d subtasks organized as a Directed Acyclic Graph (DAG). Subtasks can run sequentially or in parallel based on their declared dependencies ("needs").
+
+Subtasks that depend on earlier subtasks must list their IDs in the "needs" array. Upstream outputs will automatically be made available to downstream subtasks.
+
+Respond with ONLY a single JSON object, no prose, no markdown, no code fences.
+The object MUST match this shape:
+
+{
+  "subtasks": [
+    {
+      "id": "s1",
+      "title": "<short label>",
+      "prompt": "<full instructions for the worker>",
+      "needs": []
+    },
+    {
+      "id": "s2",
+      "title": "<short label>",
+      "prompt": "<full instructions for the worker>",
+      "needs": ["s1"]
+    }
+  ]
+}
+
+If the goal is small enough that decomposition would just add overhead, return
+exactly one subtask that restates the goal.
+
+Goal:
+%s`
+
+// RenderDAGPlannerPrompt builds the prompt that instructs the planner to produce a DAG plan.
+func RenderDAGPlannerPrompt(goal string, maxSubtasks int) string {
+	if maxSubtasks <= 0 {
+		maxSubtasks = 8
+	}
+	return fmt.Sprintf(dagPlannerPromptTmpl, maxSubtasks, strings.TrimSpace(goal))
+}
+
+// RenderPlannerPromptForStrategy returns the appropriate planner prompt based on strategy.
+func RenderPlannerPromptForStrategy(goal string, maxSubtasks int, strategy string) string {
+	if strings.EqualFold(strategy, "dag") {
+		return RenderDAGPlannerPrompt(goal, maxSubtasks)
+	}
+	return RenderPlannerPrompt(goal, maxSubtasks)
+}
+
 // ParsePlan extracts a Plan from a planner's free-form output. It's
 // deliberately permissive: it locates the first '{' to the last '}' in the
 // payload (so accidental prose around the JSON object is tolerated) and then

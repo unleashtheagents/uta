@@ -65,6 +65,12 @@ type Pending struct {
 	Prompt      string          `json:"prompt,omitempty"`
 	Detail      json.RawMessage `json:"detail,omitempty"`
 	RequestedAt string          `json:"requested_at"`
+	// Deadline is the RFC3339 instant after which the request no longer
+	// accepts an answer (`gate human "…" within 24h`). Empty = no deadline.
+	Deadline string `json:"deadline,omitempty"`
+	// Options lists the allowed choices when the request came from a
+	// `gate choose "…" of […]` statement. Empty for standard y/N gates.
+	Options []string `json:"options,omitempty"`
 }
 
 // Decision is the outcome the supervisor consumes.
@@ -384,10 +390,16 @@ func ListPending(stateDir string) ([]*Pending, error) {
 // `uta hitl approve` (or any external orchestrator) to unblock the gate's
 // async polling loop.
 func WriteApproval(sessionDir, actionID string) error {
+	return WriteApprovalChoice(sessionDir, actionID, "")
+}
+
+// WriteApprovalChoice drops the .approved marker with an optional chosen
+// option payload (used by `gate choose` via `uta hitl approve --option X`).
+func WriteApprovalChoice(sessionDir, actionID, option string) error {
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(ApprovedPath(sessionDir, actionID), []byte{}, 0o644)
+	return os.WriteFile(ApprovedPath(sessionDir, actionID), []byte(option), 0o644)
 }
 
 // WriteDenial drops the .denied marker with an optional reason. Empty

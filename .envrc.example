@@ -16,3 +16,11 @@ export GITHUB_TOKEN="$GH_TOKEN"
 # Optional: lock the active gh account for this shell.
 # (no-op if it's already active; safe to keep.)
 gh auth switch -u unleashtheagents >/dev/null 2>&1 || true
+
+# Nebius Token Factory (NVIDIA Nemotron 3 Ultra / Super / Nano / Lightning / Super-VL)
+# export NEBIUS_API_KEY=""
+# export NEBIUS_MODEL="nvidia/nemotron-3-super-120b-a12b"
+# export UTA_NEBIUS_INJECT_RULES="1"
+
+# Tavily Search API (optional runtime web grounding for `uta nebius search` and `tavily_search` tool)
+# export TAVILY_API_KEY=""

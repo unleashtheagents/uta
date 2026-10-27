@@ -537,6 +537,8 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	switch strategy {
 	case "dag":
 		outcomes, anyFailed, abortedFF, stratErr = s.runDAG(ctx, sessionID, plan, req)
+	case "race":
+		outcomes, anyFailed, abortedFF, stratErr = s.runRace(ctx, sessionID, plan, req)
 	default:
 		outcomes, anyFailed, abortedFF, stratErr = s.runFanout(ctx, sessionID, plan, req)
 	}
@@ -642,7 +644,7 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 // runPlanner calls the planner and parses its output into a Plan.
 func (s *Supervisor) runPlanner(ctx context.Context, sessionID string, planner provider.AgentProvider, req RunRequest) (Plan, error) {
-	prompt := RenderPlannerPrompt(req.Goal, req.MaxSubtasks)
+	prompt := RenderPlannerPromptForStrategy(req.Goal, req.MaxSubtasks, req.Strategy)
 	if mem := s.relevantMemoryBlock(sessionID, req.Goal, req.MemoryTopK); mem != "" {
 		prompt = mem + prompt
 	}
@@ -1201,7 +1203,7 @@ func classifyError(err error, runCtx context.Context) string {
 
 func providerBlobExt(workerName string) string {
 	switch workerName {
-	case "claude", "gemini":
+	case "claude", "gemini", "agy", "nebius":
 		return workerName + ".jsonl"
 	}
 	return "txt"
@@ -1238,6 +1240,90 @@ func pickStrategy(explicit string, plan Plan) string {
 		}
 	}
 	return "fanout"
+}
+
+// runRace runs subtasks speculatively in parallel and cancels remaining workers as soon as the first succeeds.
+func (s *Supervisor) runRace(ctx context.Context, sessionID string, plan Plan, req RunRequest) ([]SubtaskOutcome, bool, bool, error) {
+	outcomes := make([]SubtaskOutcome, len(plan.Subtasks))
+	sem := make(chan struct{}, req.MaxParallel)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var winner *SubtaskOutcome
+	anyFailed := false
+
+	subCtx, cancelSubs := context.WithCancelCause(ctx)
+	defer cancelSubs(nil)
+
+	for i, spec := range plan.Subtasks {
+		i, spec := i, spec
+		subtaskWorkerName := req.WorkerName
+		var subtaskWorker provider.AgentProvider
+		if spec.Worker != "" {
+			if p, ok := s.deps.Registry.Get(spec.Worker); ok {
+				subtaskWorker = p
+				subtaskWorkerName = spec.Worker
+			}
+		}
+		if subtaskWorker == nil {
+			subtaskWorker, _ = s.deps.Registry.Get(subtaskWorkerName)
+		}
+
+		subtaskID := uuid.NewString()
+		promptRef, err := s.deps.Blobs.Put([]byte(spec.Prompt), "txt")
+		if err != nil {
+			promptRef = ""
+		}
+		if err := s.deps.Store.CreateSubtask(store.Subtask{
+			ID:        subtaskID,
+			SessionID: sessionID,
+			Ord:       i,
+			SpecID:    spec.ID,
+			Title:     spec.Title,
+			PromptRef: promptRef,
+			Worker:    subtaskWorkerName,
+			Status:    "pending",
+		}); err != nil {
+			outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: subtaskWorkerName, Result: "subtask create failed: " + err.Error(), Failed: true}
+			anyFailed = true
+			continue
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-subCtx.Done():
+				now := time.Now()
+				s.dbErr(sessionID, subtaskID, "update_subtask", s.deps.Store.UpdateSubtask(store.Subtask{
+					ID: subtaskID, Status: "skipped", CompletedAt: &now, Error: "race lost before start", ErrorKind: "cancelled",
+				}))
+				mu.Lock()
+				outcomes[i] = SubtaskOutcome{ID: spec.ID, Title: spec.Title, Worker: subtaskWorkerName, Result: "skipped: race won by sibling", Skipped: true}
+				mu.Unlock()
+				return
+			}
+			defer func() { <-sem }()
+
+			outcome := s.runSubtask(subCtx, sessionID, subtaskID, spec, subtaskWorker, subtaskWorkerName, req)
+			mu.Lock()
+			outcomes[i] = outcome
+			if !outcome.Failed && outcome.Result != "" && winner == nil {
+				oc := outcome
+				winner = &oc
+				cancelSubs(errors.New("race won by subtask " + spec.ID))
+			} else if outcome.Failed {
+				anyFailed = true
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if winner != nil {
+		return []SubtaskOutcome{*winner}, false, false, nil
+	}
+	return outcomes, anyFailed, false, nil
 }
 
 // runFanout is the v0.1.0 supervisor pattern: every subtask runs in parallel

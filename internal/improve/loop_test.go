@@ -121,6 +121,9 @@ func TestApplyProfile_PopulatesLoopFields(t *testing.T) {
 			HITLTokenThreshold: 80,
 			HITLSeverity:       "high",
 		},
+		Memory:           profile.MemoryConfig{Consolidate: true, TopK: 5},
+		OnComplete:       []profile.Handoff{{TargetMode: "ops", PromptTemplate: "deploy"}},
+		MaxHandoffDepth: 3,
 	}
 	req := &LoopRequest{PreApproveTools: []string{"Read", "Bash(rm *)"}}
 	ApplyProfile(req, p)
@@ -136,6 +139,12 @@ func TestApplyProfile_PopulatesLoopFields(t *testing.T) {
 	}
 	if len(req.HITLTriggers) != 1 || req.HITLTriggers[0] != "Bash(* push *)" {
 		t.Errorf("HITLTriggers = %v", req.HITLTriggers)
+	}
+	if !req.MemoryConsolidate || req.MemoryTopK != 5 {
+		t.Errorf("Memory fields not copied: consolidate=%t topK=%d", req.MemoryConsolidate, req.MemoryTopK)
+	}
+	if len(req.OnComplete) != 1 || req.MaxHandoffDepth != 3 {
+		t.Errorf("Handoff fields not copied: onComplete=%v maxDepth=%d", req.OnComplete, req.MaxHandoffDepth)
 	}
 	// Pre-approve must drop denied entries — Bash(rm *) is in DeniedTools
 	// exactly, so SubtractDeniedTools removes it from PreApproveTools.

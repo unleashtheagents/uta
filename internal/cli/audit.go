@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/hitl"
 	"github.com/unleashtheagents/uta/internal/memory"
 	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/sentinel"
@@ -238,6 +239,11 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 				Env:             env,
 				WorkflowPath:    fileFlag,
 				ContextDir:      app.ContextDir,
+				HITL: &hitl.Gate{
+					StateDir: app.StateDir,
+					Stdin:    cmd.InOrStdin(),
+					Stderr:   cmd.ErrOrStderr(),
+				},
 			}
 			// Apply the active MissionProfile's policies: env merge,
 			// capability gates, HITL triggers, budget caps, memory
@@ -305,6 +311,14 @@ of edits, prefer to keep the codebase compiling and passing existing tests.`,
 			go sent.Watch(ctx, bus)
 
 			result, runErr := sup.RunReflector(ctx, req)
+
+			if mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
+				maybeWriteRetrospective(ctx, cmd, app, recorder, bus, mode, engine.RunRequest{
+					Goal: req.Goal, ModeName: mode.Name, WorkerName: worker,
+				}, engine.RunResult{
+					SessionID: result.SessionID, Status: result.Status,
+				})
+			}
 
 			bus.Shutdown()
 			if jsonlDone != nil {

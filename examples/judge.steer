@@ -1,0 +1,45 @@
+#!/usr/bin/env -S uta mission run
+// judge.steer — `judge ... by ... require k of n`: adversarial verification.
+//
+// A claim is only as good as the attacks it survives. `judge` fans the
+// value out to n independent verifiers, each prompted to refute it, and
+// each ending with a verdict line (STANDS or REFUTED). The runtime
+// appends the judged value as every verifier's last argument — so a
+// verifier declared as refute(lens, claim) is called here with only its
+// lens. If fewer than k verdicts are STANDS, the mission fails instead
+// of emitting an unverified answer.
+//
+// This is the Paper № 02 review_release shape: require 2 of 3 tolerates
+// one over-zealous refuter without letting a weak claim through.
+//
+//   uta mission check judge.steer       static checks, no tokens spent
+//   uta mission run judge.steer
+
+agent fn assess(subject: Text) -> Text
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Assess whether ${subject} is ready to release.
+  State your conclusion as one short claim, with your two strongest reasons.
+  """
+
+agent fn refute(lens: Text, claim: Text) -> Text
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Try hard to refute this release claim through the ${lens} lens:
+
+  ${claim}
+
+  End your reply with a single verdict line: STANDS or REFUTED.
+  """
+
+mission review_release {
+  budget 300k tokens, $2, 10min
+
+  let claim = assess("the code in the current directory")
+  let verified = judge claim
+    by refute("correctness"), refute("security"), refute("completeness")
+    require 2 of 3
+  emit verified
+}

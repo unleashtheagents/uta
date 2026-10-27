@@ -140,6 +140,12 @@ func newApp(_ context.Context) (*App, error) {
 
 	reg := provider.NewRegistry()
 	disabled := disabledProviderSet()
+	if !disabled["agy"] {
+		if err := reg.Register(&builtin.Agy{}, false); err != nil {
+			st.Close()
+			return nil, err
+		}
+	}
 	if !disabled["claude"] {
 		if err := reg.Register(&builtin.Claude{}, false); err != nil {
 			st.Close()
@@ -148,6 +154,12 @@ func newApp(_ context.Context) (*App, error) {
 	}
 	if !disabled["gemini"] {
 		if err := reg.Register(&builtin.Gemini{}, false); err != nil {
+			st.Close()
+			return nil, err
+		}
+	}
+	if !disabled["nebius"] {
+		if err := reg.Register(&builtin.Nebius{}, false); err != nil {
 			st.Close()
 			return nil, err
 		}
@@ -219,10 +231,10 @@ func Execute() {
 		&cobra.Group{ID: "data", Title: "Memory & Data:"},
 		&cobra.Group{ID: "integrate", Title: "Integrations:"},
 	)
-	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newProvidersCmd())
-	addTo("orchestrate", newRunCmd(), newShellCmd(), newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
-	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newPerfCmd(), newDashCmd())
-	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd())
+	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newProvidersCmd(), newNebiusCmd())
+	addTo("orchestrate", newRunCmd(), newPRCmd(), newShellCmd(), newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
+	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newReplayCmd(), newBenchCmd(), newPerfCmd(), newDashCmd())
+	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd(), newSkillsCmd())
 	addTo("data", newMemoryCmd(), newRecallCmd(), newIdeasCmd(), newExportDBCmd(), newImportCmd())
 	addTo("integrate", newServeCmd())
 	root.SetHelpCommandGroupID("start")

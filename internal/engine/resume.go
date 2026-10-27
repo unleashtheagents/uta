@@ -67,6 +67,11 @@ type ResumeRequest struct {
 	PerCallMaxTokens int64
 	MaxUSDCents      int64
 
+	// MemoryConsolidate mirrors RunRequest.MemoryConsolidate. When true and
+	// the supervisor's Memory dep is non-nil, a final session_outcome fact is
+	// written after the resumed session completes.
+	MemoryConsolidate bool
+
 	// MCPConfigPath is an absolute path to a synthesized `.mcp.json`-style
 	// file describing the MCP servers the resumed turn should see. Set by
 	// ApplyProfileToResume from the active MissionProfile after probing,
@@ -151,6 +156,10 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 
 	subCtx, subCancel := context.WithTimeout(ctx, req.SubtaskTimeout)
 	defer subCancel()
+
+	hitlCtx, hitlCancel := context.WithCancelCause(subCtx)
+	defer hitlCancel(nil)
+	subCtx = withRunCancel(hitlCtx, hitlCancel)
 
 	opts := provider.RunOptions{
 		Workdir:         req.Workdir,
@@ -251,6 +260,13 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 		if errors.Is(callErr, budget.ErrBudgetExceeded) {
 			return s.terminateBudgetExhausted(newSession, callErr)
 		}
+		if errors.Is(callErr, ErrHITLDenied) || errors.Is(context.Cause(subCtx), ErrHITLDenied) {
+			cause := callErr
+			if c := context.Cause(subCtx); c != nil && errors.Is(c, ErrHITLDenied) {
+				cause = c
+			}
+			return s.terminateHITLDenied(newSession, cause)
+		}
 		s.emit(newSession, "", trajectory.RunFailed, map[string]any{"reason": callErr.Error()})
 		s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "failed", ""))
 		return RunResult{SessionID: newSession, Status: "failed"}, callErr
@@ -270,9 +286,11 @@ func (s *Supervisor) Resume(ctx context.Context, req ResumeRequest) (RunResult, 
 	s.dbErr(newSession, "", "mark_session", s.deps.Store.MarkSession(newSession, "completed", finalRef))
 	s.emit(newSession, "", trajectory.RunCompleted, map[string]any{"status": "completed", "subtasks": 1})
 
-	return RunResult{
+	res := RunResult{
 		SessionID:   newSession,
 		Status:      "completed",
 		FinalAnswer: result.FinalText,
-	}, nil
+	}
+	s.consolidateResumeOutcome(newSession, req, &res)
+	return res, nil
 }

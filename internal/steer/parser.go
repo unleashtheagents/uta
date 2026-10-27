@@ -10,11 +10,9 @@ import (
 // execute yet. Naming them explicitly turns "syntax error" into a roadmap
 // pointer for programs written against the full RFC.
 var reservedConstructs = map[string]string{
-	"until": "discovery loops", "gate": "human gates",
-	"with": "capability raises", "retry": "typed failure handling",
-	"context": "named context bindings", "policy": "policy scopes",
-	"recall": "memory queries",
-	"var":    "mutable bindings", "if": "conditionals",
+	"context": "named context bindings",
+	"recall":  "memory queries",
+	"var":     "mutable bindings", "if": "conditionals",
 }
 
 // Parse turns one .steer source file into a Program. It fails fast on the
@@ -146,11 +144,11 @@ func (p *parser) parseAgentFn() (*AgentFn, *Diag) {
 		if _, d := p.expect(tokColon, "after the parameter name"); d != nil {
 			return nil, d
 		}
-		typ, d := p.parseType()
+		typ, refine, lenses, d := p.parseType()
 		if d != nil {
 			return nil, d
 		}
-		fn.Params = append(fn.Params, Param{Pos: pTok.pos, Name: pTok.text, Type: typ})
+		fn.Params = append(fn.Params, Param{Pos: pTok.pos, Name: pTok.text, Type: typ, Refine: refine, Lenses: lenses})
 		if p.tok.kind == tokComma {
 			if d := p.advance(); d != nil {
 				return nil, d
@@ -163,9 +161,18 @@ func (p *parser) parseAgentFn() (*AgentFn, *Diag) {
 	if _, d := p.expect(tokArrow, "before the return type"); d != nil {
 		return nil, d
 	}
-	ret, d := p.parseType()
+	retPos := p.tok.pos
+	ret, retRefine, retLenses, d := p.parseType()
 	if d != nil {
 		return nil, d
+	}
+	if retRefine > 0 || len(retLenses) > 0 {
+		suffix := fmt.Sprintf("@%d", retRefine)
+		if len(retLenses) > 0 {
+			suffix = "@{" + strings.Join(retLenses, ", ") + "}"
+		}
+		dd := p.lx.errAt(retPos, "a return type cannot carry an %s refinement — an agent's own output is always unjudged (@0); refinement is earned at the call site with `judge ... require k of n`", suffix)
+		return nil, &dd
 	}
 	fn.ReturnType = ret
 
@@ -227,25 +234,86 @@ func (p *parser) parseAgentFn() (*AgentFn, *Diag) {
 	return fn, nil
 }
 
-func (p *parser) parseType() (string, *Diag) {
+// parseType parses a type with an optional refinement suffix on the base
+// or element type: Text, [Fix], Fix@2, [Fix@2], [Fix @ {Security, Repro}].
+// The returned string is the bare type ("[Fix]") — the refinement travels
+// separately so schema resolution never sees it.
+func (p *parser) parseType() (string, int, []string, *Diag) {
 	if p.tok.kind == tokLBracket {
 		if d := p.advance(); d != nil {
-			return "", d
+			return "", 0, nil, d
 		}
 		inner, d := p.expect(tokIdent, "as the element type")
 		if d != nil {
-			return "", d
+			return "", 0, nil, d
+		}
+		refine, lenses, d := p.parseRefinement()
+		if d != nil {
+			return "", 0, nil, d
 		}
 		if _, d := p.expect(tokRBracket, "to close the list type"); d != nil {
-			return "", d
+			return "", 0, nil, d
 		}
-		return "[" + inner.text + "]", nil
+		return "[" + inner.text + "]", refine, lenses, nil
 	}
 	t, d := p.expect(tokIdent, "as a type")
 	if d != nil {
-		return "", d
+		return "", 0, nil, d
 	}
-	return t.text, nil
+	refine, lenses, d := p.parseRefinement()
+	if d != nil {
+		return "", 0, nil, d
+	}
+	return t.text, refine, lenses, nil
+}
+
+// parseRefinement parses an optional refinement suffix after a type name:
+// `@N` (the M5 judged-ness count) or `@{Lens, Lens}` (the provenance
+// lattice's named-lens set). A lens set implies its count — the returned
+// level is len(lenses), the lattice's necessary condition; the checker
+// enforces the named half on top of it. Absent means @0 (anything goes).
+func (p *parser) parseRefinement() (int, []string, *Diag) {
+	if p.tok.kind != tokAt {
+		return 0, nil, nil
+	}
+	if d := p.advance(); d != nil { // consume '@'
+		return 0, nil, d
+	}
+	if p.tok.kind == tokLBrace {
+		if d := p.advance(); d != nil { // consume '{'
+			return 0, nil, d
+		}
+		var lenses []string
+		for {
+			l, d := p.expect(tokIdent, "as a lens name in the @{...} set")
+			if d != nil {
+				return 0, nil, d
+			}
+			for _, seen := range lenses {
+				if seen == l.text {
+					dd := p.lx.errAt(l.pos, "duplicate lens %q in the @{...} set", l.text)
+					return 0, nil, &dd
+				}
+			}
+			lenses = append(lenses, l.text)
+			if p.tok.kind == tokComma {
+				if d := p.advance(); d != nil {
+					return 0, nil, d
+				}
+				continue
+			}
+			break
+		}
+		if _, d := p.expect(tokRBrace, "to close the lens set"); d != nil {
+			return 0, nil, d
+		}
+		return len(lenses), lenses, nil
+	}
+	n, d := p.expect(tokNumber, "as the refinement level after '@'")
+	if d != nil {
+		return 0, nil, d
+	}
+	return int(n.num), nil, nil
 }
 
 func (p *parser) parseWorkerSpec() ([]string, *Diag) {
@@ -283,6 +351,7 @@ func (p *parser) parseWorkerSpec() ([]string, *Diag) {
 // parseMission parses:
 //
 //	mission name {
+//	  policy dev
 //	  budget 20k tokens, $1, 5min
 //	  let x = call("…")
 //	  emit x
@@ -310,6 +379,20 @@ func (p *parser) parseMission() (*Mission, *Diag) {
 			return nil, &dd
 		}
 		switch p.tok.text {
+		case "policy":
+			if m.Policy != nil {
+				dd := p.errHere("duplicate policy declaration (a mission binds at most one profile)")
+				return nil, &dd
+			}
+			polPos := p.tok.pos
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+			n, d := p.expect(tokIdent, "as the policy (MissionProfile) name")
+			if d != nil {
+				return nil, d
+			}
+			m.Policy = &PolicyDecl{Pos: polPos, Name: n.text}
 		case "budget":
 			if m.Budget != nil {
 				dd := p.errHere("duplicate budget declaration")
@@ -320,39 +403,24 @@ func (p *parser) parseMission() (*Mission, *Diag) {
 				return nil, d
 			}
 			m.Budget = b
-		case "let":
-			letPos := p.tok.pos
-			if d := p.advance(); d != nil {
-				return nil, d
-			}
-			n, d := p.expect(tokIdent, "as the binding name")
+		case "let", "emit", "gate", "with", "until":
+			st, d := p.parseStmt()
 			if d != nil {
 				return nil, d
 			}
-			if _, d := p.expect(tokAssign, "after the binding name"); d != nil {
-				return nil, d
-			}
-			e, d := p.parseExpr()
+			m.Stmts = append(m.Stmts, st)
+		case "on":
+			h, d := p.parseOn()
 			if d != nil {
 				return nil, d
 			}
-			m.Stmts = append(m.Stmts, &LetStmt{Pos: letPos, Name: n.text, Expr: e})
-		case "emit":
-			emitPos := p.tok.pos
-			if d := p.advance(); d != nil {
-				return nil, d
-			}
-			e, d := p.parseExpr()
-			if d != nil {
-				return nil, d
-			}
-			m.Stmts = append(m.Stmts, &EmitStmt{Pos: emitPos, Expr: e})
+			m.Handlers = append(m.Handlers, h)
 		default:
 			if why := reservedConstructs[p.tok.text]; why != "" {
 				dd := p.errHere("%q (%s) is in the steer RFC but not implemented in the v0 interpreter", p.tok.text, why)
 				return nil, &dd
 			}
-			dd := p.errHere("expected 'budget', 'let', or 'emit', got %s", p.describe())
+			dd := p.errHere("expected 'policy', 'budget', 'let', 'gate', 'with', 'until', 'on', or 'emit', got %s", p.describe())
 			return nil, &dd
 		}
 	}
@@ -360,6 +428,379 @@ func (p *parser) parseMission() (*Mission, *Diag) {
 		return nil, d
 	}
 	return m, nil
+}
+
+// parseStmt parses one executable statement — let, emit, gate, with, or
+// until — shared between the mission body and block bodies (`with cap`,
+// `until dry`), which may nest all five but not the policy/budget
+// declarations.
+func (p *parser) parseStmt() (Stmt, *Diag) {
+	switch p.tok.text {
+	case "let":
+		letPos := p.tok.pos
+		if d := p.advance(); d != nil {
+			return nil, d
+		}
+		n, d := p.expect(tokIdent, "as the binding name")
+		if d != nil {
+			return nil, d
+		}
+		if _, d := p.expect(tokAssign, "after the binding name"); d != nil {
+			return nil, d
+		}
+		e, d := p.parseExpr()
+		if d != nil {
+			return nil, d
+		}
+		e, d = p.parseRetryClause(e)
+		if d != nil {
+			return nil, d
+		}
+		return &LetStmt{Pos: letPos, Name: n.text, Expr: e}, nil
+	case "emit":
+		emitPos := p.tok.pos
+		if d := p.advance(); d != nil {
+			return nil, d
+		}
+		e, d := p.parseExpr()
+		if d != nil {
+			return nil, d
+		}
+		return &EmitStmt{Pos: emitPos, Expr: e}, nil
+	case "gate":
+		gatePos := p.tok.pos
+		if d := p.advance(); d != nil {
+			return nil, d
+		}
+		choose := p.tok.kind == tokIdent && p.tok.text == "choose"
+		if choose {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+		} else if d := p.expectKeyword("human", "after 'gate' ('human' or 'choose')"); d != nil {
+			return nil, d
+		}
+		e, d := p.parseExpr()
+		if d != nil {
+			return nil, d
+		}
+		var options []string
+		if choose {
+			options, d = p.parseOptionList()
+			if d != nil {
+				return nil, d
+			}
+		}
+		within, d := p.parseWithinClause()
+		if d != nil {
+			return nil, d
+		}
+		return &GateStmt{Pos: gatePos, Message: e, Within: within, Options: options}, nil
+	case "with":
+		return p.parseWith()
+	case "until":
+		return p.parseUntil()
+	}
+	dd := p.errHere("expected a statement, got %s", p.describe())
+	return nil, &dd
+}
+
+// parseRetryClause wraps an already-parsed let expression when a
+// `retry N on E` handler follows it (RFC: handler = "retry" INT "on" IDENT):
+//
+//	let fixes = fix(plan)
+//	            retry 2 on SchemaMismatch
+//
+// There is no statement terminator, so the clause binds to the nearest
+// preceding let expression; `retry` cannot begin a statement, which keeps
+// the attachment unambiguous.
+func (p *parser) parseRetryClause(e Expr) (Expr, *Diag) {
+	if p.tok.kind != tokIdent || p.tok.text != "retry" {
+		return e, nil
+	}
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'retry'
+		return nil, d
+	}
+	n, d := p.expect(tokNumber, "as the retry count")
+	if d != nil {
+		return nil, d
+	}
+	if n.num < 1 {
+		dd := p.lx.errAt(n.pos, "retry needs at least one attempt")
+		return nil, &dd
+	}
+	if d := p.expectKeyword("on", "after the retry count"); d != nil {
+		return nil, d
+	}
+	errTok, d := p.expect(tokIdent, "as the error name (e.g. SchemaMismatch)")
+	if d != nil {
+		return nil, d
+	}
+	return &RetryExpr{Pos: pos, N: int(n.num), ErrName: errTok.text, ErrPos: errTok.pos, Expr: e}, nil
+}
+
+// parseOptionList parses a choose gate's enumerated answers —
+// `gate choose "…" of ["ship", "hold"]`. Options are string literals
+// only: the list is the human's answer vocabulary, so it must be static.
+// The returned slice is never nil (an empty `of []` parses and is
+// rejected by the checker, which owns list-shape diagnostics).
+func (p *parser) parseOptionList() ([]string, *Diag) {
+	if d := p.expectKeyword("of", "after the gate choose message"); d != nil {
+		return nil, d
+	}
+	if _, d := p.expect(tokLBracket, "to open the option list"); d != nil {
+		return nil, d
+	}
+	options := []string{}
+	for p.tok.kind != tokRBracket {
+		s, d := p.expect(tokString, "as a gate choose option")
+		if d != nil {
+			return nil, d
+		}
+		options = append(options, s.text)
+		if p.tok.kind == tokComma {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+		}
+	}
+	if d := p.advance(); d != nil { // consume ']'
+		return nil, d
+	}
+	return options, nil
+}
+
+// parseWithinClause parses a gate's optional answer deadline —
+// `gate human "…" within 24h` — using the same number-plus-unit lexing
+// as the budget duration. Returns 0 when no `within` follows the gate.
+func (p *parser) parseWithinClause() (time.Duration, *Diag) {
+	if p.tok.kind != tokIdent || p.tok.text != "within" {
+		return 0, nil
+	}
+	if d := p.advance(); d != nil { // consume 'within'
+		return 0, d
+	}
+	n, d := p.expect(tokNumber, "as the gate deadline (e.g. within 24h)")
+	if d != nil {
+		return 0, d
+	}
+	if n.num < 1 {
+		dd := p.lx.errAt(n.pos, "gate deadline must be positive")
+		return 0, &dd
+	}
+	unit, d := p.expect(tokIdent, "after the deadline amount (min, s, h)")
+	if d != nil {
+		return 0, d
+	}
+	switch unit.text {
+	case "min", "m":
+		return time.Duration(n.num) * time.Minute, nil
+	case "s", "sec":
+		return time.Duration(n.num) * time.Second, nil
+	case "h":
+		return time.Duration(n.num) * time.Hour, nil
+	}
+	dd := p.lx.errAt(unit.pos, "unknown deadline unit %q (min, s, h)", unit.text)
+	return 0, &dd
+}
+
+// parseOn parses a mission-level compensation handler:
+//
+//	on BudgetExceeded -> emit partial_report; halt
+//
+// The body is a ';'-separated statement list — let, emit, or halt. halt is
+// only legal here: a clean termination is a declared reaction to a typed
+// failure, not a statement the happy path may reach.
+func (p *parser) parseOn() (*OnHandler, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'on'
+		return nil, d
+	}
+	errTok, d := p.expect(tokIdent, "as the error name (e.g. BudgetExceeded)")
+	if d != nil {
+		return nil, d
+	}
+	if _, d := p.expect(tokArrow, "after the error name"); d != nil {
+		return nil, d
+	}
+	h := &OnHandler{Pos: pos, ErrName: errTok.text, ErrPos: errTok.pos}
+	for {
+		if p.tok.kind != tokIdent {
+			dd := p.errHere("expected 'let', 'emit', or 'halt' in an on-handler, got %s", p.describe())
+			return nil, &dd
+		}
+		switch p.tok.text {
+		case "halt":
+			h.Body = append(h.Body, &HaltStmt{Pos: p.tok.pos})
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+		case "let", "emit":
+			st, d := p.parseStmt()
+			if d != nil {
+				return nil, d
+			}
+			h.Body = append(h.Body, st)
+		default:
+			dd := p.errHere("expected 'let', 'emit', or 'halt' in an on-handler, got %s", p.describe())
+			return nil, &dd
+		}
+		if p.tok.kind == tokSemi {
+			if d := p.advance(); d != nil {
+				return nil, d
+			}
+			continue
+		}
+		return h, nil
+	}
+}
+
+// parseWith parses a scoped capability raise:
+//
+//	with cap "Bash(git push *)" from policy release {
+//	  let out = deploy(plan)
+//	}
+//
+// The capability is a tool pattern (string) or a bare tool name
+// (identifier); the policy names the MissionProfile the raise borrows
+// the grant from.
+func (p *parser) parseWith() (Stmt, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'with'
+		return nil, d
+	}
+	if d := p.expectKeyword("cap", "after 'with'"); d != nil {
+		return nil, d
+	}
+	var capName string
+	switch p.tok.kind {
+	case tokString, tokIdent:
+		capName = p.tok.text
+		if d := p.advance(); d != nil {
+			return nil, d
+		}
+	default:
+		dd := p.errHere("expected a capability (tool pattern string or tool name) after 'with cap', got %s", p.describe())
+		return nil, &dd
+	}
+	if d := p.expectKeyword("from", "after the capability"); d != nil {
+		return nil, d
+	}
+	if d := p.expectKeyword("policy", "after 'from'"); d != nil {
+		return nil, d
+	}
+	polTok, d := p.expect(tokIdent, "as the granting policy (MissionProfile) name")
+	if d != nil {
+		return nil, d
+	}
+	ws := &WithStmt{Pos: pos, Cap: capName, Policy: polTok.text}
+	if _, d := p.expect(tokLBrace, "to open the with block"); d != nil {
+		return nil, d
+	}
+	for p.tok.kind != tokRBrace {
+		if p.tok.kind == tokEOF {
+			dd := p.errHere("unexpected end of file inside a with block (missing '}')")
+			return nil, &dd
+		}
+		if p.tok.kind != tokIdent {
+			dd := p.errHere("expected a statement, got %s", p.describe())
+			return nil, &dd
+		}
+		switch p.tok.text {
+		case "let", "emit", "gate", "with", "until":
+			st, d := p.parseStmt()
+			if d != nil {
+				return nil, d
+			}
+			ws.Body = append(ws.Body, st)
+		default:
+			if why := reservedConstructs[p.tok.text]; why != "" {
+				dd := p.errHere("%q (%s) is in the steer RFC but not implemented in the v0 interpreter", p.tok.text, why)
+				return nil, &dd
+			}
+			dd := p.errHere("expected 'let', 'gate', 'with', 'until', or 'emit' inside a with block, got %s", p.describe())
+			return nil, &dd
+		}
+	}
+	if d := p.advance(); d != nil { // consume '}'
+		return nil, d
+	}
+	if len(ws.Body) == 0 {
+		dd := p.lx.errAt(pos, "with block is empty — a raise that scopes no calls grants authority to nothing")
+		return nil, &dd
+	}
+	return ws, nil
+}
+
+// parseUntil parses a discovery loop:
+//
+//	until dry(2) {
+//	  let more = find_bugs("security")
+//	}
+//
+// The dry count is the number of consecutive empty rounds that ends the
+// loop; the checker separately insists the mission carries a token or
+// dollar budget (the loop's other termination bound).
+func (p *parser) parseUntil() (Stmt, *Diag) {
+	pos := p.tok.pos
+	if d := p.advance(); d != nil { // consume 'until'
+		return nil, d
+	}
+	if d := p.expectKeyword("dry", "after 'until' (v0 supports dry loops only)"); d != nil {
+		return nil, d
+	}
+	if _, d := p.expect(tokLParen, "after 'dry'"); d != nil {
+		return nil, d
+	}
+	n, d := p.expect(tokNumber, "as the dry-round count")
+	if d != nil {
+		return nil, d
+	}
+	if n.num < 1 {
+		dd := p.lx.errAt(n.pos, "until dry needs at least one dry round")
+		return nil, &dd
+	}
+	if _, d := p.expect(tokRParen, "to close the dry-round count"); d != nil {
+		return nil, d
+	}
+	us := &UntilStmt{Pos: pos, N: int(n.num)}
+	if _, d := p.expect(tokLBrace, "to open the until body"); d != nil {
+		return nil, d
+	}
+	for p.tok.kind != tokRBrace {
+		if p.tok.kind == tokEOF {
+			dd := p.errHere("unexpected end of file inside an until body (missing '}')")
+			return nil, &dd
+		}
+		if p.tok.kind != tokIdent {
+			dd := p.errHere("expected a statement, got %s", p.describe())
+			return nil, &dd
+		}
+		switch p.tok.text {
+		case "let", "emit", "gate", "with", "until":
+			st, d := p.parseStmt()
+			if d != nil {
+				return nil, d
+			}
+			us.Body = append(us.Body, st)
+		default:
+			if why := reservedConstructs[p.tok.text]; why != "" {
+				dd := p.errHere("%q (%s) is in the steer RFC but not implemented in the v0 interpreter", p.tok.text, why)
+				return nil, &dd
+			}
+			dd := p.errHere("expected 'let', 'gate', 'with', 'until', or 'emit' inside an until body, got %s", p.describe())
+			return nil, &dd
+		}
+	}
+	if d := p.advance(); d != nil { // consume '}'
+		return nil, d
+	}
+	if len(us.Body) == 0 {
+		dd := p.lx.errAt(pos, "until body is empty — a discovery loop with no statements discovers nothing")
+		return nil, &dd
+	}
+	return us, nil
 }
 
 // parseBudget parses `budget 20k tokens, $1, 5min` — items in any order,

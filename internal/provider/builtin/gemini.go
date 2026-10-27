@@ -65,10 +65,7 @@ func (g *Gemini) Detect(ctx context.Context) provider.Detection {
 	if m := geminiVersionRE.FindString(strings.TrimSpace(string(out))); m != "" {
 		version = m
 	}
-	notes := ""
-	if strings.HasPrefix(version, "0.") {
-		notes = "session-resume behavior changed across pre-1.0 versions; resume is best-effort"
-	}
+	notes := "deprecated: gemini CLI client is deprecated; upgrade to 'agy' (Google Antigravity CLI)"
 	return provider.Detection{
 		Available:  true,
 		BinaryPath: path,

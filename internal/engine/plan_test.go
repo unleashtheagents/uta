@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +111,17 @@ func TestParsePlan_BracesInsidePromptStringLiteral(t *testing.T) {
 	}
 	if len(p.Subtasks) != 1 || p.Subtasks[0].Prompt != "write code with { and } braces" {
 		t.Fatalf("unexpected plan: %+v", p)
+	}
+}
+
+func TestRenderPlannerPromptForStrategy(t *testing.T) {
+	fanoutPrompt := RenderPlannerPromptForStrategy("build app", 4, "fanout")
+	if !strings.Contains(fanoutPrompt, "parallel") {
+		t.Errorf("fanout prompt should mention parallel: %s", fanoutPrompt)
+	}
+
+	dagPrompt := RenderPlannerPromptForStrategy("build app", 4, "dag")
+	if !strings.Contains(dagPrompt, "Directed Acyclic Graph") || !strings.Contains(dagPrompt, "needs") {
+		t.Errorf("dag prompt should mention Directed Acyclic Graph and needs: %s", dagPrompt)
 	}
 }

@@ -111,7 +111,7 @@ func TestProvidersCmd_JSONOutput_MissingProviders(t *testing.T) {
 	for i, r := range rows {
 		byName[r.Name] = i
 	}
-	for _, want := range []string{"claude", "gemini"} {
+	for _, want := range []string{"agy", "claude"} {
 		idx, ok := byName[want]
 		if !ok {
 			t.Fatalf("expected provider %q in JSON: %s", want, out)
@@ -157,7 +157,7 @@ func TestProvidersCmd_TableOutput_MissingFieldsRenderedAsDash(t *testing.T) {
 		t.Fatalf("expected header + at least 2 provider rows, got %d:\n%s", len(lines), out)
 	}
 
-	for _, name := range []string{"claude", "gemini"} {
+	for _, name := range []string{"agy", "claude"} {
 		var row string
 		for _, l := range lines[1:] {
 			if strings.HasPrefix(strings.TrimSpace(l), name+" ") || strings.TrimSpace(l) == name {

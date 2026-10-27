@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/engine"
+	"github.com/unleashtheagents/uta/internal/engine/capability"
+	"github.com/unleashtheagents/uta/internal/profile"
 	"github.com/unleashtheagents/uta/internal/state"
 	"github.com/unleashtheagents/uta/internal/steer"
 	"github.com/unleashtheagents/uta/internal/trajectory"
@@ -29,33 +32,87 @@ turning every agent fn call into a provider subtask, journaled to the
 normal session/trajectory store. 'uta mission check' runs the static
 checks without spending a token.`,
 	}
-	cmd.AddCommand(newMissionRunCmd(), newMissionCheckCmd())
+	cmd.AddCommand(newMissionRunCmd(), newMissionCheckCmd(), newMissionTestCmd(), newMissionFmtCmd(), newMissionLspCmd())
 	return cmd
 }
 
 // loadSteerProgram reads, parses, and checks one .steer file. Diagnostics
 // (with source excerpts) go to errw; the returned bool is false when any
 // hard error was reported. warnings counts the non-fatal diagnostics so
-// callers can surface "ok, with N warning(s)".
-func loadSteerProgram(path string, errw io.Writer) (prog *steer.Program, warnings int, ok bool) {
-	src, err := os.ReadFile(path)
+// callers can surface "ok, with N warning(s)". src is returned so callers
+// can run the filesystem-dependent checks (steer.CheckPolicy) with
+// excerpt-quality diagnostics.
+func loadSteerProgram(path string, errw io.Writer) (prog *steer.Program, warnings int, src string, ok bool) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(errw, "error:", err)
-		return nil, 0, false
+		return nil, 0, "", false
 	}
-	prog, pd := steer.Parse(filepath.Base(path), string(src))
+	src = string(data)
+	prog, pd := steer.Parse(filepath.Base(path), src)
 	if pd != nil {
 		fmt.Fprintln(errw, pd.Render())
-		return nil, 0, false
+		return nil, 0, src, false
 	}
-	diags := steer.Check(prog, string(src))
+	diags := steer.Check(prog, src)
 	for _, d := range diags {
 		fmt.Fprintln(errw, d.Render())
 		if d.Warning {
 			warnings++
 		}
 	}
-	return prog, warnings, !steer.HasErrors(diags)
+	return prog, warnings, src, !steer.HasErrors(diags)
+}
+
+// resolveMissionPolicy resolves a mission's `policy P` declaration to the
+// installed MissionProfile it names, and verifies every `with cap C from
+// policy P` raise against the profiles' actual grants. Returns (nil, nil)
+// when the program declares neither. Unknown names and unbacked raises
+// come back as check-style Diags (with did-you-mean suggestions), not
+// errors — callers render them and exit with the compile-failure code.
+// Per-file profile load problems are warnings on errw, matching
+// resolveActiveMode.
+func resolveMissionPolicy(app *App, prog *steer.Program, src string, errw io.Writer) (*profile.MissionProfile, []steer.Diag) {
+	if prog == nil || prog.Mission == nil {
+		return nil, nil
+	}
+	raises := prog.Mission.CapRaises()
+	if prog.Mission.Policy == nil && len(raises) == 0 {
+		return nil, nil
+	}
+	profiles, perrs := profile.LoadAll(app.GlobalHome, app.ProjectRoot)
+	for _, e := range perrs {
+		fmt.Fprintln(errw, "warn: profile:", e)
+	}
+	names := make([]string, len(profiles))
+	for i, p := range profiles {
+		names[i] = p.Name
+	}
+	if d := steer.CheckPolicy(prog, src, names); d != nil {
+		return nil, []steer.Diag{*d}
+	}
+	if len(raises) > 0 {
+		grants := make(map[string][]string, len(profiles))
+		for _, p := range profiles {
+			grants[p.Name] = p.AllowedTools
+		}
+		// Grants match by the gate's pattern grammar, not string equality:
+		// a policy allowing "Bash(git push *)" backs a raise of
+		// "Bash(git push origin main)".
+		if ds := steer.CheckCapRaises(prog, src, grants, capability.Subsumes); len(ds) > 0 {
+			return nil, ds
+		}
+	}
+	if prog.Mission.Policy == nil {
+		return nil, nil
+	}
+	p, err := profile.Find(profiles, prog.Mission.Policy.Name)
+	if err != nil {
+		// CheckPolicy just matched the name against this same list, so a
+		// miss here is unreachable; keep the Diag shape for uniformity.
+		return nil, []steer.Diag{{File: prog.File, Pos: prog.Mission.Policy.Pos, Msg: err.Error()}}
+	}
+	return p, nil
 }
 
 // checkInlineSteer parses + checks steer source that never touched disk
@@ -87,28 +144,136 @@ func completeSteerFiles(_ *cobra.Command, _ []string, _ string) ([]string, cobra
 	return []string{"steer"}, cobra.ShellCompDirectiveFilterFileExt
 }
 
+// missionCheckDiag / missionCheckResult are the machine-readable form of
+// check diagnostics (`uta mission check --json`): one object per diagnostic
+// plus an overall ok boolean, so editors and CI annotate without parsing
+// caret excerpts. An LSP publishDiagnostics shim is a direct mapping.
+type missionCheckDiag struct {
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Col      int    `json:"col"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+type missionCheckResult struct {
+	OK          bool               `json:"ok"`
+	Diagnostics []missionCheckDiag `json:"diagnostics"`
+}
+
+func newMissionCheckResult(ok bool, diags []steer.Diag) missionCheckResult {
+	res := missionCheckResult{OK: ok, Diagnostics: make([]missionCheckDiag, 0, len(diags))}
+	for _, d := range diags {
+		sev := "error"
+		if d.Warning {
+			sev = "warning"
+		}
+		res.Diagnostics = append(res.Diagnostics, missionCheckDiag{
+			File: d.File, Line: d.Pos.Line, Col: d.Pos.Col, Severity: sev, Message: d.Msg,
+		})
+	}
+	return res
+}
+
+// checkSteerProgramJSON is loadSteerProgram's structured twin: the same
+// read → parse → check pipeline, but diagnostics come back as values
+// instead of rendered excerpts.
+func checkSteerProgramJSON(path string) (prog *steer.Program, diags []steer.Diag, src string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	src = string(data)
+	prog, pd := steer.Parse(filepath.Base(path), src)
+	if pd != nil {
+		return nil, []steer.Diag{*pd}, src, nil
+	}
+	return prog, steer.Check(prog, src), src, nil
+}
+
+// runMissionCheckJSON runs the same checks and exits with the same codes
+// as the text path, but emits one JSON document on stdout instead of
+// diagnostics on stderr.
+func runMissionCheckJSON(cmd *cobra.Command, path string) error {
+	prog, diags, src, err := checkSteerProgramJSON(path)
+	if err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "error:", err)
+		return exitWith(2)
+	}
+	ok := prog != nil && !steer.HasErrors(diags)
+	if ok && (prog.Mission.Policy != nil || len(prog.Mission.CapRaises()) > 0) {
+		app, aerr := newApp(cmd.Context())
+		if aerr != nil {
+			return aerr
+		}
+		defer app.Close()
+		if _, ds := resolveMissionPolicy(app, prog, src, cmd.ErrOrStderr()); len(ds) > 0 {
+			diags = append(diags, ds...)
+			ok = false
+		}
+	}
+	if eerr := json.NewEncoder(cmd.OutOrStdout()).Encode(newMissionCheckResult(ok, diags)); eerr != nil {
+		return eerr
+	}
+	if !ok {
+		return exitWith(2)
+	}
+	return nil
+}
+
 func newMissionCheckCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "check <file.steer>",
 		Short: "parse + static-check a steer program without running it",
 		Example: `  uta mission check hello.steer
-  # error: hello.steer:9:7: unknown function "gret" (did you mean "greet"?)`,
+  # error: hello.steer:9:7: unknown function "gret" (did you mean "greet"?)
+
+  # machine-readable diagnostics for editors / CI annotation
+  uta mission check --json hello.steer`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSteerFiles,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prog, warnings, ok := loadSteerProgram(args[0], cmd.ErrOrStderr())
+			if jsonOut {
+				return runMissionCheckJSON(cmd, args[0])
+			}
+			prog, warnings, src, ok := loadSteerProgram(args[0], cmd.ErrOrStderr())
 			if !ok {
 				return exitWith(2)
+			}
+			// `policy P` and `with cap … from policy P` resolve against the
+			// installed MissionProfiles — an unknown name or an unbacked
+			// raise is a check-time diagnostic, not a runtime surprise. Only
+			// this check needs an App (profile discovery).
+			policySuffix := ""
+			if prog.Mission.Policy != nil || len(prog.Mission.CapRaises()) > 0 {
+				app, err := newApp(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer app.Close()
+				pol, ds := resolveMissionPolicy(app, prog, src, cmd.ErrOrStderr())
+				if len(ds) > 0 {
+					for _, d := range ds {
+						fmt.Fprintln(cmd.ErrOrStderr(), d.Render())
+					}
+					return exitWith(2)
+				}
+				if pol != nil {
+					policySuffix = fmt.Sprintf(", policy %s", pol.Name)
+				}
 			}
 			suffix := ""
 			if warnings > 0 {
 				suffix = fmt.Sprintf(", %d warning(s)", warnings)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "ok: mission %q — %d agent fn(s), %d call(s), budget %s%s\n",
-				prog.Mission.Name, len(prog.Agents), len(prog.Mission.Calls()), formatBudget(prog.Mission.Budget), suffix)
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: mission %q — %d agent fn(s), %d call(s), budget %s%s%s\n",
+				prog.Mission.Name, len(prog.Agents), len(prog.Mission.Calls()), formatBudget(prog.Mission.Budget), policySuffix, suffix)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit diagnostics as JSON: {ok, diagnostics: [{file, line, col, severity, message}]}")
+	return cmd
 }
 
 func newMissionRunCmd() *cobra.Command {
@@ -136,7 +301,7 @@ func newMissionRunCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSteerFiles,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prog, _, ok := loadSteerProgram(args[0], cmd.ErrOrStderr())
+			prog, _, src, ok := loadSteerProgram(args[0], cmd.ErrOrStderr())
 			if !ok {
 				return exitWith(2)
 			}
@@ -151,6 +316,14 @@ func newMissionRunCmd() *cobra.Command {
 				return err
 			}
 			defer app.Close()
+
+			policy, pds := resolveMissionPolicy(app, prog, src, cmd.ErrOrStderr())
+			if len(pds) > 0 {
+				for _, d := range pds {
+					fmt.Fprintln(cmd.ErrOrStderr(), d.Render())
+				}
+				return exitWith(2)
+			}
 
 			detections := app.Registry.DetectAll(cmd.Context())
 			available := availableProviders(app.Registry.Names(), detections)
@@ -227,7 +400,9 @@ func newMissionRunCmd() *cobra.Command {
 				CallTimeout:     callTimeout,
 				MaxParallel:     maxParallel,
 				ModeName:        rr.ModeName,
+				Policy:          policy,
 				ResumeSessionID: resumeSession,
+				HITLStateDir:    app.StateDir,
 			})
 
 			// Thread continuity: a mission is a session like any other, so
@@ -247,6 +422,16 @@ func newMissionRunCmd() *cobra.Command {
 			}
 
 			if runErr != nil {
+				// A gate suspension is a re-enterable state, not a failure:
+				// point the operator at the approve + resume pair and exit 0.
+				if errors.Is(runErr, engine.ErrMissionSuspended) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] mission %s suspended awaiting a human signature (session %s)\n",
+						prog.Mission.Name, shortID(res.SessionID))
+					fmt.Fprintf(cmd.ErrOrStderr(), "  approve: uta hitl approve %s\n", res.SessionID)
+					fmt.Fprintf(cmd.ErrOrStderr(), "  deny:    uta hitl approve %s --deny\n", res.SessionID)
+					fmt.Fprintf(cmd.ErrOrStderr(), "  resume:  uta mission run %s --resume-session %s\n", args[0], res.SessionID)
+					return nil
+				}
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
 					if res.SessionID != "" {
@@ -290,6 +475,9 @@ func renderMissionPlan(prog *steer.Program) string {
 	m := prog.Mission
 	var b strings.Builder
 	fmt.Fprintf(&b, "mission %s (%s)\n", m.Name, prog.File)
+	if m.Policy != nil {
+		fmt.Fprintf(&b, "policy: %s\n", m.Policy.Name)
+	}
 	fmt.Fprintf(&b, "budget: %s\n", formatBudget(m.Budget))
 	fmt.Fprintln(&b, "plan:")
 	calls := m.Calls()

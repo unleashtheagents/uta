@@ -151,3 +151,23 @@ func TestValidateDAG_CycleWithIndependentValidNodes(t *testing.T) {
 		t.Fatalf("expected 'cycle' error, got: %v", err)
 	}
 }
+
+func TestBuildUpstreamOutcomeSummary(t *testing.T) {
+	// Empty needs -> empty summary
+	if got := buildUpstreamOutcomeSummary(nil, nil); got != "" {
+		t.Errorf("empty needs: got %q, want empty string", got)
+	}
+
+	outcomes := []SubtaskOutcome{
+		{ID: "s1", Title: "Scaffold", Result: "created main.go"},
+		{ID: "s2", Title: "Build", Result: "compiled binary"},
+	}
+
+	summary := buildUpstreamOutcomeSummary(outcomes, []string{"s1", "s2"})
+	if !strings.Contains(summary, "## Upstream Dependency Outcomes") {
+		t.Errorf("summary missing header: %s", summary)
+	}
+	if !strings.Contains(summary, "created main.go") || !strings.Contains(summary, "compiled binary") {
+		t.Errorf("summary missing outcome results: %s", summary)
+	}
+}

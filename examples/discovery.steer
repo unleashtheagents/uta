@@ -1,0 +1,54 @@
+#!/usr/bin/env -S uta mission run
+// discovery.steer — the M4 loop and failure constructs working together:
+// `until dry(n)`, `retry n on E`, and mission-level `on E ->` compensation.
+//
+// The loop runs scout in rounds until 2 consecutive rounds come up dry —
+// a blank reply, or a verbatim repeat of the previous round. After the
+// loop, `found` holds every novel round joined in order. Budget exhaustion
+// inside the loop terminates the loop, not the mission, so the yield
+// gathered before the cap stays bound.
+//
+// summarize returns a typed record; a malformed reply is a typed
+// SchemaMismatch that `retry 2 on SchemaMismatch` re-evaluates, bounded,
+// before failing. And if the mission budget trips outside the loop, the
+// `on BudgetExceeded` handler publishes the raw partial yield and `halt`
+// turns the failure into a clean typed termination.
+//
+//   uta mission check discovery.steer    static checks, no tokens spent
+//   uta mission run discovery.steer
+
+type Report {
+  headline: Text
+  count: Int
+}
+
+agent fn scout(area: Text) -> Text
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Find one more improvement opportunity in the current directory's ${area}
+  that you have not reported before. Describe it in two sentences.
+  If nothing new remains, reply with an empty message.
+  """
+
+agent fn summarize(findings: Text) -> Report
+  worker any(claude, gemini)
+  costs <= 40k tokens
+  prompt """
+  Here is the accumulated yield of a discovery loop:
+
+  ${findings}
+
+  Condense it into one headline and count the distinct findings.
+  """
+
+mission discovery {
+  budget 300k tokens, $2, 10min
+
+  until dry(2) {
+    let found = scout("error handling")
+  }
+  let report = summarize(found) retry 2 on SchemaMismatch
+  emit report
+  on BudgetExceeded -> emit found; halt
+}

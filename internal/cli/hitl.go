@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -32,6 +33,7 @@ func newHITLApproveCmd() *cobra.Command {
 		actionID string
 		deny     bool
 		reason   string
+		option   string
 	)
 	cmd := &cobra.Command{
 		Use:   "approve <session>",
@@ -62,6 +64,9 @@ request for the session (stored as pending.json in the same dir).`,
 			if !deny && strings.TrimSpace(reason) != "" {
 				return errors.New("--reason is only valid with --deny (approvals do not carry a reason)")
 			}
+			if deny && strings.TrimSpace(option) != "" {
+				return errors.New("--option is not valid with --deny")
+			}
 
 			sessionDir := hitl.SessionDir(app.StateDir, sessionID)
 			if actionID == "" {
@@ -85,16 +90,42 @@ request for the session (stored as pending.json in the same dir).`,
 				fmt.Fprintf(cmd.OutOrStdout(), "denied %s/%s: %s\n", sessionID, actionID, reason)
 				return nil
 			}
-			if err := hitl.WriteApproval(sessionDir, actionID); err != nil {
+
+			choice := strings.TrimSpace(option)
+			if b, rerr := os.ReadFile(hitl.PendingPath(sessionDir, actionID)); rerr == nil {
+				var p hitl.Pending
+				if json.Unmarshal(b, &p) == nil && len(p.Options) > 0 {
+					if choice == "" {
+						return fmt.Errorf("gate choose requires --option (allowed: %s)", strings.Join(p.Options, ", "))
+					}
+					valid := false
+					for _, o := range p.Options {
+						if o == choice {
+							valid = true
+							break
+						}
+					}
+					if !valid {
+						return fmt.Errorf("option %q is not in allowed options [%s]", choice, strings.Join(p.Options, ", "))
+					}
+				}
+			}
+
+			if err := hitl.WriteApprovalChoice(sessionDir, actionID, choice); err != nil {
 				return fmt.Errorf("write approval: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "approved %s/%s\n", sessionID, actionID)
+			if choice != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "approved %s/%s (option=%s)\n", sessionID, actionID, choice)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "approved %s/%s\n", sessionID, actionID)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&actionID, "action", "", "specific action id to approve (defaults to the session's most-recent pending request)")
 	cmd.Flags().BoolVar(&deny, "deny", false, "deny instead of approve")
 	cmd.Flags().StringVar(&reason, "reason", "", "optional reason recorded into the .denied marker (requires --deny)")
+	cmd.Flags().StringVar(&option, "option", "", "chosen option for a `gate choose` request")
 	return cmd
 }
 

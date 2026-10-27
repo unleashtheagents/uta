@@ -64,6 +64,8 @@ func newRunCmd() *cobra.Command {
 		strategyFlag   string
 		maxWallSeconds int
 		resumeSession  string
+		verifyCmd      string
+		verifyRetries  int
 	)
 
 	cmd := &cobra.Command{
@@ -353,7 +355,7 @@ func newRunCmd() *cobra.Command {
 			// <project>/.uta/context/retrospectives/. No-op when the
 			// profile has retrospective_every: 0, or when not inside a
 			// project.
-			if runErr == nil && mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
+			if result.SessionID != "" && mode != nil && mode.RetrospectiveEvery > 0 && app.InProject() {
 				maybeWriteRetrospective(ctx, cmd, app, recorder, bus, mode, req, result)
 			}
 
@@ -391,6 +393,35 @@ func newRunCmd() *cobra.Command {
 			if result.Status == "partial" {
 				return exitWith(5)
 			}
+
+			// --verify: run a check (tests/build) in the workdir and, on
+			// failure, feed the output back to the worker for a bounded
+			// repair loop. Test-in-the-loop is the biggest quality
+			// equalizer for weaker local models — ground truth compensates
+			// for what the model guesses wrong.
+			if strings.TrimSpace(verifyCmd) != "" {
+				ok := runVerifyRepair(ctx, verifyConfig{
+					cmd:           verifyCmd,
+					maxRepairs:    verifyRetries,
+					workdir:       workdir,
+					worker:        workerName,
+					env:           req.Env,
+					timeout:       subtaskTimeout,
+					noColor:       noColor,
+					app:           app,
+					stdin:         cmd.InOrStdin(),
+					out:           cmd.OutOrStdout(),
+					errw:          cmd.ErrOrStderr(),
+					preApprove:    req.PreApproveTools,
+					allowedTools:  req.AllowedTools,
+					deniedTools:   req.DeniedTools,
+					mcpConfigPath: req.MCPConfigPath,
+					modeName:      req.ModeName,
+				})
+				if !ok {
+					return exitWith(6)
+				}
+			}
 			return nil
 		},
 	}
@@ -412,6 +443,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&workflowFile, "file", "f", "", "load a uta.yaml workflow file (flags can still override its fields)")
 	cmd.Flags().StringVar(&strategyFlag, "strategy", "", "orchestration strategy: fanout (parallel, default) or dag (with needs+gates). Auto-detected from workflow YAML if unset.")
 	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "re-enter a crashed/cancelled session: completed subtasks are recovered (not re-paid), the remainder re-runs, synthesis covers the whole plan")
+	cmd.Flags().StringVar(&verifyCmd, "verify", "", "after the run, execute this shell command in the workdir; on non-zero exit, feed its output back to the worker and retry the fix. Put your tests/build here — the single biggest quality lever for local models.")
+	cmd.Flags().IntVar(&verifyRetries, "verify-retries", 2, "max repair attempts when --verify keeps failing")
 
 	return cmd
 }
@@ -681,6 +714,7 @@ func executeHandoffChain(
 			TransportMaxRetries: baseReq.TransportMaxRetries,
 			HandoffFrom:         currentResult.SessionID,
 			HandoffTargetMode:   match.Handoff.TargetMode,
+			HITL:                baseReq.HITL,
 		}
 		// ApplyProfile, called below, replaces the budget fields with the
 		// chained mode's own policies — so we do not copy baseReq's caps

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -24,50 +25,39 @@ import (
 func newServeCmd() *cobra.Command {
 	var (
 		mcpMode     bool
+		webMode     bool
+		port        int
 		printConfig string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "expose uta as a server (MCP over stdio)",
+		Short: "expose uta as a server (MCP over stdio or Web Dashboard over HTTP)",
 		Long: `uta serve --mcp speaks JSON-RPC 2.0 over stdin/stdout per the Model
 Context Protocol spec. Any MCP-aware client (Claude Code, IDEs, other
 agents) can launch this process and call into uta's tools.
 
+uta serve --web launches an interactive local web dashboard at
+http://127.0.0.1:8080 (or custom --port) providing real-time stats,
+session tracking, and provider status.
+
 For client setup, run "uta serve --print-mcp-config <client>" where
-<client> is one of: claude-code, cursor, generic. The emitted JSON is
-ready to paste into the client's MCP config file (typically .mcp.json
-for Claude Code, ~/.cursor/mcp.json for Cursor). The full guide lives
-at docs/mcp-server.md.
-
-Tools advertised:
-  uta_providers_list   detected agent providers + capabilities
-  uta_ideas_list       per-project backlog
-  uta_ideas_add        push a new idea
-  uta_ideas_show       fetch one idea by id
-  uta_sessions_list    recent orchestration runs
-  uta_trajectory_get   timeline of one session
-  uta_audit            run a Reflector audit on a directory (one iteration,
-                       audit-only — no auto-fix from MCP for safety)
-  uta_run              one-shot goal execution
-  uta_improve_pick     pick the next-priority idea (read-only)
-  uta_whiteboard_set   post a note to the inter-agent whiteboard
-  uta_whiteboard_get   read the latest note for one key
-  uta_whiteboard_list  list the latest note per distinct key
-
-Project-aware: if uta is launched inside a project tree, ideas / sessions
-/ trajectories are project-scoped. Otherwise they're global.
-
-Generic by design: every uta capability that has a CLI surface should
-eventually have an MCP tool surface. This release ships the read-heavy
-subset plus audit + run (which are the high-value write operations).
-Mutation surface stays narrow on purpose — the MCP client model is one
-of cooperation, not blanket trust.`,
+<client> is one of: claude-code, cursor, generic.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if printConfig != "" {
 				return runPrintMCPConfig(cmd, printConfig)
 			}
+			if webMode {
+				app, err := newApp(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer app.Close()
+				ctx, cancel := signalContext(cmd.Context())
+				defer cancel()
+				return runWebServer(ctx, app, port, cmd.ErrOrStderr())
+			}
 			if !mcpMode {
-				return errors.New("pass --mcp to serve, or --print-mcp-config <client> for a config snippet")
+				return errors.New("pass --mcp (or --web) to serve, or --print-mcp-config <client> for a config snippet")
 			}
 			app, err := newApp(cmd.Context())
 			if err != nil {
@@ -87,6 +77,8 @@ of cooperation, not blanket trust.`,
 		},
 	}
 	cmd.Flags().BoolVar(&mcpMode, "mcp", false, "speak MCP (JSON-RPC 2.0) on stdin/stdout")
+	cmd.Flags().BoolVar(&webMode, "web", false, "launch the interactive web dashboard HTTP server")
+	cmd.Flags().IntVar(&port, "port", 8080, "HTTP server port for --web mode")
 	cmd.Flags().StringVar(&printConfig, "print-mcp-config", "", "print an MCP client config snippet (claude-code|cursor|generic) and exit")
 	return cmd
 }
@@ -513,12 +505,25 @@ func registerMCPTools(s *mcp.Server, app *App) {
 			return mcp.ArgError("%v", err)
 		}
 		prog, diags, ok := checkInlineSteer(p.Source)
+		// `policy P` resolves against the installed MissionProfiles at
+		// check time — an unknown name is a diagnostic like any other.
+		if ok {
+			if _, ds := resolveMissionPolicy(app, prog, p.Source, io.Discard); len(ds) > 0 {
+				ok = false
+				for _, d := range ds {
+					diags = append(diags, map[string]any{"line": d.Pos.Line, "col": d.Pos.Col, "severity": "error", "message": d.Msg})
+				}
+			}
+		}
 		out := map[string]any{"ok": ok, "diagnostics": diags}
 		if ok {
 			out["mission"] = prog.Mission.Name
 			out["agent_fns"] = len(prog.Agents)
 			out["calls"] = len(prog.Mission.Calls())
 			out["budget"] = formatBudget(prog.Mission.Budget)
+			if prog.Mission.Policy != nil {
+				out["policy"] = prog.Mission.Policy.Name
+			}
 		}
 		return mcp.TextResult(jsonDump(out))
 	})
@@ -548,6 +553,14 @@ func registerMCPTools(s *mcp.Server, app *App) {
 		prog, diags, ok := checkInlineSteer(p.Source)
 		if !ok {
 			return mcp.ErrorResult("program did not compile: " + jsonDump(diags))
+		}
+		policy, pds := resolveMissionPolicy(app, prog, p.Source, io.Discard)
+		if len(pds) > 0 {
+			msgs := make([]string, len(pds))
+			for i, d := range pds {
+				msgs[i] = d.Error()
+			}
+			return mcp.ErrorResult("program did not compile: " + strings.Join(msgs, "; "))
 		}
 		dets := app.Registry.DetectAll(ctx)
 		avail := availableProviders(app.Registry.Names(), dets)
@@ -580,10 +593,22 @@ func registerMCPTools(s *mcp.Server, app *App) {
 			Available:       avail,
 			Workdir:         app.ProjectRoot,
 			Env:             app.ProjectSubtaskEnv(),
+			Policy:          policy,
 			ResumeSessionID: p.ResumeSession,
+			HITLStateDir:    app.StateDir,
 		})
 		bus.Shutdown()
 		if err != nil {
+			// A gate suspension is a re-enterable state, not a tool failure:
+			// hand the client the approve + resume recipe.
+			if errors.Is(err, engine.ErrMissionSuspended) {
+				return mcp.TextResult(jsonDump(map[string]any{
+					"session_id": res.SessionID,
+					"status":     res.Status,
+					"next": fmt.Sprintf("awaiting human signature — run `uta hitl approve %s` (or --deny), then call uta_mission_run again with resume_session=%q",
+						res.SessionID, res.SessionID),
+				}))
+			}
 			return mcp.ErrorResult(fmt.Sprintf("mission %s (session %s): %v", res.Status, res.SessionID, err))
 		}
 		return mcp.TextResult(jsonDump(map[string]any{

@@ -193,18 +193,19 @@ func TestEmitDashJSON_ModeFilter(t *testing.T) {
 // emitDashJSON is a library function that other callers (a future MCP
 // server, a TUI) might invoke directly — so the defensive check needs a
 // regression guard.
-func TestEmitDashJSON_UnknownModeFilter(t *testing.T) {
+func TestEmitDashJSON_CustomModeFilter(t *testing.T) {
 	d := &dashData{App: &App{}, Stats: map[string]*store.ModeStat{}}
 	var buf bytes.Buffer
-	err := emitDashJSON(&buf, d, "not-a-real-mode", "mode")
-	if err == nil {
-		t.Fatal("emitDashJSON(unknown mode) returned nil error; want a descriptive error")
+	err := emitDashJSON(&buf, d, "growth", "mode")
+	if err != nil {
+		t.Fatalf("emitDashJSON(custom mode): %v", err)
 	}
-	if !strings.Contains(err.Error(), "not-a-real-mode") {
-		t.Errorf("error %q does not mention the offending mode name", err.Error())
+	var pane map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &pane); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, buf.String())
 	}
-	if buf.Len() != 0 {
-		t.Errorf("emitDashJSON wrote %q on error; want no partial output", buf.String())
+	if pane["mode"] != "growth" {
+		t.Errorf("pane.mode = %v, want \"growth\"", pane["mode"])
 	}
 }
 

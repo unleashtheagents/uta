@@ -1008,15 +1008,19 @@ func emitDashJSON(out io.Writer, d *dashData, modeFilter, tagKey string) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if modeFilter != "" {
-		spec, ok := paneRegistry[modeFilter]
-		if !ok {
-			return fmt.Errorf("unknown mode %q: expected one of %s", modeFilter, strings.Join(registeredPaneNames(), ", "))
+		if spec, ok := paneRegistry[modeFilter]; ok {
+			return enc.Encode(spec.build(d, tagKey))
 		}
-		return enc.Encode(spec.build(d, tagKey))
+		return enc.Encode(buildGenericPane(d, tagKey, modeFilter))
 	}
 	envelope := make(map[string]any, len(paneRegistry))
 	for name, spec := range paneRegistry {
 		envelope[name] = spec.build(d, tagKey)
+	}
+	for _, name := range panesToRender(d.Profiles, d.Stats) {
+		if _, exists := envelope[name]; !exists {
+			envelope[name] = buildGenericPane(d, tagKey, name)
+		}
 	}
 	return enc.Encode(envelope)
 }

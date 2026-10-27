@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -136,22 +137,31 @@ const (
 	VerdictRefuted
 )
 
-// ParseVerdict extracts the verifier's verdict: the LAST occurrence of
+// verdictLineRe matches the contractual form: the keyword alone on its
+// own line. verdictWordRe is the lenient fallback for verifiers that bury
+// the keyword in prose — word-bounded so that "understands" or
+// "withstands" can never read as a verdict.
+var (
+	verdictLineRe = regexp.MustCompile(`(?m)^[ \t]*(STANDS|REFUTED)[ \t\r]*$`)
+	verdictWordRe = regexp.MustCompile(`\b(STANDS|REFUTED)\b`)
+)
+
+// ParseVerdict extracts the verifier's verdict: the LAST line-anchored
 // STANDS or REFUTED wins (the contract asks for it as the final line, and
-// analysis text may mention both words on the way there). No verdict at
-// all is VerdictUnclear, which callers must treat as refuted.
+// analysis text may mention both words on the way there), falling back to
+// the last word-bounded occurrence. No verdict at all is VerdictUnclear,
+// which callers must treat as refuted.
 func ParseVerdict(response string) Verdict {
 	upper := strings.ToUpper(response)
-	stands := strings.LastIndex(upper, "STANDS")
-	refuted := strings.LastIndex(upper, "REFUTED")
-	switch {
-	case stands < 0 && refuted < 0:
-		return VerdictUnclear
-	case stands > refuted:
-		return VerdictStands
-	default:
-		return VerdictRefuted
+	for _, re := range []*regexp.Regexp{verdictLineRe, verdictWordRe} {
+		if ms := re.FindAllStringSubmatch(upper, -1); len(ms) > 0 {
+			if ms[len(ms)-1][1] == "STANDS" {
+				return VerdictStands
+			}
+			return VerdictRefuted
+		}
 	}
+	return VerdictUnclear
 }
 
 // stripCodeFences removes a single wrapping ``` or ```json fence.

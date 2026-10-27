@@ -25,6 +25,25 @@ func geminiPriceFromEnv() (inputCentsPerKtok, outputCentsPerKtok int64) {
 		parseNonNegativeInt64Env("UTA_GEMINI_OUTPUT_CENTS_PER_KTOK")
 }
 
+// agyPriceFromEnv reads the operator-configured per-1k-token cent rates for
+// Google Antigravity CLI (agy), falling back to the gemini rates when the
+// agy-specific variables are unset.
+func agyPriceFromEnv() (inputCentsPerKtok, outputCentsPerKtok int64) {
+	in := parseNonNegativeInt64Env("UTA_AGY_INPUT_CENTS_PER_KTOK")
+	out := parseNonNegativeInt64Env("UTA_AGY_OUTPUT_CENTS_PER_KTOK")
+	if in == 0 && out == 0 {
+		return geminiPriceFromEnv()
+	}
+	return in, out
+}
+
+// nebiusPriceFromEnv reads the operator-configured per-1k-token cent rates
+// for Nebius Token Factory (NVIDIA Nemotron models).
+func nebiusPriceFromEnv() (inputCentsPerKtok, outputCentsPerKtok int64) {
+	return parseNonNegativeInt64Env("UTA_NEBIUS_INPUT_CENTS_PER_KTOK"),
+		parseNonNegativeInt64Env("UTA_NEBIUS_OUTPUT_CENTS_PER_KTOK")
+}
+
 func parseNonNegativeInt64Env(key string) int64 {
 	v := os.Getenv(key)
 	if v == "" {

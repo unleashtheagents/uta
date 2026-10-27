@@ -105,6 +105,104 @@ uta run -f uta.yaml --planner claude --worker claude-fable
 The same pattern pins gemini: `binary: gemini`,
 `argv: ["-m", "gemini-2.5-flash", ...]`, name it `gemini-flash`.
 
+## Running local models (Ollama)
+
+uta drives *CLIs*, not model APIs, so a local model reaches uta the same way
+any other does: through a CLI wrapped in a declarative provider. [Ollama](https://ollama.com)
+is the runtime; how you wrap it depends on what you want the model to *do*.
+Bake the model tag straight into `argv` — one descriptor per model (from
+`ollama list`).
+
+### Text / reasoning roles — wrap `ollama run`
+
+Best for planners, synthesizers, `uta discuss`, or any text-in/text-out
+subtask. `ollama run <model>` reads the prompt on stdin and prints plain
+text. Drop this into `~/.uta/providers/llama.yaml`:
+
+```yaml
+name: llama
+binary: ollama
+notes: Ollama llama3.3 (local general model)
+invocation:
+  argv: ["run", "llama3.3:latest"]
+  stdin: "{{prompt}}"
+output:
+  format: text
+```
+
+These providers have **no tools** — they can't edit files or run commands,
+only produce text. And because declarative providers don't report usage,
+**dollar budget caps never trip on them** (fine — local inference is free).
+Prefer `llama3.3` over reasoning models like `deepseek-r1` for orchestration
+roles: `deepseek-r1` emits `<think>…</think>` tokens that muddy a planner's
+JSON output.
+
+### File-editing role — wrap `aider` pointed at Ollama
+
+For a local model that actually edits files, you need a real agent CLI with
+a tool loop; raw `ollama run` can't. [aider](https://aider.chat) edits files
+(git-aware), runs headlessly, and talks to Ollama's OpenAI-compatible
+endpoint (`http://localhost:11434`). Install it (`brew install aider`), then
+`~/.uta/providers/aider-llama.yaml`:
+
+```yaml
+name: aider-llama
+binary: aider
+notes: aider + Ollama llama3.3 (local, edits files)
+invocation:
+  argv:
+    - "--model"
+    - "ollama_chat/llama3.3:latest"   # llama3.3, not deepseek-r1: reasoning
+                                       # models mangle aider's edit format
+    - "--message"
+    - "{{prompt}}"
+    - "--yes-always"                   # auto-confirm file adds + edits
+    - "--no-auto-commits"              # leave git history to you
+    - "--no-stream"
+    - "--no-check-update"
+    - "--no-analytics"
+  env:
+    OLLAMA_API_BASE: "http://127.0.0.1:11434"
+output:
+  format: text
+```
+
+`aider-llama` is a **worker (editor), not a planner or synthesizer** — keep
+those roles on a fast model or aider will be asked to "plan" and produce
+junk:
+
+```sh
+# claude plans fast, your LOCAL model does the edits:
+uta run -g "rename greet() to welcome() across the package" \
+  --worker aider-llama --planner claude --synth claude --subtask-timeout 20m -y
+```
+
+Expect a 70B local model to be slower (the first call per model pays a
+~cold-load of the weights into RAM — keep `--subtask-timeout` generous) and
+to need more retries on large multi-file edits than claude/gemini. If aider
+rejects edits on a run, add `--edit-format whole` to the `argv` — it trades
+token cost for a format small local models rarely mangle.
+
+### `--verify`: test-in-the-loop is the biggest quality lever
+
+A weak model's edits get *trustworthy* when a ground-truth check runs after
+them. `--verify "<cmd>"` executes a command in the workdir after the run and,
+on non-zero exit, feeds the output back to the worker for a bounded repair
+loop (`--verify-retries`, default 2):
+
+```sh
+uta run -g "fix the failing add() in calc.py" \
+  --worker aider-llama --planner claude --synth claude \
+  --verify "python3 -m pytest -q" --verify-retries 3 --subtask-timeout 20m -y
+```
+
+The compiler/test suite compensates for what the model guesses wrong — a
+mediocre local editor with a check in the loop beats a strong one editing
+blind. Since latency is a non-issue in a batch/overnight run, more repair
+attempts is pure upside. `uta run` exits `6` if the check still fails after
+the retries. (This is the one-flag form of the per-subtask `gate:` in a DAG
+workflow.)
+
 ## Precedence and verification
 
 - A flag baked into `argv` beats the env var (the CLI parses flags last), so
