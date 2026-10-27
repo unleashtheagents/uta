@@ -220,8 +220,11 @@ func (r *Renderer) handle(ev trajectory.Event) {
 		if n != 1 {
 			suffix += "s"
 		}
-		if p.Source == "workflow-yaml" {
+		switch p.Source {
+		case "workflow-yaml":
 			suffix += " (from workflow)"
+		case "direct":
+			suffix = "direct turn"
 		}
 		r.endPhaseLocked(suffix, "")
 		r.doneSubs = 0
@@ -439,6 +442,12 @@ func toolArgSummary(arguments string) string {
 	if v, ok := args["urls"].([]any); ok && len(v) > 0 {
 		if u, ok := v[0].(string); ok {
 			return truncateRunes(u, 100)
+		}
+	}
+	// MCP and other tools: show the compact JSON so the user sees what was sent.
+	if len(args) > 0 {
+		if b, err := json.Marshal(args); err == nil {
+			return truncateRunes(string(b), 100)
 		}
 	}
 	return ""

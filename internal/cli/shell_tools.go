@@ -240,3 +240,18 @@ func (s *utaShell) Permissions(w io.Writer) error {
 	}
 	return nil
 }
+
+// applyDirectMode turns a run request into a single worker turn: the goal
+// is the one subtask, no planner, no synthesis. Later turns resume the
+// same conversation through the provider, so this is the Claude Code /
+// agy shape of interaction, on Nemotron Super with the full tool set and
+// Nano compaction once the history grows.
+func applyDirectMode(req *engine.RunRequest) {
+	title := strings.TrimSpace(req.Goal)
+	if len(title) > 72 {
+		title = title[:72] + "..."
+	}
+	req.PreSetSubtasks = []engine.SubtaskSpec{{ID: "direct", Title: title, Prompt: req.Goal}}
+	req.SkipSynthesis = true
+	req.MaxParallel = 1
+}

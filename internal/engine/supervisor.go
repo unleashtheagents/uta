@@ -560,9 +560,13 @@ func (s *Supervisor) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	planFell := false
 	if len(req.PreSetSubtasks) > 0 {
 		plan = Plan{Subtasks: req.PreSetSubtasks}
+		source := "workflow-yaml"
+		if len(req.PreSetSubtasks) == 1 && req.PreSetSubtasks[0].ID == "direct" && req.SkipSynthesis {
+			source = "direct"
+		}
 		s.emit(sessionID, "", trajectory.PlanProposed, map[string]any{
 			"subtasks": plan.Subtasks,
-			"source":   "workflow-yaml",
+			"source":   source,
 		})
 	} else {
 		var planErr error

@@ -83,6 +83,12 @@ type shellBackend interface {
 	Rewind(w io.Writer) error
 	Cost(w io.Writer) error
 	Permissions(w io.Writer) error
+	// Direct reports whether turns skip the planner and talk to one worker
+	// with tools; SetDirect toggles it. ExecFanout runs one goal through the
+	// full planner regardless of the setting.
+	Direct() bool
+	SetDirect(on bool)
+	ExecFanout(ctx context.Context, goal string) error
 }
 
 func newShellCmd() *cobra.Command {
@@ -95,6 +101,7 @@ func newShellCmd() *cobra.Command {
 		maxSubtasks    int
 		subtaskTimeout time.Duration
 		runTimeout     time.Duration
+		direct         bool
 	)
 	cmd := &cobra.Command{
 		Use:     "shell",
@@ -154,6 +161,7 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 				mode:           mode,
 				models:         map[string]string{},
 				preApprove:     preApprove,
+				direct:         direct,
 				maxParallel:    maxParallel,
 				maxSubtasks:    maxSubtasks,
 				subtaskTimeout: subtaskTimeout,
@@ -179,6 +187,7 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 			return shellLoop(cmd.Context(), rl, cmd.OutOrStdout(), cmd.ErrOrStderr(), sh)
 		},
 	}
+	cmd.Flags().BoolVar(&direct, "direct", false, "start in direct mode: one worker with tools, no planner (/direct toggles)")
 	cmd.Flags().StringVar(&workerName, "worker", "", "worker provider (defaults to the first detected one)")
 	cmd.Flags().StringVar(&workdir, "workdir", "", "working directory exposed to the worker (defaults to CWD / project root)")
 	cmd.Flags().StringVar(&sessionID, "session", "", "attach to an existing session at startup (short ids work)")
@@ -222,10 +231,14 @@ func shellLoop(ctx context.Context, rl lineReader, out, errw io.Writer, b shellB
 }
 
 func shellPrompt(b shellBackend) string {
-	if s := b.SessionShort(); s != "" {
-		return fmt.Sprintf("uta [%s]> ", s)
+	name := "uta"
+	if b.Direct() {
+		name = "uta direct"
 	}
-	return "uta> "
+	if s := b.SessionShort(); s != "" {
+		return fmt.Sprintf("%s [%s]> ", name, s)
+	}
+	return name + "> "
 }
 
 // dispatchShellLine routes one input line: bare exit words and slash
@@ -422,6 +435,31 @@ func handleShellCommand(ctx context.Context, line string, b shellBackend, out, e
 		fmt.Fprintf(out, "workdir: %s\n", b.Workdir())
 	case "status":
 		b.Status(out)
+	case "direct":
+		switch {
+		case len(args) == 0:
+			b.SetDirect(!b.Direct())
+		case args[0] == "on":
+			b.SetDirect(true)
+		case args[0] == "off":
+			b.SetDirect(false)
+		default:
+			fmt.Fprintln(errw, "usage: /direct [on|off]")
+			return
+		}
+		if b.Direct() {
+			fmt.Fprintln(out, "direct mode on: each input goes straight to the worker with tools and the conversation continues; no planner, no fan-out. /fanout <goal> still orchestrates one goal. /direct off to return.")
+		} else {
+			fmt.Fprintln(out, "direct mode off: inputs are planned and fanned out again.")
+		}
+	case "fanout", "orchestrate":
+		if len(args) == 0 {
+			fmt.Fprintln(errw, "usage: /fanout <goal>   (plan + parallel workers + synthesis, even in direct mode)")
+			return
+		}
+		if err := b.ExecFanout(ctx, strings.Join(args, " ")); err != nil {
+			fmt.Fprintln(errw, "turn failed:", err)
+		}
 	case "diff":
 		if err := b.Diff(out); err != nil {
 			fmt.Fprintln(errw, "diff:", err)
@@ -523,6 +561,11 @@ conversation
   /rewind             put every file the last run touched back (uta undo)
   /cost               per-tier cost report for the last run (uta nebius cost)
   /permissions        effective tool rules (uta permissions status)
+  /direct [on|off]    direct mode: talk to one worker with tools, no planner;
+                      the conversation continues and Nano compacts it when it
+                      grows (what claude/agy feel like, on Nemotron)
+  /fanout <goal>      plan + parallel workers + synthesis for one goal, even
+                      in direct mode
   /new  /clear        start a fresh conversation
   /compact            compact and reset the active conversation context window
   /use <session-id>   attach to an existing session (/resume works too)
@@ -576,6 +619,9 @@ type utaShell struct {
 	subtaskTimeout time.Duration
 	runTimeout     time.Duration
 
+	// direct skips planner and synthesis: one worker, tools, continuing
+	// conversation.
+	direct bool
 	// pendingContext is text (/image analyses) prepended to the next goal.
 	pendingContext []string
 	// lastSession is the most recent completed turn, for /diff /rewind /cost.
@@ -711,8 +757,12 @@ func (s *utaShell) Status(w io.Writer) {
 	if workdir == "" {
 		workdir, _ = os.Getwd()
 	}
-	fmt.Fprintf(w, "worker:  %s\nsession: %s\nmodel:   %s\ntools:   %s\nmode:    %s\nworkdir: %s\n",
-		s.worker, session, model, tools, modeName, workdir)
+	turn := "plan + fan-out + synthesis"
+	if s.direct {
+		turn = "direct (one worker with tools, continuing conversation)"
+	}
+	fmt.Fprintf(w, "worker:  %s\nsession: %s\nturns:   %s\nmodel:   %s\ntools:   %s\nmode:    %s\nworkdir: %s\n",
+		s.worker, session, turn, model, tools, modeName, workdir)
 	if s.app.InProject() {
 		fmt.Fprintf(w, "project: %s (%s)\n", s.app.ProjectName, s.app.ProjectRoot)
 	}
@@ -764,6 +814,17 @@ func (s *utaShell) LocalExec(ctx context.Context, cmdline string) error {
 	c.Stdout = s.out
 	c.Stderr = s.errw
 	return c.Run()
+}
+
+func (s *utaShell) Direct() bool      { return s.direct }
+func (s *utaShell) SetDirect(on bool) { s.direct = on }
+
+// ExecFanout runs one goal through the full planner even in direct mode.
+func (s *utaShell) ExecFanout(parent context.Context, goal string) error {
+	was := s.direct
+	s.direct = false
+	defer func() { s.direct = was }()
+	return s.execTurn(parent, s.worker, goal)
 }
 
 func (s *utaShell) ExecTurn(parent context.Context, goal string) error {
@@ -842,6 +903,9 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 			Env:             env,
 			HITL:            gate,
 			ToolGate:        toolGate,
+		}
+		if s.direct {
+			applyDirectMode(&req)
 		}
 		engine.ApplyProfile(&req, s.mode)
 		req.Env = append(req.Env, modelEnv...)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unleashtheagents/uta/internal/engine"
 	"io"
 	"strings"
 	"testing"
@@ -29,7 +30,16 @@ type fakeShellBackend struct {
 	newCalls int
 	missions []string        // RunMissionFile calls as "run:path" / "check:path"
 	agents   map[string]bool // HasAgent answers; nil means every name is an agent
-	images   []string        // Vision calls as "path|prompt"
+	direct   bool
+	fanouts  []string
+	images   []string // Vision calls as "path|prompt"
+}
+
+func (f *fakeShellBackend) Direct() bool      { return f.direct }
+func (f *fakeShellBackend) SetDirect(on bool) { f.direct = on }
+func (f *fakeShellBackend) ExecFanout(_ context.Context, goal string) error {
+	f.fanouts = append(f.fanouts, goal)
+	return f.turnErr
 }
 
 func (f *fakeShellBackend) HasAgent(name string) bool {
@@ -531,5 +541,39 @@ func TestDispatch_NewShellCommands(t *testing.T) {
 	_, errw, _ := dispatch(t, f, "/image")
 	if !strings.Contains(errw, "usage: /image") {
 		t.Fatalf("usage expected, got %q", errw)
+	}
+}
+
+func TestDispatch_DirectModeToggleAndFanout(t *testing.T) {
+	f := &fakeShellBackend{}
+	if p := shellPrompt(f); p != "uta> " {
+		t.Fatalf("prompt = %q", p)
+	}
+	out, _, _ := dispatch(t, f, "/direct")
+	if !f.direct || !strings.Contains(out, "direct mode on") {
+		t.Fatalf("toggle on failed: direct=%v out=%q", f.direct, out)
+	}
+	if p := shellPrompt(f); p != "uta direct> " {
+		t.Fatalf("prompt = %q", p)
+	}
+	dispatch(t, f, "/fanout build the whole thing")
+	if len(f.fanouts) != 1 || f.fanouts[0] != "build the whole thing" || len(f.turns) != 0 {
+		t.Fatalf("fanouts=%v turns=%v", f.fanouts, f.turns)
+	}
+	dispatch(t, f, "/direct off")
+	if f.direct {
+		t.Fatal("off failed")
+	}
+	_, errw, _ := dispatch(t, f, "/direct maybe")
+	if !strings.Contains(errw, "usage: /direct") {
+		t.Fatalf("usage expected, got %q", errw)
+	}
+}
+
+func TestApplyDirectMode(t *testing.T) {
+	req := engine.RunRequest{Goal: "fix the failing test in pkg/x", MaxParallel: 4}
+	applyDirectMode(&req)
+	if len(req.PreSetSubtasks) != 1 || req.PreSetSubtasks[0].Prompt != req.Goal || !req.SkipSynthesis || req.MaxParallel != 1 {
+		t.Fatalf("req = %+v", req)
 	}
 }

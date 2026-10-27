@@ -33,6 +33,12 @@ final answer as if you authored it yourself.
 // fails and we fall back to a verbatim join. Including the worker name in
 // each header keeps multi-model workflows attributable in the final report.
 func joinOutcomes(outcomes []SubtaskOutcome) string {
+	// One worker, one answer: hand it over untouched. This is the direct
+	// mode path (uta run --direct, the shell's /direct), where a heading
+	// would only get in the way.
+	if len(outcomes) == 1 && outcomes[0].ID == "direct" && !outcomes[0].Skipped {
+		return strings.TrimSpace(outcomes[0].Result)
+	}
 	var b strings.Builder
 	for _, o := range outcomes {
 		if o.Worker != "" {

@@ -54,6 +54,7 @@ func newRunCmd() *cobra.Command {
 		runTimeout     time.Duration
 		failFast       bool
 		yes            bool
+		direct         bool
 		printAnswer    bool
 		printJSONL     bool
 		preApprove     []string
@@ -315,6 +316,12 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("permissions: %w", err)
 			}
 			req.ToolGate = toolGate
+			if direct {
+				if len(preSet) > 0 {
+					return errors.New("--direct cannot be combined with a workflow file that defines subtasks")
+				}
+				applyDirectMode(&req)
+			}
 
 			mode, err := resolveActiveMode(cmd, app)
 			if err != nil {
@@ -445,6 +452,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&runTimeout, "timeout", 30*time.Minute, "overall run timeout")
 	cmd.Flags().BoolVar(&failFast, "fail-fast", false, "abort the run on the first subtask failure")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip interactive prompts; require --worker")
+	cmd.Flags().BoolVar(&direct, "direct", false, "no planner, no synthesis: the goal goes to one worker with tools (resume the session to continue the conversation)")
 	cmd.Flags().BoolVar(&printAnswer, "print", false, "print the final answer to stdout (default if no other --print* is set)")
 	cmd.Flags().BoolVar(&printJSONL, "print-jsonl", false, "stream every trajectory event to stdout as JSONL")
 	cmd.Flags().StringSliceVar(&preApprove, "pre-approve", nil, "comma-separated tools the worker may use without prompting (provider-specific)")

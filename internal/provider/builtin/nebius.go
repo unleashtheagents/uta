@@ -218,6 +218,11 @@ type Nebius struct {
 
 	mu       sync.Mutex
 	sessions map[string][]nebiusChatMessage
+
+	// MCP servers launched for this process (see nebius_mcp.go).
+	mcpMu        sync.Mutex
+	mcp          map[string]*mcpConn
+	mcpAnnounced map[string]bool
 }
 
 type nebiusChatMessage struct {
@@ -557,12 +562,29 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 	}
 
+	client := n.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	endpoint := baseURL + "/chat/completions"
+
+	var totalTokensIn, totalTokensOut int64
+	if len(history) > 0 {
+		var cIn, cOut int64
+		history, cIn, cOut = n.compactHistory(ctx, client, apiKey, baseURL, history, opts, events)
+		totalTokensIn += cIn
+		totalTokensOut += cOut
+	}
+
 	history = append(history, nebiusChatMessage{
 		Role:    "user",
 		Content: effectivePrompt,
 	})
 
 	tools := nebiusToolsFor(opts)
+	if len(tools) > 0 {
+		tools = append(tools, n.nebiusMCPToolSpecs(opts, events)...)
+	}
 	// Streaming: on by default whenever there is a listener, so assistant
 	// text reaches the terminal as it is generated; tool-call deltas are
 	// assembled from the stream. NEBIUS_STREAM=0 forces one-shot JSON;
@@ -588,14 +610,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 	}
 
-	client := n.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	endpoint := baseURL + "/chat/completions"
-
 	var finalText string
-	var totalTokensIn, totalTokensOut int64
 	var lastRawBytes []byte
 
 	var maxTokens int
@@ -873,7 +888,11 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 					}
 				}
 			} else {
-				outcome = executeNebiusTool(ctx, tc, opts)
+				if strings.HasPrefix(tc.Function.Name, nebiusMCPPrefix) {
+					outcome = n.callMCPTool(ctx, tc, opts)
+				} else {
+					outcome = executeNebiusTool(ctx, tc, opts)
+				}
 				toolOutput, isErr = outcome.Output, outcome.IsErr
 				if opts.ToolGate != nil {
 					if extra := opts.ToolGate.After(ctx, gateReq, toolOutput, isErr); strings.TrimSpace(extra) != "" {

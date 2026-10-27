@@ -105,6 +105,8 @@ Per-turn limits mirror `uta run`: `--max-parallel`, `--max-subtasks`,
 | `/rewind` (alias `/undo`) | Restore every file the last run touched, same as `uta undo`. |
 | `/cost` | Per-tier Nebius cost report for the last run (`uta nebius cost`). |
 | `/permissions` | Effective allow / ask / deny rules and their source files. |
+| `/direct [on\|off]` | Direct mode: each input goes to one worker with the full tool set, no planner or synthesis, and the conversation continues. Nemotron 3 Nano compacts the history once it grows. The prompt reads `uta direct>`. |
+| `/fanout <goal>` | Plan, parallel workers and synthesis for one goal, even while direct mode is on. |
 | `/new`, `/clear` | Start a fresh conversation (next input starts a new run). |
 | `/use <id>`, `/resume <id>` | Attach to an existing session; short ids from `/sessions` work. |
 | `/sessions [n]` | List recent sessions (default 10). |

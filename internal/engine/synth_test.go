@@ -113,3 +113,10 @@ func TestRenderSynthPromptOrderingPreserved(t *testing.T) {
 		t.Errorf("expected subtasks in input order; got positions a=%d b=%d c=%d", iA, iB, iC)
 	}
 }
+
+func TestJoinOutcomesDirectIsVerbatim(t *testing.T) {
+	got := joinOutcomes([]SubtaskOutcome{{ID: "direct", Title: "fix it", Worker: "nebius", Result: "  done.\n"}})
+	if got != "done." {
+		t.Fatalf("direct turn should hand the worker's answer over untouched, got %q", got)
+	}
+}
