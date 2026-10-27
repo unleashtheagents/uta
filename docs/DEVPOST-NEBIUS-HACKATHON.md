@@ -94,6 +94,15 @@ claude       ok      11.099s   36391      536         48.3 tok/s
 ### 2. Best Use of Tavily Bonus Award ($3,000)
 - **Did you integrate Tavily into your submission?** `Yes`
   - *Verification:* `uta` makes functional runtime calls to `POST https://api.tavily.com/search` via `internal/tavily/tavily.go` when running `uta nebius search "<query>"` and when NVIDIA Nemotron invokes the `tavily_search` tool during `uta run --worker nebius -y`.
+  - *Live Recorded SQLite Trajectory (`session 29643605`, 10s, 9,627 tokens):* `nvidia/Nemotron-3-Ultra-550b-a55b` autonomously chained two live `tavily_search` tool calls (`"NVIDIA Nemotron 3 arxiv 2512.20856"` and `"Nemotron 3 throughput improvement compared to previous models"`), grounded its reasoning in `https://arxiv.org/html/2512.20856v1` (score 0.91), and persisted the synthesized report to `.uta/context/RESEARCH_DATABASE.md`:
+    ```text
+    11:26:14  subtask_started         deb516c4  title=Search NVIDIA Nemotron 3 arxiv 2512.20856 and summarize throughput improvement
+    11:26:14  subtask_tool_call       deb516c4  {"arguments":"{\"query\": \"NVIDIA Nemotron 3 arxiv 2512.20856\"}","tool_name":"tavily_search"}
+    11:26:17  subtask_tool_result     deb516c4  {"is_error":false,"output":"### Tavily Live Search: NVIDIA Nemotron 3 arxiv 2512.20856..."}
+    11:26:17  subtask_tool_call       deb516c4  {"arguments":"{\"query\": \"Nemotron 3 throughput improvement compared to previous models\"}","tool_name":"tavily_search"}
+    11:26:19  subtask_tool_result     deb516c4  {"is_error":false,"output":"### Tavily Live Search: Nemotron 3 throughput improvement..."}
+    11:26:22  run_completed           -         status=completed (duration=10s, tokens=9627)
+    ```
 
 ### 3. Ten Required Nemotron & Nebius Token Factory Feedback Questions (Most Valuable Feedback Award)
 
