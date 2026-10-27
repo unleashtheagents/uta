@@ -3,7 +3,7 @@
 # image is Alpine plus the static binary.
 #
 #   docker run --rm -it -e NEBIUS_API_KEY -v "$PWD":/work ghcr.io/unleashtheagents/uta run -g "summarize this repo"
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 ARG VERSION=dev
 ARG COMMIT=unknown
 WORKDIR /src
