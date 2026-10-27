@@ -153,7 +153,7 @@ jobs:
           go-version: stable
           check-latest: true
       - name: goreleaser snapshot (full matrix, no publish)
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --snapshot --clean --skip=publish
