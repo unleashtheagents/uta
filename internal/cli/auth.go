@@ -64,9 +64,7 @@ func readCredentialsFile(path string) (lines []string, err error) {
 		}
 		return nil, err
 	}
-	for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-		lines = append(lines, l)
-	}
+	lines = append(lines, strings.Split(strings.TrimRight(string(data), "\n"), "\n")...)
 	return lines, nil
 }
 

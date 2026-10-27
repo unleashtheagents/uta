@@ -976,13 +976,6 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	}, nil
 }
 
-// parseNebiusSSE parses a complete SSE body. Kept for callers and tests that
-// already hold the bytes; the live path uses parseNebiusSSEStream.
-func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (finalText string, tokensIn, tokensOut int64) {
-	text, _, in, out, _, _, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
-	return text, in, out
-}
-
 // parseNebiusSSEStream reads an OpenAI-style event stream incrementally,
 // forwarding each content delta to the listener as an assistant_text event
 // the moment it arrives. Reasoning deltas are collected separately and

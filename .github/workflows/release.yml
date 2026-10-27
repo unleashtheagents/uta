@@ -1,0 +1,141 @@
+name: release
+
+# Pushing a v* tag cuts the release: tests first, then goreleaser builds the
+# darwin/linux/windows x amd64/arm64 matrix, publishes the GitHub release
+# with checksums, pushes the Homebrew formula to unleashtheagents/homebrew-tap
+# (needs the HOMEBREW_TAP_TOKEN secret, a token with repo scope on the tap),
+# and pushes the container image to ghcr.io/unleashtheagents/uta. A final
+# job installs the release through brew and install.sh and checks the version.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to (re)verify install channels for, e.g. v0.16.0"
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  test:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: gofmt -l . | (! grep .)
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+        env:
+          CGO_ENABLED: "0"
+          UTA_HOME: ${{ runner.temp }}/uta-home
+      - run: go test -count=1 -tags e2e ./tests/e2e/
+        env:
+          CGO_ENABLED: "0"
+          UTA_HOME: ${{ runner.temp }}/uta-home-e2e
+
+  goreleaser:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          # HOMEBREW_TAP_TOKEN is a PAT with repo scope on both unleashtheagents/uta
+          # and unleashtheagents/homebrew-tap; the default token cannot push the
+          # formula to the tap. Falls back to the default token (release only).
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+
+  container:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/unleashtheagents/uta
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+
+  verify-install:
+    needs: [goreleaser]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.goreleaser.result == 'success')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: resolve tag
+        id: tag
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -n "$tag" ] || tag="${{ github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: wait for the release assets
+        shell: bash
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://github.com/unleashtheagents/uta/releases/download/${{ steps.tag.outputs.tag }}/checksums.txt" >/dev/null; then exit 0; fi
+            sleep 10
+          done
+          echo "release assets for ${{ steps.tag.outputs.tag }} never appeared"; exit 1
+      - name: install.sh from unleashtheagents.ai
+        shell: bash
+        run: |
+          mkdir -p "$HOME/uta-bin"
+          curl -fsSL https://unleashtheagents.ai/install.sh | UTA_VERSION=${{ steps.tag.outputs.tag }} UTA_INSTALL_DIR="$HOME/uta-bin" sh
+          "$HOME/uta-bin/uta" --version | tee /tmp/v.txt
+          grep -q "${{ steps.tag.outputs.version }}" /tmp/v.txt
+      - name: brew install from the tap
+        shell: bash
+        run: |
+          if ! command -v brew >/dev/null; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
+          for i in $(seq 1 12); do
+            v=$(curl -fsSL https://raw.githubusercontent.com/unleashtheagents/homebrew-tap/main/uta.rb | sed -n 's/.*version "\(.*\)".*/\1/p' | head -1)
+            [ "$v" = "${{ steps.tag.outputs.version }}" ] && break
+            sleep 10
+          done
+          brew install unleashtheagents/tap/uta
+          uta --version | tee /tmp/bv.txt
+          grep -q "${{ steps.tag.outputs.version }}" /tmp/bv.txt
+          brew test unleashtheagents/tap/uta

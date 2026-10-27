@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -116,6 +117,9 @@ func TestToolGate_PromptAnswers(t *testing.T) {
 }
 
 func TestToolGate_HooksAndCheckpointRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hooks run through sh")
+	}
 	app, work := newGateTestApp(t)
 	os.WriteFile(filepath.Join(work, "a.txt"), []byte("before\n"), 0o644)
 	pf := policy.File{

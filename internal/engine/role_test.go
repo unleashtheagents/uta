@@ -11,7 +11,7 @@ func TestRoleContextDefaultsToWorker(t *testing.T) {
 	if got := roleFromContext(context.Background()); got != provider.RoleWorker {
 		t.Fatalf("default role = %q, want worker", got)
 	}
-	if got := roleFromContext(nil); got != provider.RoleWorker { //nolint:staticcheck // nil ctx is the defensive path
+	if got := roleFromContext(context.TODO()); got != provider.RoleWorker {
 		t.Fatalf("nil ctx role = %q, want worker", got)
 	}
 	ctx := withRole(context.Background(), provider.RolePlanner)

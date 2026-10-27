@@ -605,10 +605,6 @@ type genericPane struct {
 	TestPassRate     float64        `json:"test_pass_rate"`
 }
 
-// devPane is kept as a type alias for backward-compatible callers.
-// Removed once all references migrate to genericPane in the next cycle.
-type devPane = genericPane
-
 // buildGenericPane builds the standard ideas-and-sessions view for any
 // mode name. Generic-first: no hardcoded "dev" / "ops" / "audit". Pass
 // any string; the helper filters ideas by `<tagKey>:<modeName>` tag

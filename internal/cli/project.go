@@ -134,7 +134,7 @@ func newProjectInfoCmd() *cobra.Command {
 			}
 			defer app.Close()
 			if !app.InProject() {
-				return errors.New("not inside a project (no .uta/project.yaml found in any ancestor). Run 'uta project init' here to create one.")
+				return errors.New("not inside a project (no .uta/project.yaml found in any ancestor); run 'uta project init' here to create one")
 			}
 			proj, err := config.LoadProject(app.ProjectRoot)
 			if err != nil {

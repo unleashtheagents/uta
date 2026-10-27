@@ -234,7 +234,7 @@ do it for you automatically.`,
 			defer app.Close()
 
 			if _, ok := app.Registry.Get(workerName); !ok {
-				return fmt.Errorf("worker %q not registered. Try `uta providers` to see what's available.", workerName)
+				return fmt.Errorf("worker %q not registered; try `uta providers` to see what's available", workerName)
 			}
 
 			board := improve.NewBoard(app.Store)

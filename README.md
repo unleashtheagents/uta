@@ -1,5 +1,7 @@
 # uta — unleash the agents
 
+[![ci](https://github.com/unleashtheagents/uta/actions/workflows/ci.yml/badge.svg)](https://github.com/unleashtheagents/uta/actions/workflows/ci.yml) [![release](https://github.com/unleashtheagents/uta/actions/workflows/release.yml/badge.svg)](https://github.com/unleashtheagents/uta/actions/workflows/release.yml) [![install channels](https://github.com/unleashtheagents/uta/actions/workflows/install-channels.yml/badge.svg)](https://github.com/unleashtheagents/uta/actions/workflows/install-channels.yml)
+
 A CLI agent orchestrator. Decomposes goals into parallel subtasks, dispatches them to whichever coding-agent CLI you have installed (Claude Code, Gemini CLI, drop-in YAML descriptors for anything else), synthesizes the results — and records every step as a queryable trajectory.
 
 Status: **pre-alpha**. v1 in active development.

@@ -1,21 +1,34 @@
 name: ci
 
+# Guards main and every pull request:
+#   lint          gofmt, go vet, staticcheck, govulncheck, go mod tidy drift
+#   test          unit + e2e on Linux and macOS (pure Go, CGO_ENABLED=0), coverage summary
+#   test-windows  same suite on Windows (informational until the sh-based paths are ported)
+#   race          unit tests under the race detector on Linux
+#   build         the full goreleaser matrix as a snapshot (darwin/linux/windows x amd64/arm64),
+#                 smoke-tested, uploaded as artifacts, plus the container image build
+# Tagged releases are cut by release.yml.
+
 on:
   push:
     branches: [main]
-    tags-ignore: ["**"] # releases are cut locally via goreleaser; CI guards main
+    tags-ignore: ["**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: "0"
+
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  lint:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -29,30 +42,123 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
-      - name: unit tests
-        run: CGO_ENABLED=0 go test ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: go mod tidy drift
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || { echo "go mod tidy changed go.mod/go.sum; commit the result"; exit 1; }
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: unit tests (with coverage)
+        run: go test -count=1 -coverprofile=coverage.out -covermode=atomic ./...
         env:
           UTA_HOME: ${{ runner.temp }}/uta-home
-      - name: build
-        run: CGO_ENABLED=0 go build ./...
+      - name: coverage summary
+        shell: bash
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}')
+          echo "### Coverage (${{ matrix.os }}): $total" >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | sort -k3 -n | head -15 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.out
+          retention-days: 14
       - name: e2e (real binary, stub provider)
-        run: CGO_ENABLED=0 go test -tags e2e ./tests/e2e/
+        run: go test -count=1 -tags e2e ./tests/e2e/
         env:
           UTA_HOME: ${{ runner.temp }}/uta-home-e2e
+      - name: binary smoke
+        shell: bash
+        run: |
+          go build -o ./uta-ci ./cmd/uta
+          ./uta-ci --version
+          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci doctor || true
+          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci permissions status
+          UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci nebius models | head -8
+          printf '/status\n/direct\n/help\nexit\n' | UTA_HOME="${{ runner.temp }}/uta-smoke" ./uta-ci shell --worker nebius >/dev/null
 
-  release-config:
+  test-windows:
+    # Informational: the hook and run_command paths shell out to sh, which the
+    # Windows runner only has through Git Bash. Build must pass; tests report.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        run: go build ./...
+      - name: unit tests
+        run: go test -count=1 ./...
+        env:
+          UTA_HOME: ${{ runner.temp }}\uta-home
+
+  race:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # Informational: `brews` is deprecated in goreleaser 2.x but still
-      # functional, and the replacement (homebrew_casks) is macOS-only —
-      # migrating would drop Linuxbrew users. Revisit when goreleaser
-      # actually removes the key.
-      - name: goreleaser config check
-        continue-on-error: true
+      - name: unit tests under the race detector
+        run: go test -count=1 -race ./internal/...
+        env:
+          CGO_ENABLED: "1"
+          UTA_HOME: ${{ runner.temp }}/uta-home-race
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: goreleaser snapshot (full matrix, no publish)
         uses: goreleaser/goreleaser-action@v6
         with:
-          args: check
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+      - name: smoke the linux/amd64 artifact
+        run: |
+          bin=$(find dist -type f -path '*linux_amd64*' -name uta | head -1)
+          "$bin" --version
+          UTA_HOME="${{ runner.temp }}/uta-dist" "$bin" permissions status
+          ls -la dist/*.tar.gz dist/*.zip dist/checksums.txt
+          echo "### Release matrix" >> "$GITHUB_STEP_SUMMARY"
+          (cd dist && ls -1 *.tar.gz *.zip | sed 's/^/- /') >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uta-snapshot-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          retention-days: 7
+      - name: container image (build only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: uta:ci
+      - name: container smoke
+        run: |
+          docker run --rm uta:ci --version
+          docker run --rm uta:ci permissions status

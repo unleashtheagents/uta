@@ -66,14 +66,14 @@ means running the command again).`,
 			defer app.Close()
 
 			if !dryRun && verifyCmd == "" {
-				return errors.New("--verify is required (e.g. 'go test ./...', 'npm test', 'pytest -q', 'forge test'). Or use --dry-run.")
+				return errors.New("--verify is required (e.g. 'go test ./...', 'npm test', 'pytest -q', 'forge test'), or use --dry-run")
 			}
 			if _, ok := app.Registry.Get(worker); !ok {
-				return fmt.Errorf("worker %q not registered. See `uta providers`.", worker)
+				return fmt.Errorf("worker %q not registered; see `uta providers`", worker)
 			}
 			if gatherWhenEmpty {
 				if _, ok := app.Registry.Get(gatherWorker); !ok {
-					return fmt.Errorf("gather-worker %q not registered. See `uta providers`.", gatherWorker)
+					return fmt.Errorf("gather-worker %q not registered; see `uta providers`", gatherWorker)
 				}
 			}
 

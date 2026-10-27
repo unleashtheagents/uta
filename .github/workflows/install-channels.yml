@@ -1,0 +1,100 @@
+name: install-channels
+
+# Daily proof that what users actually run still works: brew tap, install.sh
+# from unleashtheagents.ai, the website's release chip, the container image,
+# and (when NEBIUS_API_KEY is configured as a repository secret) one live
+# call to Nebius Token Factory through the released binary.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - id: r
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/unleashtheagents/uta/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "latest release: $tag"
+
+  brew:
+    needs: latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - shell: bash
+        run: |
+          if ! command -v brew >/dev/null; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
+          brew install unleashtheagents/tap/uta
+          uta --version | grep -q "${{ needs.latest.outputs.version }}"
+          brew test unleashtheagents/tap/uta
+          UTA_HOME="$RUNNER_TEMP/h" uta permissions status
+          printf '/status\nexit\n' | UTA_HOME="$RUNNER_TEMP/h" uta shell --worker nebius >/dev/null
+
+  install-sh:
+    needs: latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - shell: bash
+        run: |
+          mkdir -p "$HOME/uta-bin"
+          curl -fsSL https://unleashtheagents.ai/install.sh | UTA_INSTALL_DIR="$HOME/uta-bin" sh
+          "$HOME/uta-bin/uta" --version | grep -q "${{ needs.latest.outputs.version }}"
+
+  website:
+    needs: latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: release chip matches the latest release
+        run: |
+          chip=$(curl -fsSL https://unleashtheagents.ai/ | grep -o 'uta-build-v">v[0-9.]*' | sed 's/.*>//')
+          echo "site shows $chip, latest release is ${{ needs.latest.outputs.tag }}"
+          [ "$chip" = "${{ needs.latest.outputs.tag }}" ]
+      - name: install.sh is served
+        run: curl -fsSL https://unleashtheagents.ai/install.sh | head -3 | grep -q 'uta installer'
+
+  container:
+    needs: latest
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if docker pull ghcr.io/unleashtheagents/uta:${{ needs.latest.outputs.version }}; then
+            docker run --rm ghcr.io/unleashtheagents/uta:${{ needs.latest.outputs.version }} --version | grep -q "${{ needs.latest.outputs.version }}"
+          else
+            echo "::warning::no container image for ${{ needs.latest.outputs.tag }} yet (first published by release.yml from v0.17.0 on)"
+          fi
+
+  live-nebius:
+    needs: latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: one live call through the released binary
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+        run: |
+          if [ -z "$NEBIUS_API_KEY" ]; then
+            echo "::notice::NEBIUS_API_KEY secret not set; skipping the live Nebius check (gh secret set NEBIUS_API_KEY)"
+            exit 0
+          fi
+          mkdir -p "$HOME/uta-bin"
+          curl -fsSL https://unleashtheagents.ai/install.sh | UTA_INSTALL_DIR="$HOME/uta-bin" sh
+          export UTA_HOME="$RUNNER_TEMP/h"
+          "$HOME/uta-bin/uta" nebius ping
+          "$HOME/uta-bin/uta" run --direct -g "Reply with the single word OK." --worker nebius -y | tee out.txt
+          grep -qi "ok" out.txt

@@ -39,7 +39,7 @@ Subcommands:
 
 func requireProject(app *App) error {
 	if !app.InProject() {
-		return errors.New("not inside a project. Run 'uta project init' first.")
+		return errors.New("not inside a project; run 'uta project init' first")
 	}
 	return nil
 }
