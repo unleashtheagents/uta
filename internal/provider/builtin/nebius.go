@@ -132,6 +132,28 @@ func ResolveNebiusModel(spec string) string {
 	}
 }
 
+// extractPromptModelOverride inspects a prompt for an inline `[model:<spec>]` or
+// `[nebius:<spec>]` directive (e.g. `[model:ultra]`, `[model:super]`, `[model:nano]`,
+// `[model:lightning]`, `[model:vl]`), strips the directive from the prompt text,
+// and resolves the per-turn NVIDIA Nemotron model on Nebius Token Factory.
+func extractPromptModelOverride(prompt, defaultModel string) (string, string) {
+	for _, prefix := range []string{"[model:", "[nebius:"} {
+		idx := strings.Index(strings.ToLower(prompt), prefix)
+		if idx < 0 {
+			continue
+		}
+		rest := prompt[idx+len(prefix):]
+		end := strings.IndexByte(rest, ']')
+		if end <= 0 {
+			continue
+		}
+		spec := strings.TrimSpace(rest[:end])
+		cleaned := strings.TrimSpace(prompt[:idx] + " " + rest[end+1:])
+		return cleaned, ResolveNebiusModel(spec)
+	}
+	return prompt, defaultModel
+}
+
 // NebiusRouteDecision describes how the Nebius × NVIDIA Nemotron coordinator
 // assigns models across planning, worker fan-out, and sentinel verification.
 type NebiusRouteDecision struct {
@@ -332,6 +354,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	if apiKey == "" {
 		return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius: %w: NEBIUS_API_KEY is not set", provider.ErrAuth)
 	}
+	prompt, model = extractPromptModelOverride(prompt, model)
 
 	if sessionID == "" {
 		sessionID = "nebius-" + uuid.NewString()

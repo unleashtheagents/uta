@@ -1,0 +1,18 @@
+responses:
+  ultra_plan:
+    - "Ultra Plan: route 10% planning to Nemotron 3 Ultra and 90% parallel execution to Nemotron 3 Super."
+  super_implement:
+    - "Super Implementation: fan out 4 parallel coding workers at 148 tok/s on Nebius Token Factory."
+  nano_compact:
+    - "Nano Summary: 10% Ultra planning + 90% Super parallel workers on Nebius Token Factory."
+  lightning_guardrail:
+    - "[PASS · OWASP ASI01-ASI10] Nano Summary: 10% Ultra planning + 90% Super parallel workers on Nebius Token Factory."
+expect: "[PASS · OWASP ASI01-ASI10] Nano Summary: 10% Ultra planning + 90% Super parallel workers on Nebius Token Factory."
+assert:
+  calls:
+    ultra_plan: 1
+    super_implement: 1
+    nano_compact: 1
+    lightning_guardrail: 1
+  gates_fired: 0
+  max_cost_usd: 0.05
