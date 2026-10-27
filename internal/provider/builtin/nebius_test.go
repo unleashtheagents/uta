@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unleashtheagents/uta/internal/provider"
 )
@@ -228,9 +230,144 @@ func TestNebius_ErrorClassification(t *testing.T) {
 		BaseURL: srv.URL + "/v1",
 		APIKey:  "test-key",
 	}
-	_, err := p.RunHeadless(context.Background(), "hello", provider.RunOptions{}, nil)
+	_, err := p.RunHeadless(context.Background(), "hello", provider.RunOptions{Env: []string{"UTA_NEBIUS_MAX_RETRIES=0"}}, nil)
 	if !errors.Is(err, provider.ErrQuota) {
 		t.Fatalf("expected ErrQuota on 429, got %v", err)
+	}
+}
+
+func TestNebius_RetriesOn429ThenSucceeds(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if hits <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"slow down"}}`))
+			return
+		}
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.ServiceTier != "flex" {
+			t.Errorf("service_tier = %q, want flex", req.ServiceTier)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "model": req.Model,
+			"choices": []map[string]any{{"index": 0, "finish_reason": "stop",
+				"message": map[string]string{"role": "assistant", "content": "after retry"}}},
+			"usage": map[string]int64{"prompt_tokens": 3, "completion_tokens": 2},
+		})
+	}))
+	defer srv.Close()
+
+	p := &Nebius{Client: srv.Client(), BaseURL: srv.URL + "/v1", APIKey: "k"}
+	events := make(chan provider.Event, 32)
+	res, err := p.RunHeadless(context.Background(), "hello", provider.RunOptions{
+		Env: []string{"NEBIUS_SERVICE_TIER=flex", "NEBIUS_STREAM=0"},
+	}, events)
+	close(events)
+	if err != nil || res.FinalText != "after retry" {
+		t.Fatalf("expected success after two 429s, got %q err=%v", res.FinalText, err)
+	}
+	if hits != 3 {
+		t.Errorf("hits = %d, want 3", hits)
+	}
+	retries := 0
+	for ev := range events {
+		var pl map[string]any
+		_ = json.Unmarshal(ev.Payload, &pl)
+		if pl["type"] == "retry" {
+			retries++
+		}
+	}
+	if retries != 2 {
+		t.Errorf("retry events = %d, want 2", retries)
+	}
+	if d := nebiusRetryDelay(0, "2"); d != 2*time.Second {
+		t.Errorf("Retry-After honoured: %v", d)
+	}
+	if d := nebiusRetryDelay(10, ""); d != 8*time.Second {
+		t.Errorf("backoff cap: %v", d)
+	}
+}
+
+func TestNebius_StreamsIncrementallyByDefault(t *testing.T) {
+	var gotReq nebiusChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		for _, chunk := range []string{
+			`{"choices":[{"delta":{"reasoning_content":"hmm "}}]}`,
+			`{"choices":[{"delta":{"content":"Hello"}}]}`,
+			`{"choices":[{"delta":{"content":", world"}}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4}}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	p := &Nebius{Client: srv.Client(), BaseURL: srv.URL + "/v1", APIKey: "k"}
+	events := make(chan provider.Event, 32)
+	var deltas []string
+	var firstArrival time.Time
+	done := make(chan struct{})
+	go func() {
+		for ev := range events {
+			if ev.Kind == provider.EventAssistantText {
+				if firstArrival.IsZero() {
+					firstArrival = time.Now()
+				}
+				var pl map[string]string
+				_ = json.Unmarshal(ev.Payload, &pl)
+				deltas = append(deltas, pl["text"])
+			}
+		}
+		close(done)
+	}()
+	start := time.Now()
+	res, err := p.RunHeadless(context.Background(), "hi", provider.RunOptions{}, events)
+	close(events)
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotReq.Stream || gotReq.StreamOptions == nil || !gotReq.StreamOptions.IncludeUsage {
+		t.Errorf("default plain turn with a listener should stream with usage: %+v", gotReq)
+	}
+	if res.FinalText != "Hello, world" || res.TokensIn != 9 || res.TokensOut != 4 {
+		t.Errorf("result = %+v", res)
+	}
+	if strings.Join(deltas, "") != "Hello, world" || len(deltas) < 2 {
+		t.Errorf("deltas = %q (want the text in at least two live flushes)", deltas)
+	}
+	// The first flush must arrive while the server is still sending (it
+	// takes ~400ms in total); a buffered implementation would see it at the end.
+	if firstArrival.Sub(start) > 350*time.Millisecond {
+		t.Errorf("first delta arrived after %v; stream was buffered, not incremental", firstArrival.Sub(start))
+	}
+
+	// Without a listener the turn is one-shot JSON unless NEBIUS_STREAM=1.
+	gotReq = nebiusChatRequest{}
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": "ok"}}}})
+	}))
+	defer srv2.Close()
+	p2 := &Nebius{Client: srv2.Client(), BaseURL: srv2.URL + "/v1", APIKey: "k"}
+	if _, err := p2.RunHeadless(context.Background(), "hi", provider.RunOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotReq.Stream {
+		t.Errorf("no listener: should not stream")
 	}
 }
 

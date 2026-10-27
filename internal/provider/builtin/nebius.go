@@ -300,6 +300,42 @@ type nebiusChatRequest struct {
 	Temperature     *float64            `json:"temperature,omitempty"`
 	MaxTokens       int                 `json:"max_tokens,omitempty"`
 	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
+	ServiceTier     string              `json:"service_tier,omitempty"`
+	StreamOptions   *nebiusStreamOpts   `json:"stream_options,omitempty"`
+}
+
+type nebiusStreamOpts struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// nebiusMaxRetries is the default number of additional attempts the provider
+// makes on 429 / 5xx / transport errors before giving up. The shared Nebius
+// Token Factory endpoint is sized for tests, so brief 429s are normal.
+const nebiusMaxRetries = 3
+
+// nebiusRetryDelay returns how long to wait before retry attempt n (0-based),
+// honouring a Retry-After header when the server sent one.
+func nebiusRetryDelay(attempt int, retryAfter string) time.Duration {
+	if ra := strings.TrimSpace(retryAfter); ra != "" {
+		if secs, err := time.ParseDuration(ra + "s"); err == nil && secs > 0 && secs <= 60*time.Second {
+			return secs
+		}
+	}
+	d := time.Duration(500*(1<<attempt)) * time.Millisecond
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
+}
+
+func resolveNebiusRetries(env []string) int {
+	if v := resolveEnvKey(env, "UTA_NEBIUS_MAX_RETRIES"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return nebiusMaxRetries
 }
 
 type nebiusChatResponse struct {
@@ -519,11 +555,18 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		Content: effectivePrompt,
 	})
 
-	useStream := resolveEnvKey(opts.Env, "NEBIUS_STREAM") == "1"
 	var tools []nebiusToolSpec
 	if shouldEnableNebiusTools(opts) {
 		tools = DefaultNebiusTools()
 	}
+	// Streaming: on by default for plain (tool-less) turns that have a
+	// listener, so assistant text reaches the terminal as it is generated.
+	// NEBIUS_STREAM=0 forces one-shot JSON; NEBIUS_STREAM=1 forces SSE even
+	// without a listener. Tool-calling turns always use one-shot JSON.
+	streamEnv := resolveEnvKey(opts.Env, "NEBIUS_STREAM")
+	useStream := len(tools) == 0 && (streamEnv == "1" || (streamEnv != "0" && events != nil))
+	serviceTier := resolveEnvKey(opts.Env, "NEBIUS_SERVICE_TIER")
+	maxRetries := resolveNebiusRetries(opts.Env)
 
 	if events != nil {
 		sidPayload, _ := json.Marshal(map[string]string{
@@ -565,51 +608,107 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	var totalReasoningTokens, totalCachedTokens int64
 
 	for round := 0; round < maxNebiusToolRounds; round++ {
-		reqBody, err := json.Marshal(nebiusChatRequest{
+		chatReq := nebiusChatRequest{
 			Model:           model,
 			Messages:        history,
 			Tools:           tools,
-			Stream:          useStream && len(tools) == 0,
+			Stream:          useStream,
 			Temperature:     temperature,
 			MaxTokens:       maxTokens,
 			ReasoningEffort: reasoningEffort,
-		})
+			ServiceTier:     serviceTier,
+		}
+		if useStream {
+			chatReq.StreamOptions = &nebiusStreamOpts{IncludeUsage: true}
+		}
+		reqBody, err := json.Marshal(chatReq)
 		if err != nil {
 			return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius marshal request: %w", err)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
-		if err != nil {
-			return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius build request: %w: %v", provider.ErrTransport, err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if useStream && len(tools) == 0 {
-			req.Header.Set("Accept", "text/event-stream")
-		} else {
-			req.Header.Set("Accept", "application/json")
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		var (
+			resp     *http.Response
+			rawBytes []byte
+			streamed bool
+			sseText  string
+			sseIn    int64
+			sseOut   int64
+			sseThink string
+		)
+		for attempt := 0; ; attempt++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+			if err != nil {
+				return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius build request: %w: %v", provider.ErrTransport, err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if useStream {
+				req.Header.Set("Accept", "text/event-stream")
+			} else {
+				req.Header.Set("Accept", "application/json")
+			}
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 
-		resp, err := client.Do(req)
-		if err != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius timed out: %w", provider.ErrTimeout)
+			resp, err = client.Do(req)
+			if err != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius timed out: %w", provider.ErrTimeout)
+				}
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return provider.RunResult{ExitCode: 1}, ctx.Err()
+				}
+				if attempt < maxRetries {
+					if !nebiusSleep(ctx, nebiusRetryDelay(attempt, ""), events, model, attempt+1, "transport: "+err.Error()) {
+						return provider.RunResult{ExitCode: 1}, ctx.Err()
+					}
+					continue
+				}
+				return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius request failed: %w: %v", provider.ErrTransport, err)
 			}
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return provider.RunResult{ExitCode: 1}, ctx.Err()
-			}
-			return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius request failed: %w: %v", provider.ErrTransport, err)
-		}
 
-		rawBytes, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius timed out reading response: %w", provider.ErrTimeout)
+			retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+			if retryable && attempt < maxRetries {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				_ = resp.Body.Close()
+				reason := fmt.Sprintf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+				if !nebiusSleep(ctx, nebiusRetryDelay(attempt, resp.Header.Get("Retry-After")), events, model, attempt+1, reason) {
+					return provider.RunResult{ExitCode: 1}, ctx.Err()
+				}
+				continue
 			}
-			return provider.RunResult{RawOutput: rawBytes, ExitCode: 1}, fmt.Errorf("nebius read response: %w: %v", provider.ErrTransport, readErr)
+
+			isSSE := resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+				strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+			if isSSE {
+				// Incremental: deltas reach the listener as they arrive.
+				sseText, sseThink, sseIn, sseOut, rawBytes = parseNebiusSSEStream(resp.Body, model, events)
+				_ = resp.Body.Close()
+				streamed = true
+				break
+			}
+			var readErr error
+			rawBytes, readErr = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return provider.RunResult{ExitCode: 1}, fmt.Errorf("nebius timed out reading response: %w", provider.ErrTimeout)
+				}
+				return provider.RunResult{RawOutput: rawBytes, ExitCode: 1}, fmt.Errorf("nebius read response: %w: %v", provider.ErrTransport, readErr)
+			}
+			break
 		}
 		lastRawBytes = rawBytes
+
+		if streamed {
+			finalText = sseText
+			totalTokensIn += sseIn
+			totalTokensOut += sseOut
+			if think := strings.TrimSpace(sseThink); think != "" && events != nil {
+				thinkPayload, _ := json.Marshal(map[string]any{"type": "reasoning", "model": model, "text": think})
+				events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: thinkPayload}
+			}
+			history = append(history, nebiusChatMessage{Role: "assistant", Content: finalText})
+			break
+		}
 
 		var parsed nebiusChatResponse
 		_ = json.Unmarshal(rawBytes, &parsed)
@@ -634,18 +733,6 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			default:
 				return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrWorkerFailed, errMsg)
 			}
-		}
-
-		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") || bytes.HasPrefix(bytes.TrimSpace(rawBytes), []byte("data:")) {
-			txt, tIn, tOut := parseNebiusSSE(rawBytes, model, events)
-			finalText = txt
-			totalTokensIn += tIn
-			totalTokensOut += tOut
-			history = append(history, nebiusChatMessage{
-				Role:    "assistant",
-				Content: finalText,
-			})
-			break
 		}
 
 		totalTokensIn += parsed.Usage.PromptTokens
@@ -807,11 +894,46 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 	}, nil
 }
 
+// parseNebiusSSE parses a complete SSE body. Kept for callers and tests that
+// already hold the bytes; the live path uses parseNebiusSSEStream.
 func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (finalText string, tokensIn, tokensOut int64) {
-	var buf strings.Builder
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	text, _, in, out, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
+	return text, in, out
+}
+
+// parseNebiusSSEStream reads an OpenAI-style event stream incrementally,
+// forwarding each content delta to the listener as an assistant_text event
+// the moment it arrives. Reasoning deltas are collected separately and
+// returned as thinking; usage arrives on the final chunk when the request
+// asked for stream_options.include_usage. raw holds every byte read so the
+// caller can persist the exchange.
+func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Event) (finalText, thinking string, tokensIn, tokensOut int64, raw []byte) {
+	var buf, think, rawBuf, pending strings.Builder
+	// Token deltas are coalesced into readable flushes (a line, ~80 chars,
+	// or 60ms of silence) so a progress renderer that prints one line per
+	// event stays legible while the text still appears as it is generated.
+	lastFlush := time.Now()
+	flush := func() {
+		if pending.Len() == 0 || events == nil {
+			return
+		}
+		txtPayload, _ := json.Marshal(map[string]string{
+			"type":  "assistant_text",
+			"model": model,
+			"text":  pending.String(),
+		})
+		events <- provider.Event{Kind: provider.EventAssistantText, Timestamp: time.Now(), Payload: txtPayload}
+		pending.Reset()
+		lastFlush = time.Now()
+	}
+	defer flush()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		rawLine := scanner.Text()
+		rawBuf.WriteString(rawLine)
+		rawBuf.WriteByte('\n')
+		line := strings.TrimSpace(rawLine)
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -830,28 +952,48 @@ func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (fin
 			tokensOut = chunk.Usage.CompletionTokens
 		}
 		for _, c := range chunk.Choices {
+			if t := c.Delta.thinking(); t != "" {
+				think.WriteString(t)
+			} else if t := c.Message.thinking(); t != "" {
+				think.WriteString(t)
+			}
 			delta := c.Delta.Content
 			if delta == "" {
 				delta = c.Message.Content
 			}
-			// Reasoning deltas arrive on reasoning_content; they are not
-			// part of the answer and are left out of the streamed text.
 			if delta != "" {
 				buf.WriteString(delta)
-				if events != nil {
-					txtPayload, _ := json.Marshal(map[string]string{
-						"type":  "assistant_text",
-						"model": model,
-						"text":  delta,
-					})
-					events <- provider.Event{
-						Kind:      provider.EventAssistantText,
-						Timestamp: time.Now(),
-						Payload:   txtPayload,
-					}
+				pending.WriteString(delta)
+				if strings.Contains(delta, "\n") || pending.Len() >= 80 || time.Since(lastFlush) >= 60*time.Millisecond {
+					flush()
 				}
 			}
 		}
 	}
-	return stripThinkTags(strings.TrimSpace(buf.String())), tokensIn, tokensOut
+	flush()
+	return stripThinkTags(strings.TrimSpace(buf.String())), think.String(), tokensIn, tokensOut, []byte(rawBuf.String())
+}
+
+// nebiusSleep waits for the retry delay, reporting the retry on the event
+// channel. It returns false when the context ended first.
+func nebiusSleep(ctx context.Context, d time.Duration, events chan<- provider.Event, model string, attempt int, reason string) bool {
+	if events != nil {
+		pl, _ := json.Marshal(map[string]any{
+			"type":           "retry",
+			"model":          model,
+			"attempt":        attempt,
+			"retry_delay_ms": d.Milliseconds(),
+			"reason":         reason,
+			"text":           fmt.Sprintf("[nebius retry %d in %s] %s", attempt, d.Round(time.Millisecond), reason),
+		})
+		events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: pl}
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
