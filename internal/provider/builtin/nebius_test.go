@@ -76,6 +76,11 @@ func TestNebius_ResolveAliasesAndRouter(t *testing.T) {
 }
 
 func TestNebius_RunAndResumeHeadless(t *testing.T) {
+	// Developer shells often carry ~/.uta/credentials.env settings; the
+	// message-count assertions below assume no injected system prompt.
+	t.Setenv("UTA_NEBIUS_INJECT_RULES", "")
+	t.Setenv("NEBIUS_SYSTEM_PROMPT", "")
+	t.Setenv("NEBIUS_MODEL", "")
 	var seenReqs []nebiusChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {

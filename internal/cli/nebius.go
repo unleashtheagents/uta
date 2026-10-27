@@ -66,7 +66,7 @@ func newNebiusCmd() *cobra.Command {
 Coordinates NVIDIA Nemotron-3-Ultra (550B/55B MoE) for architectural planning and
 synthesis, Nemotron-3-Super (120B/12B MoE) for 90% parallel worker fan-out,
 Nemotron-3-Nano (30B/3B MoE) for rapid context summarization, Nemotron-3.5-Lightning
-for sub-50ms OWASP ASI01-ASI10 sentinel guardrails, and Nemotron-3.5-Super-VL for
+for ~300 ms OWASP ASI01-ASI10 tool-call sentinel verdicts, and Nemotron-3.5-Super-VL for
 multimodal visual analysis — alongside local Claude Code and Google Antigravity (agy) CLIs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runNebiusStatus(cmd, asJSON)
@@ -243,7 +243,7 @@ multimodal visual analysis — alongside local Claude Code and Google Antigravit
 	}
 	pingCmd.Flags().BoolVar(&pingJSON, "json", false, "emit ping result as JSON")
 
-	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd)
+	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd, newNebiusCostCmd())
 	return cmd
 }
 
@@ -275,6 +275,8 @@ func runNebiusStatus(cmd *cobra.Command, asJSON bool) error {
 	fmt.Fprintf(out, "  fast nano:      %s\n", rep.NanoModel)
 	fmt.Fprintf(out, "  sentinel:       %s\n", rep.SentinelModel)
 	fmt.Fprintf(out, "  multimodal VL:  %s\n", rep.VisionModel)
+	fmt.Fprintln(out, "  routing:        role-tier (planner/synthesis/judge -> ultra, workers -> super, compact -> nano, sentinel -> lightning);")
+	fmt.Fprintln(out, "                  NEBIUS_MODEL or [model:<tier>] pins a model, UTA_NEBIUS_ROUTING=0 disables")
 	fmt.Fprintf(out, "  customizations: %d rule(s), %d skill(s) discovered (agy / claude / uta)\n\n", rep.RulesCount, rep.SkillsCount)
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

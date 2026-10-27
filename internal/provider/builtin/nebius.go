@@ -93,7 +93,7 @@ func NebiusModelCatalog() []NebiusModelSpec {
 			SWEVerified:    "-",
 			ThroughputTokS: 420,
 			Role:           "Sentinel Guardrail & Fast Router",
-			Description:    "Sub-50ms OWASP ASI01-ASI10 policy verification, prompt-injection screening, and real-time budget gating.",
+			Description:    "In-loop tool-call sentinel: OWASP ASI01-ASI10 PASS/FAIL verdicts in ~300 ms measured on Nebius Token Factory (reasoning off), prompt-injection screening, real-time budget gating.",
 		},
 		{
 			ID:             NebiusModelSuperVL,
@@ -189,7 +189,7 @@ func RouteNebiusGoal(goal string) NebiusRouteDecision {
 		dec.Tier = "sentinel-fast"
 		dec.PlannerModel = NebiusModelSuper
 		dec.WorkerModel = NebiusModelLightning
-		dec.Split = "Sub-50ms Nemotron-3.5-Lightning guardrail & policy verification"
+		dec.Split = "Nemotron-3.5-Lightning guardrail & policy verification (~300 ms verdicts)"
 		dec.Reason = "Security/guardrail classification detected: routing to low-latency Nemotron-3.5-Lightning."
 	case strings.Contains(low, "architecture") || strings.Contains(low, "formal") || strings.Contains(low, "proof") || strings.Contains(low, "consensus") || strings.Contains(low, "debate"):
 		dec.Tier = "ultra-deep"
