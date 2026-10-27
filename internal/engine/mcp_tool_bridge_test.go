@@ -252,7 +252,10 @@ func TestApplyMCPBridge_PopulatesConfigPathOnSuccessfulProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read materialized config: %v", err)
 	}
-	if !strings.Contains(string(body), `"stub"`) || !strings.Contains(string(body), bin) {
+	// The path is JSON-encoded in the file (backslashes escaped on Windows),
+	// so compare against its encoded form.
+	encBin, _ := json.Marshal(bin)
+	if !strings.Contains(string(body), `"stub"`) || !strings.Contains(string(body), string(encBin)) {
 		t.Errorf("materialized config missing server entry: %s", body)
 	}
 }
