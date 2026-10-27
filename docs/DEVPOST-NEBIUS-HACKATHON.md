@@ -11,7 +11,7 @@
 
 - **Project Name:** `uta-devpost-hackathon`
 - **Elevator Pitch (max 200 chars):**
-  `Open-source Go CLI & steer language that coordinates NVIDIA Nemotron 3 Ultra, Super, Nano, Lightning & Super-VL on Nebius Token Factory alongside Claude Code & Antigravity with Tavily search.` *(194 chars)*
+  `Open-source Go orchestrator + steer language: Nemotron Ultra plans, Super swarms, Lightning guards every tool call on Nebius Token Factory — with real budgets, spend caps and Tavily grounding.` *(196 chars)*
 
 ---
 
@@ -35,14 +35,17 @@
 ## Inspiration
 A single coding-agent CLI (Claude Code, Google Antigravity `agy`, Gemini CLI) is great at one sequential conversation—but modern engineering tasks require parallel decomposition, cross-model verification, deterministic budget enforcement, and replayable audit trails. Worse, running every parallel worker subtask on a frontier closed model is slow and prohibitively expensive.
 
-With **NVIDIA Nemotron 3** (`Ultra`, `Super`, `Nano`, `Lightning`, `Super-VL`) hosted on **Nebius Token Factory**, we realized we could implement a **90/10 Hybrid Multi-Agent Architecture**: routing 10% of tokens (DAG decomposition, architectural review, and final verdict synthesis) to **Nemotron 3 Ultra (550B/55B MoE)** while fanning out 90% of parallel coding, testing, and research subtasks to **Nemotron 3 Super (120B/12B MoE)** and **Nemotron 3 Nano (30B/3B MoE)** at 148–295 tok/s—supervised by **Nemotron 3.5 Lightning** for sub-50ms OWASP ASI01–ASI10 guardrails and grounded by **Tavily** live web search.
+With **NVIDIA Nemotron 3** (`Ultra`, `Super`, `Nano`, `Lightning`, `Super-VL`) hosted on **Nebius Token Factory**, we realized we could implement a **90/10 Hybrid Multi-Agent Architecture**: routing 10% of tokens (DAG decomposition, architectural review, and final verdict synthesis) to **Nemotron 3 Ultra (550B/55B MoE)** while fanning out 90% of parallel coding, testing, and research subtasks to **Nemotron 3 Super (120B/12B MoE)** and **Nemotron 3 Nano (30B/3B MoE)** at 148–295 tok/s—supervised by **Nemotron 3.5 Lightning**, which screens every workspace-changing tool call with a ~300 ms OWASP ASI01–ASI10 PASS/FAIL verdict, and grounded by **Tavily** live web search.
 
 ## What It Does
 **`uta` (Unleash The Agents)** is a single-binary, zero-CGO Go CLI orchestrator, interactive shell, web dashboard, and **steer** programming language runtime that coordinates **NVIDIA Nemotron** models on **Nebius Token Factory (`https://api.tokenfactory.nebius.com/v1`)** alongside local agent CLIs (`claude`, `agy`, `gemini`):
 
-1. **90/10 Nebius × Nemotron Coordinator (`uta nebius`):**
-   - `uta nebius status` / `uta nebius ping` / `uta nebius models`: Inspects live Nebius Token Factory readiness across all 5 Nemotron tiers (`ultra`, `super`, `nano`, `lightning`, `vl`).
-   - `uta nebius route "<goal>"`: Classifies any engineering goal into the optimal 90/10 Nemotron execution tier (`90/10-hybrid`, `ultra-deep`, `sentinel-fast`, `multimodal-vl`).
+1. **90/10 Nebius × Nemotron Coordinator, executed by the engine (`uta nebius`, `internal/engine`):**
+   - Every provider call carries its orchestration role (planner, worker, synthesis, judge, compact, sentinel). With `--worker nebius` the Supervisor plans and synthesizes on **Nemotron 3 Ultra**, fans subtasks out to **Nemotron 3 Super**, judges with Ultra, compacts with **Nemotron 3 Nano** and guards with **Nemotron 3.5 Lightning** — no prompt tags required. Each trajectory `session_id` event records `role` and `routing` as proof.
+   - `uta nebius status` / `ping` / `models` / `route "<goal>"` inspect readiness, the routing rule and the five tiers; `uta nebius cost <session>` reports tokens and USD per tier and role against an all-Ultra counterfactual (live coding run: **$0.0123 vs $0.0271, a 54.7% saving**).
+   - **Nemotron Lightning sentinel:** before any `write_file`, `edit_file` or `run_command` executes, Lightning returns PASS/FAIL (reasoning off, temperature 0, 8 tokens). FAIL blocks the call and persists a `sentinel_alert`. Live: `curl … | sh` blocked in **216 ms**.
+   - **Per-tier reasoning policy:** `reasoning_effort` high/medium/low/none per tier, `reasoning_content` kept out of answers and recorded separately, reasoning and prompt-cache tokens reported per turn.
+   - **Real budgets, keys and caps:** built-in Nemotron list prices make `budget … $1` and `--budget-usd` enforce; `uta auth set nebius` stores keys outside every repo; `uta limits set nebius --daily-usd 5` caps spend per provider across all projects, ledgered on every call.
 2. **Autonomous Agentic Tool-Calling Loop on Real Repositories (`internal/provider/builtin/nebius_tools.go`):**
    - Exposes OpenAI-compatible tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `run_command`, `tavily_search`) directly to NVIDIA Nemotron models on Nebius Token Factory so Nemotron workers autonomously inspect code, edit files, run `go test ./...`, and iterate until verification gates pass.
 3. **Runtime Web Grounding with Tavily (`uta nebius search` & `tavily_search`):**
@@ -90,6 +93,11 @@ claude       ok      11.099s   36391      536         48.3 tok/s
 > 3. **Runtime Tavily Search Integration (`internal/tavily/tavily.go`):** Added functional runtime calls to `POST https://api.tavily.com/search` for both CLI research (`uta nebius search`) and autonomous agent tool calls (`tavily_search`), with automatic synthesis via NVIDIA Nemotron and persistence to `.uta/context/RESEARCH_DATABASE.md`.
 > 4. **Unified `agy` + `claude` Customization Engine (`internal/skills/skills.go`, `internal/cli/skills.go`):** Added hierarchical discovery of `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md`, and progressive `SKILL.md` skills (`uta skills list`, `uta skills show`), plus `@path/to/file` context expansion for cloud Nemotron runs.
 > 5. **Interactive Shell, Web Dashboard & `steer` Mission (`internal/cli/shell.go`, `internal/cli/serve_web.go`, `examples/nebius-nemotron.steer`):** Added `/plan`, `/compact`, `/nebius`, `/skills` slash commands, `/api/nebius` & `/api/skills` web dashboard endpoints, and deterministic `steer` missions for Nebius × Nemotron.
+> 6. **Role-Tier Routing in the Engine (`internal/engine/supervisor.go`, `provider.RunOptions.Role`):** Planner, synthesis and judge calls run on Nemotron 3 Ultra, workers on Super, compaction on Nano, sentinel checks on Lightning — recorded per call in the trajectory.
+> 7. **Nemotron Lightning Sentinel (`internal/provider/builtin/nebius_sentinel.go`):** PASS/FAIL guardrail on every `write_file` / `edit_file` / `run_command`, blocking FAILs and persisting `sentinel_alert` events (live block in 216 ms).
+> 8. **Reasoning Policy, Pricing and Cost Report (`nebius.go`, `pricing.go`, `internal/cli/nebius_cost.go`):** per-tier `reasoning_effort`, separated `reasoning_content`, built-in Nemotron list prices so dollar budgets enforce, `uta nebius cost <session>` with the all-Ultra counterfactual.
+> 9. **Keys and Spend Caps (`internal/cli/auth.go`, `internal/limits`, `internal/cli/limits.go`):** `uta auth set|unset|status` and `uta limits set|clear|status` with a per-call usage ledger enforced before every provider call.
+> 10. **Robustness (`nebius.go`):** retries with backoff on 429/5xx honouring `Retry-After`, `service_tier` passthrough, incremental SSE streaming with coalesced deltas, `stream_options.include_usage`.
 
 ### 2. Best Use of Tavily Bonus Award ($3,000)
 - **Did you integrate Tavily into your submission?** `Yes`
@@ -106,6 +114,8 @@ claude       ok      11.099s   36391      536         48.3 tok/s
 
 ### 3. Ten Required Nemotron & Nebius Token Factory Feedback Questions (Most Valuable Feedback Award)
 
+> All numbers below were measured on 2026-10-27 against `https://api.tokenfactory.nebius.com/v1` from uta's own trajectories.
+
 1. **Which Nemotron models did you use in your submission?**
    - `Nemotron 3 Ultra` (`nvidia/Nemotron-3-Ultra-550b-a55b`)
    - `Nemotron 3 Super` (`nvidia/nemotron-3-super-120b-a12b`)
@@ -119,7 +129,7 @@ claude       ok      11.099s   36391      536         48.3 tok/s
    - `5 — Excellent`
 
 4. **How did Nemotron's speed and latency feel during your workflow?**
-   - `5 — Very fast, exceeded expectations`
+   - `4 — Fast`. Measured: `/v1/models` 88–101 ms; Lightning PASS/FAIL verdict 216–450 ms (293 ms with reasoning disabled); a Super worker turn 1.0 s; a full Ultra-plan → Super-work → Ultra-synthesize coding run 17 s. Fast enough to put a guardrail model in the tool loop, which is the point.
 
 5. **How easy was it to get started with Nemotron on Nebius?**
    - `5 — Very easy, up and running quickly`
@@ -131,11 +141,15 @@ claude       ok      11.099s   36391      536         48.3 tok/s
    > The OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints on Nebius Token Factory (88 ms ping latency across 30 hosted models) allowed us to build a zero-dependency Go provider (`internal/provider/builtin/nebius.go`) with SSE streaming and multi-turn function calling (`tools` / `tool_calls`) in hours. In live side-by-side benchmarks (`uta bench`), Nebius Token Factory completed turns in **2.016s at 134.4 tok/s**—**5.5× faster in wall-clock latency and 2.78× higher in token throughput** than local CLI cold starts (`claude` at 11.099s / 48.3 tok/s, `agy` at 10.592s). Furthermore, `nvidia/Nemotron-3-Ultra-550b-a55b` executed a complete multi-turn agentic `read_file` tool loop + synthesis in just **4 seconds** (`session 834eefb7`), while `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` completed 3-stage plan + worker + synthesis runs in **7 seconds** (`session 9d6a5b0e`).
 
 8. **What was frustrating, broken, or harder than expected?**
-   > 1. Model ID casing and prefixes across the live `/v1/models` catalog vary slightly (`nvidia/Nemotron-3-Ultra-550b-a55b` vs lowercase `nvidia/nemotron-3-super-120b-a12b` vs `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` with the `NVIDIA-` prefix vs underscore `nvidia/Nemotron-3_5-Lightning`), which can trip up developers copying model IDs from docs. We solved this in `uta` by building a canonical alias resolver (`ResolveNebiusModel`: `ultra`, `super`, `nano`, `lightning`, `vl`) that normalizes all variants and live `/v1/models` probing (`uta nebius ping`).
-   > 2. When streaming (`stream: true`) is combined with multi-turn tool calls (`tools`), chunked tool argument deltas vary slightly across model families; exposing a standard `/v1/models` capability flag indicating `supports_tool_calling` and `supports_reasoning_effort` per model ID on Nebius Token Factory would make orchestrator auto-configuration even smoother.
+   > 1. **Thinking leaks into `content` by default.** Nemotron 3 reasons unless told otherwise. With no `reasoning_effort`, `nvidia/Nemotron-3_5-Lightning` spent its entire 64-token budget on chain-of-thought and returned it *as the answer* (`"Here's a thinking process: 1. Analyze User Input…"`), while `nemotron-3-super` put the same thinking in `reasoning_content` and answered `"\n\nPASS"`. The fix (`reasoning_effort: "none"`, or `chat_template_kwargs.enable_thinking=false`) works but is not in the Nebius chat-completion reference, and the two models behave differently with the same request. A per-model default and a documented toggle would save every integrator a day.
+   > 2. **`max_tokens` counts reasoning.** The documented default of 8192 includes `reasoning_tokens`, so a short-answer request with reasoning on can return an empty `content`. Surfacing `reasoning_tokens` in `usage.completion_tokens_details` (which Nebius does) is great; a `max_reasoning_tokens` knob would complete it.
+   > 3. **No capability flags on `/v1/models`.** Nothing tells a client which IDs support tools, reasoning_effort, vision or streaming-with-tools; we hard-code a catalog and probe. `supports_tools` / `supports_reasoning` / `modalities` fields per model would let orchestrators auto-configure.
+   > 4. **Model ID conventions vary** across the catalog (`Nemotron-3-Ultra-550b-a55b`, `nemotron-3-super-120b-a12b`, `NVIDIA-Nemotron-3-Nano-30B-A3B`, `Nemotron-3_5-Lightning`, `Nemotron-3.5-Super-VL`). We ship an alias resolver (`ultra|super|nano|lightning|vl`); canonical lowercase IDs with stable aliases server-side would be better.
+   > 5. **Sandboxes access path is unclear for Token Factory API-key users.** The coding track names Token Factory Sandboxes, the docs say the Token Factory key plus a Project ID is enough, yet `GET /sandboxes/v1/auth` returned 404 for us and the overview says access must be requested. A self-serve toggle in the console would have let us run `go test` inside a Sandbox microVM instead of on the host.
+   > 6. **Pricing is not on docs.tokenfactory.nebius.com.** We had to take Nemotron per-token prices from third-party listings to make dollar budgets enforce; a `/v1/models` `pricing` field or a documented page would make cost accounting exact.
 
 9. **Did you use any other Nebius services beyond Token Factory? If so, which ones and how was the experience?**
-   > We focused primarily on Nebius Token Factory (`https://api.tokenfactory.nebius.com/v1`) as the cloud inference backbone for `uta`'s 90/10 multi-agent coordinator, pairing it with local developer workspaces and SQLite trajectory recording so any developer can install `uta` locally and immediately burst parallel Nemotron worker swarms to Nebius Token Factory.
+   > Token Factory inference only. We designed `run_command` as a pluggable execution backend so Token Factory **Sandboxes** can run each worker's `go test` in a disposable microVM (one prepared image, one branch per parallel worker, `judge … require k of n` keeps the passing branch), but could not obtain Sandboxes access during the submission window — see question 8.
 
 10. **Would you continue using Nemotron models and Nebius after the hackathon?**
     - `Yes, definitely`

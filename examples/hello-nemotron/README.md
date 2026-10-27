@@ -7,7 +7,7 @@ This sample project demonstrates how `uta` coordinates **four distinct NVIDIA Ne
 | `[model:ultra]` | `nvidia/Nemotron-3-Ultra-550b-a55b` | 550B / 55B MoE | **10% Architect & Planner** (`s1_ultra_architect` / `ultra_plan`) |
 | `[model:super]` | `nvidia/nemotron-3-super-120b-a12b` | 120B / 12B MoE | **90% Parallel Worker Swarm** (`s2_super_worker` / `super_implement`) |
 | `[model:nano]` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | 30B / 3B MoE | **Fast Context Summarizer** (`s3_nano_summarizer` / `nano_compact`) |
-| `[model:lightning]` | `nvidia/Nemotron-3_5-Lightning` | 30B / 3.5B | **Sub-50ms OWASP ASI Sentinel** (`s4_lightning_sentinel` / `lightning_guardrail`) |
+| `[model:lightning]` | `nvidia/Nemotron-3_5-Lightning` | 30B / 3.5B | **OWASP ASI tool-call sentinel (~300 ms verdicts)** (`s4_lightning_sentinel` / `lightning_guardrail`) |
 | `[model:vl]` | `nvidia/Nemotron-3.5-Super-VL` | 120B / 12B + ViT | **Multimodal UI & Diagram Analyst** |
 
 ## Quickstart Commands

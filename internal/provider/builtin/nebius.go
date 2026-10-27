@@ -964,8 +964,20 @@ func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Even
 			if delta != "" {
 				buf.WriteString(delta)
 				pending.WriteString(delta)
-				if strings.Contains(delta, "\n") || pending.Len() >= 80 || time.Since(lastFlush) >= 60*time.Millisecond {
+				switch {
+				case strings.Contains(delta, "\n") || pending.Len() >= 80:
 					flush()
+				case time.Since(lastFlush) >= 60*time.Millisecond:
+					// Time-based flush: stop at the last space so a word is
+					// never split across two lines of the progress view.
+					if cut := strings.LastIndexByte(pending.String(), ' '); cut > 0 {
+						rest := pending.String()[cut+1:]
+						head := pending.String()[:cut+1]
+						pending.Reset()
+						pending.WriteString(head)
+						flush()
+						pending.WriteString(rest)
+					}
 				}
 			}
 		}

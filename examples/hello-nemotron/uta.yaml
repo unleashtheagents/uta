@@ -34,4 +34,4 @@ subtasks:
   - id: s4_lightning_sentinel
     title: "Nemotron 3.5 Lightning (30B/3.5B) — Sentinel Guardrail Greeting"
     worker: nebius
-    prompt: "[model:lightning] Write a 1-sentence greeting from NVIDIA Nemotron 3.5 Lightning explaining how it enforces sub-50ms OWASP ASI01-ASI10 policy verification."
+    prompt: "[model:lightning] Write a 1-sentence greeting from NVIDIA Nemotron 3.5 Lightning explaining how it screens every tool call with a ~300 ms OWASP ASI01-ASI10 PASS/FAIL verdict before it executes."

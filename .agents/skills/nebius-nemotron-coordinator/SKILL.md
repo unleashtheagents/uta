@@ -13,7 +13,7 @@ Use this skill when orchestrating multi-agent workflows with `uta` on **Nebius T
 |---|---|---|---|
 | `ultra` | `nvidia/Nemotron-3-Ultra-550b-a55b` | Hybrid Mamba-2 + Transformer MoE (550B / 55B active, 1M ctx) | 10% Planner, DAG Decomposer & Adversarial Synthesizer |
 | `super` | `nvidia/nemotron-3-super-120b-a12b` | Hybrid Mamba-2 + Transformer MoE (120B / 12B active, 1M ctx) | 90% High-Throughput Parallel Worker Swarm (148 tok/s) |
-| `lightning` | `nvidia/Nemotron-3_5-Lightning` | Latent Mamba-Attention (30B / 3.5B active, 256K ctx) | Sub-50ms OWASP ASI01-ASI10 Sentinel & Budget Guardrail |
+| `lightning` | `nvidia/Nemotron-3_5-Lightning` | Latent Mamba-Attention (30B / 3.5B active, 256K ctx) | ~300 ms OWASP ASI01-ASI10 Sentinel & Budget Guardrail |
 | `vl` | `nvidia/Nemotron-3.5-Super-VL` | Multimodal Vision-Language MoE (120B / 12B active + ViT) | UI Regression & Architecture Diagram Analysis |
 
 ## 2. Recommended Commands

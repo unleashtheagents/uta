@@ -43,8 +43,11 @@ uta resume <id> -g "now turn each bullet into a tweet"
 uta discuss -t "monolith or microservices for this repo?"   # two LLMs debate (claude vs agy), moderator synthesizes
 uta shell                                             # interactive shell: converse with + control agents
 uta nebius status                                     # Nebius Token Factory × NVIDIA Nemotron coordinator status
-uta nebius models                                     # list Nemotron model tiers (ultra, super, lightning, vl)
-uta nebius route "design a zero-trust MCP gateway"    # 90/10 Nemotron tier routing & cost breakdown
+uta auth set nebius                                   # store an API key (prompted, no echo); uta auth status
+uta limits set nebius --daily-usd 5                   # per-provider spend caps; uta limits status
+uta nebius models                                     # list Nemotron model tiers (ultra, super, nano, lightning, vl)
+uta nebius route "design a zero-trust MCP gateway"    # 90/10 Nemotron tier routing
+uta nebius cost <id>                                  # tokens and USD per Nemotron tier/role vs all-Ultra
 uta skills list                                       # discover workspace rules (AGENTS.md, CLAUDE.md) & SKILL.md
 uta run -g "audit @internal/provider/builtin/nebius.go" --worker nebius # run on Nebius Token Factory with @file expansion
 uta mission run examples/nebius-nemotron.steer        # run a Nebius × NVIDIA Nemotron steer mission
@@ -54,39 +57,48 @@ uta mission fmt examples/hello.steer                  # canonical formatting (di
 
 ### Nebius Token Factory × NVIDIA Nemotron Coordinator (`nebius` provider & `uta nebius`)
 
-`uta` ships with a built-in `nebius` provider and `uta nebius` coordinator that connects directly to **Nebius Token Factory** (`https://api.tokenfactory.nebius.com/v1`) to orchestrate all five **NVIDIA Nemotron** model tiers alongside local CLI agents (`claude`, `agy`, `gemini`):
+`uta` ships a built-in `nebius` provider that talks directly to **Nebius Token Factory** (`https://api.tokenfactory.nebius.com/v1`) and treats the five **NVIDIA Nemotron** tiers as one coordinated team next to your local CLI agents (`claude`, `agy`, `gemini`):
 
 | Alias | Model ID on Nebius Token Factory | Architecture & Active Params | Context | Role in `uta` |
 |---|---|---|---|---|
-| `ultra` | `nvidia/Nemotron-3-Ultra-550b-a55b` | Hybrid Mamba-2 + Transformer MoE (550B / 55B active) | 1M | **Planner & Synthesizer (10% tier)** — DAG decomposition, architectural review, and multi-agent verdict synthesis |
-| `super` | `nvidia/nemotron-3-super-120b-a12b` | Hybrid Mamba-2 + Transformer MoE (120B / 12B active) | 1M | **Parallel Worker Swarm (90% tier)** — High-throughput coding subtasks (148 tok/s), test generation, and refactoring |
-| `nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | Hybrid Mamba-2 + Transformer MoE (30B / 3B active) | 1M | **Fast Subtask & Summarizer Tier** — Rapid context compaction (`/compact`), commit synthesis, and lightweight iterations (295 tok/s) |
-| `lightning` | `nvidia/Nemotron-3_5-Lightning` | Latent Mamba-Attention (30B / 3.5B active) | 256K | **Sentinel Guardrail & Fast Router** — Sub-50ms OWASP ASI01–ASI10 policy verification and prompt-injection screening (420 tok/s) |
-| `vl` | `nvidia/Nemotron-3.5-Super-VL` | Multimodal Vision-Language MoE (120B / 12B + ViT) | 512K | **Multimodal UI & Diagram Analyst** — Visual architecture diagram auditing and UI screenshot inspection |
+| `ultra` | `nvidia/Nemotron-3-Ultra-550b-a55b` | Hybrid Mamba-2 + Transformer MoE (550B / 55B active) | 1M | **Planner, synthesizer, judge (the 10% tier)** — DAG decomposition, final synthesis, `judge … require k of n` verifiers, reflector critics |
+| `super` | `nvidia/nemotron-3-super-120b-a12b` | Hybrid Mamba-2 + Transformer MoE (120B / 12B active) | 1M | **Worker swarm (the 90% tier)** — parallel coding subtasks with the agentic tool loop |
+| `nano` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` | Hybrid Mamba-2 + Transformer MoE (30B / 3B active) | 1M | **Compaction tier** — context compaction and summaries |
+| `lightning` | `nvidia/Nemotron-3_5-Lightning` | Latent Mamba-Attention (30B / 3.5B active) | 256K | **Sentinel** — PASS/FAIL verdict on every `write_file`, `edit_file`, `run_command` before it executes (~300 ms measured) |
+| `vl` | `nvidia/Nemotron-3.5-Super-VL` | Multimodal Vision-Language MoE (120B / 12B + ViT) | 512K | **Multimodal analyst** — diagrams and UI screenshots |
 
-#### How Nebius Token Factory + Tavily Accelerate `uta`
+#### What the coordinator actually does
 
-1. **90/10 Hybrid Multi-Agent Routing (`uta nebius route`)**: `uta` routes 10% of tokens (DAG decomposition and final synthesis) to **Nemotron 3 Ultra** (`nvidia/Nemotron-3-Ultra-550b-a55b`) while fanning out 90% of parallel worker subtasks to **Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) and **Nemotron 3 Nano** (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) on Nebius Token Factory — achieving **2.016s completion latency (5.5× faster than local CLI cold starts) and 134.4 tok/s live throughput** (`uta bench`).
-2. **Autonomous Agentic Tool-Calling Loop (`UTA_NEBIUS_AGENTIC=1` / `-y`)**: When pre-approved (`-y` / `--preapprove` or `UTA_NEBIUS_AGENTIC=1`), the `nebius` provider exposes OpenAI-compatible function-calling tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `run_command`, `tavily_search`) directly to NVIDIA Nemotron models on Nebius Token Factory so Nemotron agents can autonomously inspect files, edit code, run `go test ./...`, and iterate on a real repository with every tool call recorded in SQLite (`EventToolCall` / `EventToolResult`).
-3. **Runtime Web Grounding via Tavily API (`uta nebius search` & `tavily_search`)**: `uta` integrates a zero-dependency runtime client (`internal/tavily`) for `POST https://api.tavily.com/search` so NVIDIA Nemotron agents can ground architectural plans and code changes in live documentation with citations (`uta nebius search "<query>"`) and persist findings to `.uta/context/RESEARCH_DATABASE.md`.
-4. **Unified `agy` + `claude` Rules, Progressive Skills & `@file` Expansion**: Inspired by **Google Antigravity (`agy`)** and **Anthropic Claude Code (`claude`)**, `uta` discovers hierarchical project rules (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md`), progressive skills (`skills/<name>/SKILL.md`), and expands `@path/to/file` mentions inside prompts before sending turns to Nebius Token Factory.
+1. **Role-tier routing, executed by the engine.** Every provider call carries its orchestration role (planner, worker, synthesis, judge, compact, sentinel). With `--worker nebius` the Supervisor plans and synthesizes on **Nemotron 3 Ultra**, fans subtasks out to **Nemotron 3 Super**, and judges with Ultra — without any `[model:…]` tags in prompts. `NEBIUS_MODEL=<tier>` or an inline `[model:ultra]` pins a model; `UTA_NEBIUS_ROUTING=0` turns routing off. The trajectory's `session_id` events record `role` and `routing` so you can prove which tier ran each call.
+2. **Agentic tool loop on a real repository.** With `--pre-approve "*"` (or `UTA_NEBIUS_AGENTIC=1`) Nemotron gets `read_file`, `write_file`, `edit_file`, `list_dir`, `run_command` and `tavily_search` as OpenAI-compatible function tools and iterates until the task is done; every call and result is recorded in SQLite.
+3. **Nemotron Lightning sentinel.** Before any tool call that can change the workspace or run code, **Nemotron 3.5 Lightning** returns a PASS/FAIL verdict (reasoning off, temperature 0, 8 tokens). FAIL blocks the call, the agent sees the refusal as its tool result, and a `sentinel_alert` lands in the trajectory and in `uta dash`. Live on Token Factory a `curl … | sh` was blocked in 216 ms. `UTA_NEBIUS_SENTINEL=0` disables.
+4. **Per-tier reasoning policy.** Nemotron 3 thinks by default; `uta` sets `reasoning_effort` per tier (Ultra high, Super medium, Nano low, Lightning none), keeps `reasoning_content` out of answers (recorded as a `reasoning` event), strips leaked `<think>` blocks and reports reasoning and prompt-cache tokens per turn. `UTA_NEBIUS_REASONING_EFFORT` overrides.
+5. **Real dollar budgets and a cost report.** Built-in Nemotron list prices make `budget … $1` in steer and `--budget-usd` in `uta run` enforce on Nebius calls. `uta nebius cost <session>` folds a run into tokens and USD per tier and role and compares it with an all-Ultra counterfactual — a live coding run came out at $0.0123 vs $0.0271, a 54.7% saving.
+6. **Robust on the shared endpoint.** Retries with backoff on 429/5xx (honouring `Retry-After`, `UTA_NEBIUS_MAX_RETRIES`), `NEBIUS_SERVICE_TIER` passthrough, and incremental SSE streaming so answers appear as Nemotron generates them.
+7. **Keys and spend caps as first-class config.** `uta auth set nebius` stores the key in `~/.uta/credentials.env` (0600, outside every repo, prompted without echo). `uta limits set nebius --daily-usd 5 --monthly-usd 50` caps what the key may spend across every project on the machine; every call is ledgered and refused with a quota error once a cap is hit.
+8. **Tavily grounding.** `uta nebius search` and the `tavily_search` tool call `POST https://api.tavily.com/search` live and persist citations to `.uta/context/RESEARCH_DATABASE.md`.
+9. **Rules, skills and `@file` context.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md` and progressive `SKILL.md` skills are discovered and injected (`UTA_NEBIUS_INJECT_RULES=1`); `@path/to/file` mentions expand before the turn is sent.
 
 ```sh
-export NEBIUS_API_KEY="v1.nebius..."
-export TAVILY_API_KEY="tvly-..."                      # optional: enables live Tavily search grounding
-export NEBIUS_MODEL="ultra"                           # short alias: ultra | super | nano | lightning | vl
-export UTA_NEBIUS_INJECT_RULES=1                      # auto-inject AGENTS.md / CLAUDE.md + progressive skills
-uta nebius status                                     # inspect endpoint, auth, 90/10 tiers, and skills
-uta nebius ping                                       # verify live connectivity against /v1/models
-uta nebius models                                     # list all 5 NVIDIA Nemotron tiers on Nebius Token Factory
+uta auth set nebius                                   # store the Token Factory key (prompted, no echo)
+uta auth set tavily                                   # optional: live web grounding
+uta limits set nebius --daily-usd 5 --monthly-usd 50  # cap what the key may spend
+uta nebius status                                     # endpoint, auth, routing rule, tiers, skills
+uta nebius ping                                       # live connectivity against /v1/models
+uta nebius models                                     # the five Nemotron tiers and aliases
 uta nebius route "design a 90/10 multi-agent router with Nemotron"
 uta nebius search "NVIDIA Nemotron 3 Mamba-2 MoE benchmarks"
-uta skills list                                       # inspect discovered AGENTS.md, CLAUDE.md, and SKILL.md files
-uta run -g "audit @internal/provider/builtin/nebius.go and run tests" --worker nebius -y
-uta mission run examples/nebius-nemotron.steer
+
+uta run -g "add a table-driven test for internal/paths and run go test ./..." --worker nebius --pre-approve "*" -y
+uta nebius cost <session-id>                          # tokens and USD per tier/role vs all-Ultra
+uta run -f examples/hello-nemotron/uta.yaml -y        # four Nemotron tiers in parallel
+uta mission run examples/nebius-nemotron.steer        # steer mission on Nebius
+uta bench                                             # latency, throughput and cost side by side
 ```
 
-> **Nebius × NVIDIA Global AI Hackathon (Aug 26 – Oct 30, 2026) Updates:** Built native `nebius` Token Factory provider (`internal/provider/builtin/nebius.go`, `nebius_tools.go`) supporting all 5 NVIDIA Nemotron tiers (`ultra`, `super`, `nano`, `lightning`, `vl`), SSE token streaming, multi-turn agentic tool calling (`read_file`, `write_file`, `edit_file`, `list_dir`, `run_command`, `tavily_search`), `uta nebius` coordinator CLI (`status`, `models`, `route`, `search`, `ping`), unified `agy`/`claude` progressive skills & rules discovery (`internal/skills`, `uta skills`), runtime Tavily Search API integration (`internal/tavily`), interactive shell `/plan`, `/compact`, `/nebius`, `/skills` slash commands, Web Dashboard `/api/nebius` & `/api/skills` cards, and `examples/nebius-nemotron.steer`. See [`docs/DEVPOST-NEBIUS-HACKATHON.md`](docs/DEVPOST-NEBIUS-HACKATHON.md) for the complete Devpost guide.
+Environment knobs: `NEBIUS_API_KEY`, `NEBIUS_MODEL`, `NEBIUS_BASE_URL`, `NEBIUS_SYSTEM_PROMPT`, `NEBIUS_STREAM`, `NEBIUS_SERVICE_TIER`, `UTA_NEBIUS_ROUTING`, `UTA_NEBIUS_SENTINEL`, `UTA_NEBIUS_SENTINEL_MODEL`, `UTA_NEBIUS_REASONING_EFFORT`, `UTA_NEBIUS_MAX_TOKENS`, `UTA_NEBIUS_TEMPERATURE`, `UTA_NEBIUS_MAX_RETRIES`, `UTA_NEBIUS_AGENTIC`, `UTA_NEBIUS_INJECT_RULES`, `UTA_NEBIUS_PRICING`, `UTA_NEBIUS_{INPUT,OUTPUT}_CENTS_PER_KTOK`.
+
+> **Nebius × NVIDIA Global AI Hackathon (Aug 26 – Oct 30, 2026) Updates:** Built the native `nebius` Token Factory provider for all 5 Nemotron tiers with role-tier routing executed by the engine, the agentic tool loop (`read_file`, `write_file`, `edit_file`, `list_dir`, `run_command`, `tavily_search`), the Nemotron Lightning sentinel, the per-tier reasoning policy, built-in list prices with enforced dollar budgets, `uta nebius` (`status`, `models`, `route`, `search`, `ping`, `cost`), `uta auth` and `uta limits`, retries and live streaming, Tavily grounding, unified `agy`/`claude` rules and skills discovery, shell slash commands and dashboard cards, and the `examples/hello-nemotron` sample project. See [`docs/DEVPOST-NEBIUS-HACKATHON.md`](docs/DEVPOST-NEBIUS-HACKATHON.md).
 
 `uta pr` runs an autonomous dev mission on a dedicated Git branch (`uta/<slug>`), validates it against verification gates, commits changes, and opens a Pull Request via `gh pr create` with a structured trajectory summary.
 
