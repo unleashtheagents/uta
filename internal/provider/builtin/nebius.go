@@ -562,16 +562,13 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		Content: effectivePrompt,
 	})
 
-	var tools []nebiusToolSpec
-	if shouldEnableNebiusTools(opts) {
-		tools = DefaultNebiusTools()
-	}
-	// Streaming: on by default for plain (tool-less) turns that have a
-	// listener, so assistant text reaches the terminal as it is generated.
-	// NEBIUS_STREAM=0 forces one-shot JSON; NEBIUS_STREAM=1 forces SSE even
-	// without a listener. Tool-calling turns always use one-shot JSON.
+	tools := nebiusToolsFor(opts)
+	// Streaming: on by default whenever there is a listener, so assistant
+	// text reaches the terminal as it is generated; tool-call deltas are
+	// assembled from the stream. NEBIUS_STREAM=0 forces one-shot JSON;
+	// NEBIUS_STREAM=1 forces SSE even without a listener.
 	streamEnv := resolveEnvKey(opts.Env, "NEBIUS_STREAM")
-	useStream := len(tools) == 0 && (streamEnv == "1" || (streamEnv != "0" && events != nil))
+	useStream := streamEnv == "1" || (streamEnv != "0" && events != nil)
 	serviceTier := resolveEnvKey(opts.Env, "NEBIUS_SERVICE_TIER")
 	maxRetries := resolveNebiusRetries(opts.Env)
 
@@ -642,6 +639,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			sseIn    int64
 			sseOut   int64
 			sseThink string
+			sseCalls []nebiusToolCall
 		)
 		for attempt := 0; ; attempt++ {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
@@ -689,7 +687,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 			if isSSE {
 				// Incremental: deltas reach the listener as they arrive.
 				var sseReason int64
-				sseText, sseThink, sseIn, sseOut, rawBytes, sseReason = parseNebiusSSEStream(resp.Body, model, events)
+				sseText, sseThink, sseIn, sseOut, rawBytes, sseReason, sseCalls = parseNebiusSSEStream(resp.Body, model, events)
 				totalReasoningTokens += sseReason
 				_ = resp.Body.Close()
 				streamed = true
@@ -708,73 +706,54 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 		}
 		lastRawBytes = rawBytes
 
-		if streamed && strings.TrimSpace(sseText) == "" && reasoningEffort != "none" && !reasoningRetried {
-			// The whole output budget went to thinking. Redo this turn once
-			// with reasoning off rather than hand back an empty answer.
-			totalTokensIn += sseIn
-			totalTokensOut += sseOut
-			reasoningRetried = true
-			reasoningEffort = "none"
-			if events != nil {
-				pl, _ := json.Marshal(map[string]any{"type": "retry", "model": model, "attempt": 1,
-					"reason": "empty content with reasoning on; retrying with reasoning_effort=none",
-					"text":   "[nebius retry] empty content with reasoning on; retrying with reasoning_effort=none"})
-				events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: pl}
-			}
-			round--
-			continue
-		}
-		if streamed {
-			finalText = sseText
-			totalTokensIn += sseIn
-			totalTokensOut += sseOut
-			if think := strings.TrimSpace(sseThink); think != "" && events != nil {
-				thinkPayload, _ := json.Marshal(map[string]any{"type": "reasoning", "model": model, "text": think})
-				events <- provider.Event{Kind: provider.EventStdoutChunk, Timestamp: time.Now(), Payload: thinkPayload}
-			}
-			history = append(history, nebiusChatMessage{Role: "assistant", Content: finalText})
-			break
-		}
-
-		var parsed nebiusChatResponse
-		_ = json.Unmarshal(rawBytes, &parsed)
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errMsg := strings.TrimSpace(string(rawBytes))
-			if parsed.Error != nil && parsed.Error.Message != "" {
-				errMsg = parsed.Error.Message
-			}
-			res := provider.RunResult{
-				SessionID: sessionID,
-				RawOutput: rawBytes,
-				ExitCode:  resp.StatusCode,
-			}
-			switch {
-			case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-				return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrAuth, errMsg)
-			case resp.StatusCode == http.StatusTooManyRequests:
-				return res, fmt.Errorf("nebius (429): %w: %s", provider.ErrQuota, errMsg)
-			case resp.StatusCode >= 500:
-				return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrTransport, errMsg)
-			default:
-				return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrWorkerFailed, errMsg)
-			}
-		}
-
-		totalTokensIn += parsed.Usage.PromptTokens
-		totalTokensOut += parsed.Usage.CompletionTokens
-		totalReasoningTokens += parsed.Usage.CompletionTokensDetails.ReasoningTokens
-		totalCachedTokens += parsed.Usage.PromptTokensDetails.CachedTokens
-
 		var assistantMsg nebiusChatMessage
-		if len(parsed.Choices) > 0 {
-			assistantMsg = parsed.Choices[0].Message
+		var roundReasoning int64
+		if streamed {
+			totalTokensIn += sseIn
+			totalTokensOut += sseOut
+			assistantMsg = nebiusChatMessage{Role: "assistant", Content: sseText, ToolCalls: sseCalls, ReasoningContent: sseThink}
+		} else {
+			var parsed nebiusChatResponse
+			_ = json.Unmarshal(rawBytes, &parsed)
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				errMsg := strings.TrimSpace(string(rawBytes))
+				if parsed.Error != nil && parsed.Error.Message != "" {
+					errMsg = parsed.Error.Message
+				}
+				res := provider.RunResult{
+					SessionID: sessionID,
+					RawOutput: rawBytes,
+					ExitCode:  resp.StatusCode,
+				}
+				switch {
+				case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+					return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrAuth, errMsg)
+				case resp.StatusCode == http.StatusTooManyRequests:
+					return res, fmt.Errorf("nebius (429): %w: %s", provider.ErrQuota, errMsg)
+				case resp.StatusCode >= 500:
+					return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrTransport, errMsg)
+				default:
+					return res, fmt.Errorf("nebius (%d): %w: %s", resp.StatusCode, provider.ErrWorkerFailed, errMsg)
+				}
+			}
+
+			totalTokensIn += parsed.Usage.PromptTokens
+			totalTokensOut += parsed.Usage.CompletionTokens
+			roundReasoning = parsed.Usage.CompletionTokensDetails.ReasoningTokens
+			totalReasoningTokens += roundReasoning
+			totalCachedTokens += parsed.Usage.PromptTokensDetails.CachedTokens
+			if len(parsed.Choices) > 0 {
+				assistantMsg = parsed.Choices[0].Message
+			}
 		}
 		if assistantMsg.Role == "" {
 			assistantMsg.Role = "assistant"
 		}
 		assistantMsg.Content = stripThinkTags(assistantMsg.Content)
 		if strings.TrimSpace(assistantMsg.Content) == "" && len(assistantMsg.ToolCalls) == 0 && reasoningEffort != "none" && !reasoningRetried {
+			// The whole output budget went to thinking. Redo this turn once
+			// with reasoning off rather than hand back an empty answer.
 			reasoningRetried = true
 			reasoningEffort = "none"
 			if events != nil {
@@ -791,7 +770,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 				"type":             "reasoning",
 				"model":            model,
 				"text":             think,
-				"reasoning_tokens": parsed.Usage.CompletionTokensDetails.ReasoningTokens,
+				"reasoning_tokens": roundReasoning,
 			})
 			events <- provider.Event{
 				Kind:      provider.EventStdoutChunk,
@@ -803,7 +782,8 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 
 		if txt := strings.TrimSpace(assistantMsg.Content); txt != "" {
 			finalText = txt
-			if events != nil {
+			// Streamed text already reached the listener delta by delta.
+			if events != nil && !streamed {
 				txtPayload, _ := json.Marshal(map[string]string{
 					"type":  "assistant_text",
 					"model": model,
@@ -935,7 +915,7 @@ func (n *Nebius) runTurn(ctx context.Context, sessionID, prompt string, opts pro
 // parseNebiusSSE parses a complete SSE body. Kept for callers and tests that
 // already hold the bytes; the live path uses parseNebiusSSEStream.
 func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (finalText string, tokensIn, tokensOut int64) {
-	text, _, in, out, _, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
+	text, _, in, out, _, _, _ := parseNebiusSSEStream(bytes.NewReader(raw), model, events)
 	return text, in, out
 }
 
@@ -945,8 +925,13 @@ func parseNebiusSSE(raw []byte, model string, events chan<- provider.Event) (fin
 // returned as thinking; usage arrives on the final chunk when the request
 // asked for stream_options.include_usage. raw holds every byte read so the
 // caller can persist the exchange.
-func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Event) (finalText, thinking string, tokensIn, tokensOut int64, raw []byte, reasoningTokens int64) {
+func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Event) (finalText, thinking string, tokensIn, tokensOut int64, raw []byte, reasoningTokens int64, calls []nebiusToolCall) {
 	var buf, think, rawBuf, pending strings.Builder
+	// Tool-call deltas arrive keyed by index: the first carries id, type and
+	// the function name, later ones append argument fragments.
+	callByIndex := map[int]*nebiusToolCall{}
+	var callOrder []int
+	nextIndex := 0
 	// Token deltas are coalesced into readable flushes (a line, ~80 chars,
 	// or 60ms of silence) so a progress renderer that prints one line per
 	// event stays legible while the text still appears as it is generated.
@@ -993,6 +978,31 @@ func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Even
 			reasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
 		}
 		for _, c := range chunk.Choices {
+			for _, tc := range c.Delta.ToolCalls {
+				idx := nextIndex
+				if tc.Index != nil {
+					idx = *tc.Index
+				} else if tc.ID == "" && len(callOrder) > 0 {
+					idx = callOrder[len(callOrder)-1] // fragment without index: continue the last call
+				}
+				cur, ok := callByIndex[idx]
+				if !ok {
+					cur = &nebiusToolCall{}
+					callByIndex[idx] = cur
+					callOrder = append(callOrder, idx)
+					nextIndex = idx + 1
+				}
+				if tc.ID != "" {
+					cur.ID = tc.ID
+				}
+				if tc.Type != "" {
+					cur.Type = tc.Type
+				}
+				if tc.Function.Name != "" {
+					cur.Function.Name = tc.Function.Name
+				}
+				cur.Function.Arguments += tc.Function.Arguments
+			}
 			if t := c.Delta.thinking(); t != "" {
 				think.WriteString(t)
 			} else if t := c.Message.thinking(); t != "" {
@@ -1024,7 +1034,17 @@ func parseNebiusSSEStream(r io.Reader, model string, events chan<- provider.Even
 		}
 	}
 	flush()
-	return stripThinkTags(strings.TrimSpace(buf.String())), think.String(), tokensIn, tokensOut, []byte(rawBuf.String()), reasoningTokens
+	for _, idx := range callOrder {
+		c := *callByIndex[idx]
+		if c.Type == "" {
+			c.Type = "function"
+		}
+		if c.ID == "" {
+			c.ID = fmt.Sprintf("call_%d", idx)
+		}
+		calls = append(calls, c)
+	}
+	return stripThinkTags(strings.TrimSpace(buf.String())), think.String(), tokensIn, tokensOut, []byte(rawBuf.String()), reasoningTokens, calls
 }
 
 // nebiusSleep waits for the retry delay, reporting the retry on the event

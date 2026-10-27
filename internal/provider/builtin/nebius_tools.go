@@ -37,6 +37,9 @@ type nebiusToolCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+	// Index is only present on streamed deltas; it is cleared before a call
+	// is replayed into history.
+	Index *int `json:"index,omitempty"`
 }
 
 // DefaultNebiusTools returns the OpenAI-compatible function-calling tool
@@ -160,11 +163,38 @@ func DefaultNebiusTools() []nebiusToolSpec {
 	}
 }
 
-func shouldEnableNebiusTools(opts provider.RunOptions) bool {
+// readOnlyNebiusToolNames is the default tool set for worker turns that were
+// not pre-approved: the model can look at the repository and search the web
+// but cannot change files or run commands. --pre-approve (any value) or
+// UTA_NEBIUS_AGENTIC=1 unlocks the full set; UTA_NEBIUS_AGENTIC=0 disables
+// tools entirely.
+var readOnlyNebiusToolNames = map[string]bool{"read_file": true, "list_dir": true, "tavily_search": true}
+
+// nebiusToolsFor returns the tool definitions to advertise for a call.
+// Planner, synthesis, judge, compact and sentinel turns never get tools;
+// they reason over text the engine already gathered.
+func nebiusToolsFor(opts provider.RunOptions) []nebiusToolSpec {
 	if v := resolveEnvKey(opts.Env, "UTA_NEBIUS_AGENTIC"); v != "" {
-		return v == "1" || strings.EqualFold(v, "true")
+		if v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off") {
+			return nil
+		}
+		if v == "1" || strings.EqualFold(v, "true") {
+			return DefaultNebiusTools()
+		}
 	}
-	return len(opts.PreApproveTools) > 0
+	if len(opts.PreApproveTools) > 0 {
+		return DefaultNebiusTools()
+	}
+	if opts.Role != "" && opts.Role != provider.RoleWorker {
+		return nil
+	}
+	var out []nebiusToolSpec
+	for _, t := range DefaultNebiusTools() {
+		if readOnlyNebiusToolNames[t.Function.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func resolveSafeWorkdirPath(workdir, rel string) (string, error) {
@@ -321,7 +351,19 @@ func executeNebiusToolCall(ctx context.Context, call nebiusToolCall, opts provid
 		if err != nil {
 			return fmt.Sprintf("tavily_search error: %v", err), true
 		}
-		return tavily.FormatMarkdown(sr), false
+		md := tavily.FormatMarkdown(sr)
+		// Persist citations the same way `uta nebius search` does, so research
+		// an agent did mid-task survives in the project's context directory.
+		if opts.Workdir != "" {
+			ctxDir := filepath.Join(opts.Workdir, ".uta", "context")
+			if st, serr := os.Stat(ctxDir); serr == nil && st.IsDir() {
+				if f, ferr := os.OpenFile(filepath.Join(ctxDir, "RESEARCH_DATABASE.md"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {
+					_, _ = fmt.Fprintf(f, "\n\n<!-- tavily_search by %s at %s -->\n%s\n", "nemotron", time.Now().UTC().Format(time.RFC3339), md)
+					_ = f.Close()
+				}
+			}
+		}
+		return md, false
 
 	default:
 		return fmt.Sprintf("unknown tool: %s", call.Function.Name), true

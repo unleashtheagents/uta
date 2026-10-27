@@ -75,12 +75,17 @@ func runHello(cmd *cobra.Command, app *App) error {
 
 	fmt.Fprintln(out, "Try this next")
 	if len(avail) == 0 {
-		fmt.Fprintln(out, "  After installing a provider:")
-		fmt.Fprintln(out, "    uta doctor                              # verify the install")
-		fmt.Fprintln(out, "    uta hello                               # re-run this tour")
+		fmt.Fprintln(out, "  uta setup                                  # paste a Nebius Token Factory key, set a daily cap, go")
+		fmt.Fprintln(out, "  uta doctor                                 # verify the install")
 	} else {
-		worker := avail[0]
-		fmt.Fprintf(out, "  uta run -g \"summarize this directory in 5 bullets\" --worker %s -y\n", worker)
+		worker := defaultWorker(avail)
+		if worker == "nebius" {
+			fmt.Fprintln(out, "  uta nebius demo                            # 60s: Ultra plans, Super codes+tests, Lightning blocks, Nano compacts, cost report")
+		} else {
+			fmt.Fprintln(out, "  uta setup                                  # add Nebius Token Factory: five Nemotron tiers behind one key")
+		}
+		fmt.Fprintf(out, "  uta run -g \"summarize this directory in 5 bullets\"   # worker auto-selected (%s)\n", worker)
+		fmt.Fprintln(out, "  uta                                        # bare uta opens the interactive shell")
 		fmt.Fprintln(out, "  uta sessions                               # list past runs")
 		fmt.Fprintln(out, "  uta trajectory <id>                        # full event timeline")
 		fmt.Fprintln(out, "  uta resume <id> -g \"now turn each bullet into a tweet\"")

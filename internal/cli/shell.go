@@ -115,7 +115,7 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 				return exitWith(3)
 			}
 			if workerName == "" {
-				workerName = available[0]
+				workerName = defaultWorker(available)
 			} else if !containsString(available, workerName) {
 				det := detections[workerName]
 				return fmt.Errorf("provider %q is not available: %s", workerName, firstNonEmptyStr(det.Notes, "not detected"))
@@ -823,6 +823,9 @@ func (s *utaShell) execTurn(parent context.Context, worker, goal string) error {
 		fmt.Fprintln(s.out, result.FinalAnswer)
 	}
 	fmt.Fprintf(s.errw, "\n[uta] session %s status=%s%s\n", shortID(result.SessionID), result.Status, usageSummary(result.Subtasks))
+	if line := nebiusFooterLine(s.app, result.SessionID); line != "" {
+		fmt.Fprintln(s.errw, line)
+	}
 	return nil
 }
 

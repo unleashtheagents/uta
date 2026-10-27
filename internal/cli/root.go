@@ -236,12 +236,36 @@ func Execute() {
 		&cobra.Group{ID: "data", Title: "Memory & Data:"},
 		&cobra.Group{ID: "integrate", Title: "Integrations:"},
 	)
-	addTo("start", newHelloCmd(), newDoctorCmd(), newInitCmd(), newAuthCmd(), newLimitsCmd(), newProvidersCmd(), newNebiusCmd())
-	addTo("orchestrate", newRunCmd(), newPRCmd(), newShellCmd(), newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
+	shellCmd := newShellCmd()
+	addTo("start", newHelloCmd(), newSetupCmd(), newDoctorCmd(), newInitCmd(), newAuthCmd(), newLimitsCmd(), newProvidersCmd(), newNebiusCmd())
+	addTo("orchestrate", newRunCmd(), newPRCmd(), shellCmd, newMissionCmd(), newResumeCmd(), newDiscussCmd(), newImproveCmd(), newAuditCmd(), newEvalCmd(), newShadowCmd(), newHITLCmd())
 	addTo("inspect", newSessionsCmd(), newTrajectoryCmd(), newReplayCmd(), newBenchCmd(), newPerfCmd(), newDashCmd())
 	addTo("workspace", newProjectCmd(), newCtxCmd(), newThreadCmd(), newModeCmd(), newVibeCmd(), newSkillsCmd())
 	addTo("data", newMemoryCmd(), newRecallCmd(), newIdeasCmd(), newExportDBCmd(), newImportCmd())
 	addTo("integrate", newServeCmd())
+	// A bare `uta` in a terminal is the product, not a help page: run the
+	// first-run setup if nothing is configured, then open the shell. Piped
+	// or scripted invocations still get the help text.
+	root.RunE = func(cmd *cobra.Command, args []string) error {
+		if !shouldOpenShell(isInteractive(cmd.InOrStdin(), cmd.OutOrStdout()), args) {
+			return cmd.Help()
+		}
+		app, err := newApp(cmd.Context())
+		if err != nil {
+			return err
+		}
+		available := availableProviders(app.Registry.Names(), app.Registry.DetectAll(cmd.Context()))
+		ran, err := maybeFirstRunSetup(cmd, app, available)
+		app.Close()
+		if err != nil {
+			return err
+		}
+		if ran && strings.TrimSpace(os.Getenv("NEBIUS_API_KEY")) == "" && len(available) == 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "no provider configured yet — run `uta setup` when you have a key, or install claude / gemini / agy.")
+			return nil
+		}
+		return shellCmd.RunE(cmd, nil)
+	}
 	root.SetHelpCommandGroupID("start")
 	root.SetCompletionCommandGroupID("integrate")
 

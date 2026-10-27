@@ -73,7 +73,7 @@ func TestRunHello_NoProvidersTellsTheUserWhatToInstall(t *testing.T) {
 		"(none on PATH)",
 		"docs.claude.com",
 		"gemini-cli",
-		"After installing a provider",
+		"uta setup",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("hello output missing %q\nfull:\n%s", want, out)
@@ -106,8 +106,8 @@ func TestRunHello_WithProvidersGivesAConcreteCommand(t *testing.T) {
 	if !strings.Contains(out, "claude") || !strings.Contains(out, "9.9.9") {
 		t.Errorf("provider section missing claude/9.9.9:\n%s", out)
 	}
-	if !strings.Contains(out, "uta run -g") || !strings.Contains(out, "--worker claude") {
-		t.Errorf("expected a `uta run ... --worker claude` line, got:\n%s", out)
+	if !strings.Contains(out, "uta run -g") || !strings.Contains(out, "auto-selected (claude)") {
+		t.Errorf("expected a `uta run -g ...` line naming claude as the auto-selected worker, got:\n%s", out)
 	}
 }
 

@@ -17,6 +17,9 @@ run_cmd() {
   eval "$*"
 }
 
+pause_step "SCENE 0 (optional one-shot): uta nebius demo — every tier, Tavily, sentinel, cost report in ~90s"
+if [ "${DEMO_ONESHOT:-0}" = "1" ]; then run_cmd "uta nebius demo"; fi
+
 pause_step "SCENE 1: Keys, Spend Caps, Coordinator Status & Live Ping"
 run_cmd "uta auth status"
 echo ""

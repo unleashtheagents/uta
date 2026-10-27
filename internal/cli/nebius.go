@@ -243,7 +243,7 @@ multimodal visual analysis — alongside local Claude Code and Google Antigravit
 	}
 	pingCmd.Flags().BoolVar(&pingJSON, "json", false, "emit ping result as JSON")
 
-	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd, newNebiusCostCmd())
+	cmd.AddCommand(statusCmd, modelsCmd, routeCmd, searchCmd, pingCmd, newNebiusCostCmd(), newNebiusDemoCmd())
 	return cmd
 }
 

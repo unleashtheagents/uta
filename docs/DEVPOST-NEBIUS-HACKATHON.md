@@ -42,6 +42,7 @@ With **NVIDIA Nemotron 3** (`Ultra`, `Super`, `Nano`, `Lightning`, `Super-VL`) h
 
 1. **90/10 Nebius × Nemotron Coordinator, executed by the engine (`uta nebius`, `internal/engine`):**
    - Every provider call carries its orchestration role (planner, worker, synthesis, judge, compact, sentinel). With `--worker nebius` the Supervisor plans and synthesizes on **Nemotron 3 Ultra**, fans subtasks out to **Nemotron 3 Super**, judges with Ultra, compacts with **Nemotron 3 Nano** and guards with **Nemotron 3.5 Lightning** — no prompt tags required. Each trajectory `session_id` event records `role` and `routing` as proof.
+   - **First run:** a bare `uta` in a terminal runs `uta setup` when nothing is configured (Nebius key, daily spend cap, optional Tavily key, live ping) and opens the shell; `uta run -g "..."` needs no flags (worker auto-selected, read-only tools, cost footer); `uta nebius demo` is a 90-second tour that exercises every tier plus Tavily and ends with the cost report.
    - `uta nebius status` / `ping` / `models` / `route "<goal>"` inspect readiness, the routing rule and the five tiers; `uta nebius cost <session>` reports tokens and USD per tier and role against an all-Ultra counterfactual (live coding run: **$0.0123 vs $0.0271, a 54.7% saving**).
    - **Nemotron Lightning sentinel:** before any `write_file`, `edit_file` or `run_command` executes, Lightning returns PASS/FAIL (reasoning off, temperature 0, 8 tokens). FAIL blocks the call and persists a `sentinel_alert`. Live: `curl … | sh` blocked in **216 ms**.
    - **Per-tier reasoning policy:** `reasoning_effort` high/medium/low/none per tier, `reasoning_content` kept out of answers and recorded separately, reasoning and prompt-cache tokens reported per turn.
@@ -97,6 +98,7 @@ claude       ok      11.099s   36391      536         48.3 tok/s
 > 7. **Nemotron Lightning Sentinel (`internal/provider/builtin/nebius_sentinel.go`):** PASS/FAIL guardrail on every `write_file` / `edit_file` / `run_command`, blocking FAILs and persisting `sentinel_alert` events (live block in 216 ms).
 > 8. **Reasoning Policy, Pricing and Cost Report (`nebius.go`, `pricing.go`, `internal/cli/nebius_cost.go`):** per-tier `reasoning_effort`, separated `reasoning_content`, built-in Nemotron list prices so dollar budgets enforce, `uta nebius cost <session>` with the all-Ultra counterfactual.
 > 9. **Keys and Spend Caps (`internal/cli/auth.go`, `internal/limits`, `internal/cli/limits.go`):** `uta auth set|unset|status` and `uta limits set|clear|status` with a per-call usage ledger enforced before every provider call.
+> 11. **First-run experience (`internal/cli/setup.go`, `nebius_demo.go`):** bare `uta` opens the shell with a first-run wizard, zero-flag `uta run`, `uta nebius demo`, per-tier cost footer on every run, Tavily searches counted per run and citations persisted from agent tool calls.
 > 10. **Robustness (`nebius.go`):** retries with backoff on 429/5xx honouring `Retry-After`, `service_tier` passthrough, incremental SSE streaming with coalesced deltas, `stream_options.include_usage`.
 
 ### 2. Best Use of Tavily Bonus Award ($3,000)

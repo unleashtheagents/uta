@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,12 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/unleashtheagents/uta/internal/config"
@@ -232,10 +229,8 @@ func newRunCmd() *cobra.Command {
 			}
 
 			if workerName == "" {
-				workerName, err = chooseWorker(cmd.InOrStdin(), cmd.OutOrStdout(), available, yes)
-				if err != nil {
-					return err
-				}
+				workerName = defaultWorker(available)
+				fmt.Fprintf(cmd.ErrOrStderr(), "[uta] worker=%s (auto-selected; --worker to override)\n", workerName)
 			}
 			if !containsString(available, workerName) {
 				det := detections[workerName]
@@ -394,6 +389,9 @@ func newRunCmd() *cobra.Command {
 			fmt.Fprintf(cmd.ErrOrStderr(), "\n[uta] session %s status=%s subtasks=%d duration=%s%s\n",
 				result.SessionID, result.Status, len(result.Subtasks),
 				time.Since(runStart).Round(time.Second), usageSummary(result.Subtasks))
+			if line := nebiusFooterLine(app, result.SessionID); line != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), line)
+			}
 
 			if result.Status == "partial" {
 				return exitWith(5)
@@ -511,39 +509,6 @@ func availableProviders(names []string, detections map[string]provider.Detection
 		}
 	}
 	return out
-}
-
-func chooseWorker(in io.Reader, out io.Writer, available []string, yes bool) (string, error) {
-	if yes {
-		return "", errors.New("--worker is required when -y/--yes is set")
-	}
-	f, ok := in.(*os.File)
-	if !ok || !isatty.IsTerminal(f.Fd()) {
-		return "", errors.New("--worker is required when stdin is not a TTY")
-	}
-	fmt.Fprintln(out, "Available providers:")
-	for i, n := range available {
-		fmt.Fprintf(out, "  [%d] %s\n", i+1, n)
-	}
-	fmt.Fprintf(out, "Pick one (1-%d, or name): ", len(available))
-	br := bufio.NewReader(in)
-	line, err := br.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", errors.New("no selection made")
-	}
-	if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(available) {
-		return available[n-1], nil
-	}
-	for _, n := range available {
-		if n == line {
-			return n, nil
-		}
-	}
-	return "", fmt.Errorf("unrecognized choice: %s", line)
 }
 
 func containsString(s []string, v string) bool {

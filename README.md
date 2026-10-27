@@ -27,13 +27,24 @@ curl -fsSL https://unleashtheagents.ai/install.sh | sh
 go install github.com/unleashtheagents/uta/cmd/uta@latest
 ```
 
+## First run
+
+```sh
+uta                      # in a terminal: first-run setup if nothing is configured, then the interactive shell
+uta setup                # paste a Nebius Token Factory key, pick a daily spend cap, optional Tavily key, live ping
+uta nebius demo          # 90 seconds: Ultra plans, Super codes + tests, Tavily grounds, Lightning blocks, Nano compacts, cost report
+uta run -g "summarize this repo in 5 bullets"         # no flags: worker auto-selected (nebius if a key exists), read-only tools, cost footer
+```
+
+Every run ends with a one-line footer such as `[uta] nebius: ultra 2 calls $0.0015 · super 1 call $0.0008 · saved 45% vs all-Ultra`.
+
 ## 60-second tour
 
 ```sh
 uta hello                                             # what is this, what's installed, what to try next
 uta doctor                                            # verify environment
 uta providers                                         # list detected agent CLIs (claude, agy, etc.)
-uta run -g "summarize this repo in 5 bullets" -y      # ad-hoc orchestration
+uta run -g "summarize this repo in 5 bullets"         # ad-hoc orchestration (worker auto-selected; -y only for scripts)
 uta run -g "build pipeline" --strategy dag           # DAG orchestration with explicit subtask dependencies
 uta pr -g "add rate limiting" --verify 'go test ./...' # git branch + auto-commit + gh PR creation
 uta serve --web --port 8080                           # interactive local Web Dashboard HTTP server
@@ -70,13 +81,13 @@ uta mission fmt examples/hello.steer                  # canonical formatting (di
 #### What the coordinator actually does
 
 1. **Role-tier routing, executed by the engine.** Every provider call carries its orchestration role (planner, worker, synthesis, judge, compact, sentinel). With `--worker nebius` the Supervisor plans and synthesizes on **Nemotron 3 Ultra**, fans subtasks out to **Nemotron 3 Super**, and judges with Ultra — without any `[model:…]` tags in prompts. `NEBIUS_MODEL=<tier>` or an inline `[model:ultra]` pins a model; `UTA_NEBIUS_ROUTING=0` turns routing off. The trajectory's `session_id` events record `role` and `routing` so you can prove which tier ran each call.
-2. **Agentic tool loop on a real repository.** With `--pre-approve "*"` (or `UTA_NEBIUS_AGENTIC=1`) Nemotron gets `read_file`, `write_file`, `edit_file`, `list_dir`, `run_command` and `tavily_search` as OpenAI-compatible function tools and iterates until the task is done; every call and result is recorded in SQLite.
+2. **Agentic tool loop on a real repository.** Worker turns get `read_file`, `list_dir` and `tavily_search` by default, so Nemotron can inspect the repo and ground itself in live web sources without any flags. `--pre-approve "*"` (or `UTA_NEBIUS_AGENTIC=1`) adds `write_file`, `edit_file` and `run_command` for full autonomy, gated by the sentinel; every call and result is recorded in SQLite. Tool calls stream too.
 3. **Nemotron Lightning sentinel.** Before any tool call that can change the workspace or run code, **Nemotron 3.5 Lightning** returns a PASS/FAIL verdict (reasoning off, temperature 0, 8 tokens). FAIL blocks the call, the agent sees the refusal as its tool result, and a `sentinel_alert` lands in the trajectory and in `uta dash`. Live on Token Factory a `curl … | sh` was blocked in 216 ms. `UTA_NEBIUS_SENTINEL=0` disables.
 4. **Per-tier reasoning policy.** Nemotron 3 thinks by default; `uta` sets `reasoning_effort` per tier (Ultra high, Super medium, Nano low, Lightning none), keeps `reasoning_content` out of answers (recorded as a `reasoning` event), strips leaked `<think>` blocks and reports reasoning and prompt-cache tokens per turn. `UTA_NEBIUS_REASONING_EFFORT` overrides.
 5. **Real dollar budgets and a cost report.** Built-in Nemotron list prices make `budget … $1` in steer and `--budget-usd` in `uta run` enforce on Nebius calls. `uta nebius cost <session>` folds a run into tokens and USD per tier and role and compares it with an all-Ultra counterfactual — a live coding run came out at $0.0123 vs $0.0271, a 54.7% saving.
 6. **Robust on the shared endpoint.** Retries with backoff on 429/5xx (honouring `Retry-After`, `UTA_NEBIUS_MAX_RETRIES`), `NEBIUS_SERVICE_TIER` passthrough, and incremental SSE streaming so answers appear as Nemotron generates them.
 7. **Keys and spend caps as first-class config.** `uta auth set nebius` stores the key in `~/.uta/credentials.env` (0600, outside every repo, prompted without echo). `uta limits set nebius --daily-usd 5 --monthly-usd 50` caps what the key may spend across every project on the machine; every call is ledgered and refused with a quota error once a cap is hit.
-8. **Tavily grounding.** `uta nebius search` and the `tavily_search` tool call `POST https://api.tavily.com/search` live and persist citations to `.uta/context/RESEARCH_DATABASE.md`.
+8. **Tavily grounding.** `uta nebius search` and the `tavily_search` tool call `POST https://api.tavily.com/search` live; both persist citations to `.uta/context/RESEARCH_DATABASE.md`, and the cost report and run footer count Tavily searches per run.
 9. **Rules, skills and `@file` context.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.uta/rules/*.md`, `.agents/rules/*.md` and progressive `SKILL.md` skills are discovered and injected (`UTA_NEBIUS_INJECT_RULES=1`); `@path/to/file` mentions expand before the turn is sent.
 
 ```sh

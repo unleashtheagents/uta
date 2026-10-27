@@ -55,6 +55,8 @@ type nebiusCostReport struct {
 	SavingsPct       float64          `json:"savings_vs_all_ultra_pct"`
 	SentinelChecks   int              `json:"sentinel_checks"`
 	SentinelBlocks   int              `json:"sentinel_blocks"`
+	TavilySearches   int              `json:"tavily_searches"`
+	ToolCalls        int              `json:"tool_calls"`
 	ByModel          []nebiusCostLine `json:"by_model"`
 	ByRole           []nebiusCostLine `json:"by_role"`
 	NonNebiusWorkers int              `json:"non_nebius_subtask_events"`
@@ -90,6 +92,15 @@ func buildNebiusCostReport(sess store.Session, events []store.EventRow) nebiusCo
 			if pl.Rule == "nemotron_sentinel_tool_block" {
 				rep.SentinelBlocks++
 				rep.SentinelChecks++
+			}
+		case "subtask_tool_call":
+			var pl struct {
+				Tool string `json:"tool_name"`
+			}
+			_ = json.Unmarshal(ev.Payload, &pl)
+			rep.ToolCalls++
+			if pl.Tool == "tavily_search" {
+				rep.TavilySearches++
 			}
 		case "subtask_tool_result":
 			var pl struct {
@@ -228,6 +239,7 @@ func renderNebiusCostReport(cmd *cobra.Command, rep nebiusCostReport) error {
 	fmt.Fprintf(out, "  all-Ultra:      $%.4f for the same tokens on Nemotron 3 Ultra\n", rep.AllUltraUSD)
 	fmt.Fprintf(out, "  90/10 saving:   %.1f%%\n", rep.SavingsPct)
 	fmt.Fprintf(out, "  sentinel:       %d check(s), %d block(s)\n", rep.SentinelChecks, rep.SentinelBlocks)
+	fmt.Fprintf(out, "  tools:          %d call(s), %d Tavily web search(es)\n", rep.ToolCalls, rep.TavilySearches)
 	return nil
 }
 
@@ -239,4 +251,53 @@ func shortNebiusModel(id string) string {
 		}
 	}
 	return id
+}
+
+// nebiusFooterLine summarises a finished run's Nemotron usage in one line
+// for the run footer: per-tier calls and USD, the saving against all-Ultra,
+// and sentinel activity. Empty when the run used no Nebius calls.
+func nebiusFooterLine(app *App, sessionID string) string {
+	if app == nil || app.Store == nil || sessionID == "" {
+		return ""
+	}
+	sess, err := app.Store.GetSession(sessionID)
+	if err != nil {
+		return ""
+	}
+	events, err := app.Store.ListEvents(sessionID, 0, 0)
+	if err != nil {
+		return ""
+	}
+	rep := buildNebiusCostReport(sess, events)
+	if rep.Calls == 0 {
+		return ""
+	}
+	var parts []string
+	for _, l := range rep.ByModel {
+		alias := l.Key
+		for _, m := range builtin.NebiusModelCatalog() {
+			if m.ID == l.Key {
+				alias = m.Alias
+			}
+		}
+		calls := "calls"
+		if l.Calls == 1 {
+			calls = "call"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d %s $%.4f", alias, l.Calls, calls, l.USD))
+	}
+	line := "[uta] nebius: " + strings.Join(parts, " · ")
+	if rep.AllUltraUSD > rep.USD && rep.SavingsPct >= 1 {
+		line += fmt.Sprintf(" · saved %.0f%% vs all-Ultra", rep.SavingsPct)
+	}
+	if rep.SentinelChecks > 0 {
+		line += fmt.Sprintf(" · sentinel %d checks, %d blocks", rep.SentinelChecks, rep.SentinelBlocks)
+	}
+	if rep.TavilySearches > 0 {
+		line += fmt.Sprintf(" · %d Tavily searches", rep.TavilySearches)
+	}
+	if rep.CachedTokens > 0 {
+		line += fmt.Sprintf(" · %d cached tokens", rep.CachedTokens)
+	}
+	return line
 }

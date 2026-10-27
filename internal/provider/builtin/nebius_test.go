@@ -768,3 +768,92 @@ func TestNebius_EmptyContentRetriesWithoutReasoning(t *testing.T) {
 		t.Errorf("efforts = %v, want [high none]", efforts)
 	}
 }
+
+func TestNebius_DefaultToolSetsByRole(t *testing.T) {
+	names := func(specs []nebiusToolSpec) []string {
+		var out []string
+		for _, s := range specs {
+			out = append(out, s.Function.Name)
+		}
+		return out
+	}
+	ro := names(nebiusToolsFor(provider.RunOptions{Role: provider.RoleWorker}))
+	if strings.Join(ro, ",") != "read_file,list_dir,tavily_search" {
+		t.Errorf("worker default tools = %v", ro)
+	}
+	if got := nebiusToolsFor(provider.RunOptions{Role: provider.RolePlanner}); got != nil {
+		t.Errorf("planner must get no tools, got %v", names(got))
+	}
+	if got := names(nebiusToolsFor(provider.RunOptions{PreApproveTools: []string{"*"}})); len(got) != 6 {
+		t.Errorf("pre-approved worker gets the full set, got %v", got)
+	}
+	if got := nebiusToolsFor(provider.RunOptions{Env: []string{"UTA_NEBIUS_AGENTIC=0"}}); got != nil {
+		t.Errorf("AGENTIC=0 disables tools, got %v", names(got))
+	}
+	if got := names(nebiusToolsFor(provider.RunOptions{Role: provider.RolePlanner, Env: []string{"UTA_NEBIUS_AGENTIC=1"}})); len(got) != 6 {
+		t.Errorf("AGENTIC=1 forces the full set, got %v", got)
+	}
+}
+
+func TestNebius_StreamedToolCallsAreAssembled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("streamed tools work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req nebiusChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if calls == 1 {
+			if !req.Stream {
+				t.Errorf("first turn should be streamed")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			for _, chunk := range []string{
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}`,
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`,
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"notes.txt\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":9}}`,
+			} {
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			}
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != "tool" || last.ToolCallID != "call_a" || !strings.Contains(last.Content, "streamed tools work") {
+			t.Errorf("tool result not replayed: %+v", last)
+		}
+		for _, m := range req.Messages {
+			for _, tc := range m.ToolCalls {
+				if tc.Index != nil {
+					t.Errorf("stream index must not be replayed into history")
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"read it"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	p := &Nebius{Client: srv.Client(), BaseURL: srv.URL + "/v1", APIKey: "k"}
+	events := make(chan provider.Event, 64)
+	res, err := p.RunHeadless(context.Background(), "read notes", provider.RunOptions{Workdir: dir}, events)
+	close(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FinalText != "read it" || calls != 2 {
+		t.Errorf("FinalText=%q calls=%d", res.FinalText, calls)
+	}
+	var sawCall bool
+	for ev := range events {
+		if ev.Kind == provider.EventToolCall {
+			sawCall = true
+		}
+	}
+	if !sawCall {
+		t.Error("expected a tool_call event from the streamed turn")
+	}
+}

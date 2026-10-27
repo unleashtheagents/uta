@@ -8,7 +8,9 @@ import "errors"
 // consistently: what to install, how to verify, where the tour is.
 var errNoProviders = errors.New(`no provider is installed on PATH.
 
-Install at least one provider CLI:
+Fastest: run 'uta setup' and paste a Nebius Token Factory key (NVIDIA Nemotron tiers, no CLI install).
+
+Or install at least one provider CLI:
   claude   npm install -g @anthropic-ai/claude-code
   gemini   npm install -g @google/gemini-cli
 
