@@ -1,6 +1,6 @@
 # uta — hackathon demo video (2:00 cut)
 
-Final file: `uta-demo.mp4` (1920x1080 @ 30fps, silent, caption bars burned in).
+Final file: `uta-demo.mp4` (1920x1080 @ 30fps, narrated with time-synced Andrew neural voiceover + caption bars burned in; standalone audio at `docs/uta-demo-voiceover.mp3`; published at https://youtu.be/oGxlQOHBCYU).
 Recorded live against Nebius Token Factory with vhs; dead air compressed with
 ffmpeg freezedetect. No staged output: every frame is a real run.
 
