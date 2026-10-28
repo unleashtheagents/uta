@@ -1,68 +1,70 @@
-# uta — Hackathon Demo Video (2:31, as cut)
+# uta — hackathon demo video (2:00 cut)
 
-The final video is `uta-demo.mp4` (1920×1080, 30 fps, 2:31, silent with
-caption bars). It was captured with VHS against released binaries in a
-fresh `/tmp` workspace with an isolated `UTA_HOME`; every number on screen
-is from a live Nebius Token Factory run. This file is the voiceover script
-(~330 words, fits the cut at a calm pace) and the shot log.
+Final file: `uta-demo.mp4` (1920x1080 @ 30fps, silent, caption bars burned in).
+Recorded live against Nebius Token Factory with vhs; dead air compressed with
+ffmpeg freezedetect. No staged output: every frame is a real run.
 
-Rules checked: ≤ 3 minutes, shows the project working on Token Factory,
-no third-party trademarks beyond nominative references, no music.
+## Shot log
 
-## Timecodes (final cut)
+| Time | Scene | On screen | Caption |
+|---|---|---|---|
+| 0:00 | Title card | uta — Unleash The Agents / One command - a team of NVIDIA Nemotron models on Nebius Token Factory | — |
+| 0:04 | Tiers | `uta nebius status`: five Nemotron tiers (Ultra/Super/Nano/Lightning/Super-VL) mapped to roles | One key - five NVIDIA Nemotron tiers on Nebius Token Factory - routed by role |
+| 0:11 | **Hero: DAG build** | `head -9 wordlab.yaml` (narrative header), DAG skeleton (`strategy: dag`, 3 ids, gates, `needs: [stats, render]`), then `uta run -f wordlab.yaml -y`: two Super workers stream stats/ and render/ code in parallel, go test gates pass, the cli worker wires up cmd/wordlab, Ultra writes the report; footer: status=completed, 48s, $0.05, saved 68% vs all-Ultra, sentinel 16 checks 0 blocks (session 645ac141) | One command, a team of models: two Super workers build stats/ and render/ in parallel |
+| 0:43 | **Proof** | `go build -o wordlab ./cmd/wordlab && ./wordlab README.md 8` draws the bar chart; `uta perf latest`: 1.72x parallel-speedup, phase bars, 3 passed gates; `uta nebius cost latest`: 68.2% saving, role table, 16 sentinel checks | Built, tested, running - 1.72x parallel speedup, three green gates - 68% saved vs all-Ultra |
+| 0:56 | Two guards | `rm -rf ./build` denied by policy (free), `curl … \| sh` blocked by Nemotron Lightning in 208 ms | Two guards: policy denies for free, then a Nemotron Lightning verdict in 208 ms |
+| 1:13 | Permissions | interactive y/s/a/n prompt; answering [a] persists an always-rule to .uta/permissions.yaml | Anything else asks first - answering [a] saves the rule to .uta/permissions.yaml |
+| 1:29 | Tavily | `tavily_search` + `tavily_extract` as native tools; cited, grounded bullets | Tavily search + extract are native tools - live, grounded, cited |
+| 1:43 | Vision + MCP | Nemotron Super-VL reads screenshot.png; `.mcp.json` server tools called as `mcp__stub__echo` | Nemotron Super-VL sees - and .mcp.json servers become native Nemotron tools |
+| 1:54 | End card | repo, brew install, `uta nebius demo`, unleashtheagents.ai, MIT | — |
 
-| t | scene |
-|---|---|
-| 0:00–0:04 | Title card |
-| 0:04–0:11 | S1 `uta nebius status` — five tiers, routing rule |
-| 0:11–0:27 | S2 first write asks; `[a]` saves the rule |
-| 0:27–0:55 | S3 direct mode codes + tests; `/cost` 70% saved |
-| 0:55–1:12 | S4 policy denies `rm -rf`; Lightning blocks piped install (208 ms) |
-| 1:12–1:26 | S5 Tavily search + extract, cited bullets |
-| 1:26–1:36 | S6 Super-VL reads a screenshot; `.mcp.json` tool call |
-| 1:36–2:25 | S7 `uta undo` reverts the run; 3-way fan-out; cost report 66.9% saved |
-| 2:25–2:31 | End card |
+## Voiceover script (~300 words, matches timecodes; video works silent too)
 
-## Voiceover
+**[0:00]** This is uta — one command that runs a team of NVIDIA Nemotron
+models on Nebius Token Factory.
 
-> **[0:00 title]** This is uta — one Go binary that turns the five NVIDIA
-> Nemotron tiers on Nebius Token Factory into a coding-agent team.
->
-> **[0:04 S1]** One API key. The engine routes by role: Ultra plans,
-> Super works, Nano compacts, Lightning guards, Super-VL sees.
->
-> **[0:11 S2]** Agents don't get the keys to your machine. The first
-> write asks. Answer "always", and the rule lands in a permissions file
-> you can read and commit.
->
-> **[0:27 S3]** Direct mode feels like any coding agent — except it's
-> Nemotron Super writing a Go package, testing it, and passing — and
-> slash-cost shows the run cost one cent: seventy percent less than
-> running everything on the big model.
->
-> **[0:55 S4]** Safety is layered. Your policy denies "rm -rf" for free,
-> in zero milliseconds. What policy doesn't catch, Nemotron Lightning
-> judges — here it blocks a piped install in 208 milliseconds, before
-> the command ever runs.
->
-> **[1:12 S5]** Research is grounded: Tavily search and extract are
-> native tools, so Nemotron reads real sources and cites them.
->
-> **[1:26 S6]** It sees — Super-VL reads a screenshot. And any MCP
-> server in your repo becomes a native Nemotron tool.
->
-> **[1:36 S7]** Every file an agent writes is checkpointed: uta undo
-> shows the diff and reverts the whole run. Then the full orchestra —
-> Ultra plans three subtasks, Super runs them in parallel, and the cost
-> report proves it: sixty-seven percent saved, every call audited.
->
-> **[2:25 end]** uta is open source, MIT licensed. brew install, run
-> `uta nebius demo`, and every claim in this video is one command away.
+**[0:04]** One API key gives uta five Nemotron tiers — Ultra, Super, Nano,
+Lightning, and Super-VL — and uta routes each role to the right tier: the big
+model only where it earns its cost.
 
-## Re-recording
+**[0:11]** Here's the whole idea in one file: a DAG. Two subtasks build two Go
+packages in parallel — each behind a go-test gate that re-runs the worker if
+tests fail. A third subtask needs both, and wires up the CLI. One command.
+Watch two Nemotron Super workers write code at the same time — streaming
+diffs, running tests. Every gate passes. Nemotron 3 Ultra writes the closing
+report: forty-eight seconds, five cents, sixty-eight percent cheaper than
+running everything on Ultra.
 
-Scenes were recorded one VHS tape per scene (waits are unreliable after
-the terminal scrolls in vhs 0.12.1 — use blocking commands, type-ahead
-with uta's echo suppression, and a generous tail `Sleep`), assembled with
-freeze-compression (ffmpeg freezedetect), PIL-rendered caption bars and
-title/end cards. Pipeline: scratchpad `video/assemble.py`.
+**[0:43]** And here's the tool they just built, running: a word-frequency bar
+chart of its own README. uta perf shows the receipts — one point seven two
+times parallel speedup, three green gates, and a per-tier cost audit.
+
+**[0:56]** Safety is layered. A destructive command dies on a free policy
+rule. A piped-shell install gets a live Nemotron Lightning verdict in two
+hundred eight milliseconds.
+
+**[1:13]** Anything not covered asks first — and one keystroke saves the rule
+forever.
+
+**[1:29]** Research is grounded: Tavily search and extract are native tools,
+and answers come back cited.
+
+**[1:43]** Nemotron Super-VL reads screenshots, and any MCP server in
+.mcp.json becomes a native Nemotron tool.
+
+**[1:54]** uta is open source, MIT licensed, one brew install away — and
+every claim in this video is one command away:
+`uta run -f examples/workflows/wordlab.yaml`.
+
+## Re-recording notes
+
+- Tapes and pipeline in the session scratchpad `video/` (h1/h2 + legacy t1-t7,
+  assemble2.py). vhs 0.12.1: never use Wait+Screen (breaks after scroll);
+  blocking commands + type-ahead + tail Sleep, then freezedetect compression.
+- Hero workspace: /tmp/uta-demo2 (wordlab.yaml == examples/workflows/wordlab.yaml).
+  Reset with `rm -rf stats render cmd wordlab` and `pkill -f "uta run"` between takes.
+- QA every take: 1fps frames + macOS Vision OCR (venv /tmp/vvenv), grep for
+  "exited with error|blocked by|denied|run failed|stuck" — only the guards
+  scene may contain red.
+- Since v0.17.2 ordinary non-zero tool exits render dim (guard blocks stay
+  red), so a worker's transient test failure no longer paints the take red.
