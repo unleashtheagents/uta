@@ -63,6 +63,7 @@ uta nebius route "design a zero-trust MCP gateway"    # 90/10 Nemotron tier rout
 uta nebius cost <id>                                  # tokens and USD per Nemotron tier/role vs all-Ultra
 uta skills list                                       # discover workspace rules (AGENTS.md, CLAUDE.md) & SKILL.md
 uta run -g "audit @internal/provider/builtin/nebius.go" --worker nebius # run on Nebius Token Factory with @file expansion
+uta run -f examples/workflows/wordlab.yaml -y         # DAG demo: parallel Nemotron Super workers + go test gates build a tool
 uta mission run examples/nebius-nemotron.steer        # run a Nebius × NVIDIA Nemotron steer mission
 uta mission test examples/nebius-nemotron.steer --script examples/nebius-nemotron.journal.yaml
 uta mission fmt examples/hello.steer                  # canonical formatting (diff; --write rewrites)

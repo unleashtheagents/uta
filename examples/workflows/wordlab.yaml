@@ -1,0 +1,139 @@
+# examples/workflows/wordlab.yaml — one command, a team of Nemotron models,
+# a working tool. As seen in the demo video.
+#
+# Usage (needs a Nebius Token Factory key: uta setup):
+#
+#   mkdir /tmp/wordlab && cd /tmp/wordlab && go mod init wordlab
+#   printf 'a readme with words words words
+' > README.md
+#   uta run -f $OLDPWD/examples/workflows/wordlab.yaml -y
+#   go run ./cmd/wordlab README.md 8
+#
+#   stage 1 (parallel): two Super workers build stats/ and render/,
+#                       each behind a `go test` gate that re-runs the
+#                       worker with the failure if the tests do not pass
+#   stage 2 (needs both): a third worker wires up cmd/wordlab
+#   synthesis:          Nemotron 3 Ultra writes the report
+
+version: 2
+strategy: dag
+goal: >-
+  build wordlab, a terminal word-frequency bar chart tool, as a team. In the
+  final report, describe only behavior the subtask outputs actually verified:
+  the only usage is wordlab <file> [k] — there is no stdin mode, no flags. Do
+  not invent usage examples.
+
+defaults:
+  worker: nebius
+  max_parallel: 2
+  subtask_timeout: 8m
+  pre_approve: ["*"]
+
+synthesis:
+  worker: nebius
+  mode: merge
+
+subtasks:
+  - id: stats
+    title: stats package (word counting)
+    gate:
+      cmd: go test ./stats/
+      retry_producer: true
+      max_retries: 3
+    prompt: |
+      Create package stats in stats/stats.go with exactly this exported API:
+
+        type Count struct {
+            Word string
+            N    int
+        }
+
+        // Top returns the k most frequent words in r, most frequent first.
+        // Ties break alphabetically.
+        func Top(r io.Reader, k int) []Count
+
+      Exact algorithm, no deviations: read all of r; split on whitespace
+      with strings.Fields; lowercase each token with strings.ToLower; trim
+      leading and trailing punctuation with strings.Trim(tok, ".,;:!?'()\"");
+      skip tokens that are empty after trimming; count the rest; sort by
+      count descending, then word ascending; return at most k entries.
+
+      Worked examples your tests must assert verbatim:
+        Top(strings.NewReader("Go go GO! rust, rust... zig"), 2)
+          returns []Count{{"go", 3}, {"rust", 2}}
+        Top(strings.NewReader("b a"), 5)
+          returns []Count{{"a", 1}, {"b", 1}}
+
+      Use only the standard library. Create exactly two files,
+      stats/stats.go and stats/stats_test.go, and never any other file: no
+      scratch programs, no debug files. Write stats.go first, then a
+      stats_test.go that asserts the two worked examples plus an
+      empty-input case. Run commands from the repository root only — never
+      cd. To verify, run only `go test ./stats/` and fix the two files
+      with edit_file until it passes.
+
+  - id: render
+    title: render package (ASCII bar chart)
+    gate:
+      cmd: go test ./render/
+      retry_producer: true
+      max_retries: 3
+    prompt: |
+      Create package render in render/render.go with exactly this exported API:
+
+        type Item struct {
+            Label string
+            Value int
+        }
+
+        // Bars draws a horizontal ASCII bar chart and returns it as a string.
+        func Bars(items []Item, width int) string
+
+      Exact format, one line per item in the given order: the label
+      left-padded with spaces to the length of the longest label, then a
+      single space, then a bar of '#' runes, then a single space, then the
+      Value as digits, then '\n'. Bars scale linearly so the largest Value
+      gets exactly `width` runes; every Value > 0 gets at least one '#';
+      Value 0 gets zero. Bars is NOT padded. Empty slice returns "".
+
+      Worked examples:
+        Bars([]Item{{"go", 8}, {"rust", 2}}, 4) returns exactly
+          "  go #### 8\nrust # 2\n"
+        Bars([]Item{{"a", 1}, {"b", 100}}, 5) returns exactly
+          "a # 1\nb ##### 100\n"
+        Bars(nil, 10) returns ""
+
+      Use only the standard library. Create exactly two files,
+      render/render.go and render/render_test.go, and never any other
+      file: no scratch programs, no debug files. Write render.go first,
+      then a render_test.go asserting exactly the three worked examples
+      above as literal strings — do not compute expected output. Run commands from
+      the repository root only — never cd. To verify, run only
+      `go test ./render/` and fix the two files with edit_file until it
+      passes.
+
+  - id: cli
+    title: wire up cmd/wordlab
+    needs: [stats, render]
+    gate:
+      cmd: go build ./... && go test ./...
+      retry_producer: true
+      max_retries: 3
+    prompt: |
+      The packages wordlab/stats (stats.Top, stats.Count) and wordlab/render
+      (render.Bars, render.Item) already exist. Your first
+      two actions: read_file stats/stats.go, then read_file
+      render/render.go, to confirm their APIs. Do not list directories and
+      do not run any command before you have written cmd/wordlab/main.go
+      (the cmd/ directory does not exist yet; write_file creates it).
+      Create exactly one file,
+      cmd/wordlab/main.go: usage `wordlab <file> [k]` (k defaults to 10).
+      Its imports are exactly "fmt", "os", "strconv", "wordlab/render",
+      "wordlab/stats". Open the file with os.Open, parse k with
+      strconv.Atoi, call stats.Top, map the result to render.Item, and
+      print render.Bars(items, 40) with fmt.Print. Errors go to stderr
+      with exit code 1. Write the file in one careful pass so it compiles
+      first try. Never create any other file. To verify, run `go build ./...` and
+      `go run ./cmd/wordlab README.md 8`. Do not modify the stats/ or
+      render/ directories.
+
