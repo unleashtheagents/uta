@@ -360,7 +360,16 @@ func (r *Renderer) handle(ev trajectory.Event) {
 					r.diffLocked(p.Diff)
 					return
 				case p.IsError:
-					r.interjectLocked(r.red("  ✗ " + p.Tool + ": " + firstLine(p.Output)))
+					// Guard verdicts (policy denials, sentinel blocks) are
+					// alarms; an ordinary non-zero tool exit is routine
+					// feedback the worker iterates on — render it dim so it
+					// doesn't read as a run failure.
+					line := "  " + p.Tool + ": " + firstLine(p.Output)
+					if guardBlockedOutput(p.Output) {
+						r.interjectLocked(r.red("  ✗" + line))
+					} else {
+						r.interjectLocked(r.dim("  ·" + line))
+					}
 					return
 				}
 			}
@@ -579,4 +588,13 @@ func (r *Renderer) diffLocked(diff string) {
 			fmt.Fprintf(r.w, "    %s\n", r.dim(ln))
 		}
 	}
+}
+
+// guardBlockedOutput reports whether a failed tool result was produced by one
+// of uta's guards (permissions policy, Nemotron sentinel, or the tool gate)
+// rather than by the tool itself exiting non-zero.
+func guardBlockedOutput(out string) bool {
+	return strings.Contains(out, "denied by uta permissions") ||
+		strings.Contains(out, "blocked by Nemotron sentinel") ||
+		strings.Contains(out, "denied by user")
 }
