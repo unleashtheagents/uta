@@ -184,6 +184,7 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 				workerName, modeName, strings.Join(available, ", "))
 			rl := newLineReader(cmd.InOrStdin(), cmd.OutOrStdout(),
 				filepath.Join(app.StateDir, "shell_history"))
+			setTerminalTitle(cmd.OutOrStdout(), "uta shell")
 			return shellLoop(cmd.Context(), rl, cmd.OutOrStdout(), cmd.ErrOrStderr(), sh)
 		},
 	}

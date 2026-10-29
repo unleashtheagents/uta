@@ -284,6 +284,8 @@ func newRunCmd() *cobra.Command {
 				workdir = app.ProjectRoot
 			}
 
+			setTerminalTitle(cmd.OutOrStdout(), "uta — "+titleGoal(goal))
+
 			req := engine.RunRequest{
 				Goal:               goal,
 				WorkerName:         workerName,
