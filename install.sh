@@ -40,8 +40,12 @@ esac
 
 if [ "$VERSION" = "latest" ]; then
   note "resolving latest release of ${REPO}..."
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | \
-    awk -F\" '/"tag_name":/ {print $4; exit}')"
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
+    awk -F\" '/"tag_name":/ {print $4; exit}' || true)"
+  if [ -z "$TAG" ]; then
+    TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | \
+      sed -n 's|.*/releases/tag/\([^/?#]*\).*|\1|p')"
+  fi
   [ -n "$TAG" ] || err "could not resolve latest tag"
 else
   TAG="$VERSION"
