@@ -185,6 +185,11 @@ inspect providers. Lines starting with '!' run locally in the workdir.`,
 			rl := newLineReader(cmd.InOrStdin(), cmd.OutOrStdout(),
 				filepath.Join(app.StateDir, "shell_history"))
 			setTerminalTitle(cmd.OutOrStdout(), "uta shell")
+			emitWarpAgentEvent(cmd.OutOrStdout(), warpAgentEvent{
+				Event:     "session_start",
+				SessionID: sh.SessionShort(),
+				Cwd:       sh.Workdir(),
+			})
 			return shellLoop(cmd.Context(), rl, cmd.OutOrStdout(), cmd.ErrOrStderr(), sh)
 		},
 	}
@@ -268,16 +273,24 @@ func dispatchShellLine(ctx context.Context, line string, b shellBackend, out, er
 			fmt.Fprintln(errw, "usage: @<agent> <goal>   (e.g. @gemini cross-check the last answer)")
 			return false
 		}
+		emitWarpAgentEvent(out, warpAgentEvent{Event: "prompt_submit", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: goal})
 		if err := b.ExecTurnAs(ctx, agent, goal); err != nil {
+			emitWarpAgentEvent(out, warpAgentEvent{Event: "stop_failure", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: goal})
 			fmt.Fprintln(errw, "turn failed:", err)
+		} else {
+			emitWarpAgentEvent(out, warpAgentEvent{Event: "stop", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: goal})
 		}
 		return false
 	case strings.HasPrefix(line, "/"):
 		handleShellCommand(ctx, line, b, out, errw)
 		return false
 	default:
+		emitWarpAgentEvent(out, warpAgentEvent{Event: "prompt_submit", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: line})
 		if err := b.ExecTurn(ctx, line); err != nil {
+			emitWarpAgentEvent(out, warpAgentEvent{Event: "stop_failure", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: line})
 			fmt.Fprintln(errw, "turn failed:", err)
+		} else {
+			emitWarpAgentEvent(out, warpAgentEvent{Event: "stop", SessionID: b.SessionShort(), Cwd: b.Workdir(), Query: line})
 		}
 		return false
 	}

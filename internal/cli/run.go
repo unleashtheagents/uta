@@ -285,6 +285,11 @@ func newRunCmd() *cobra.Command {
 			}
 
 			setTerminalTitle(cmd.OutOrStdout(), "uta — "+titleGoal(goal))
+			emitWarpAgentEvent(cmd.OutOrStdout(), warpAgentEvent{
+				Event: "session_start",
+				Cwd:   workdir,
+				Query: goal,
+			})
 
 			req := engine.RunRequest{
 				Goal:               goal,
@@ -387,6 +392,12 @@ func newRunCmd() *cobra.Command {
 			}
 
 			if runErr != nil {
+				emitWarpAgentEvent(cmd.OutOrStdout(), warpAgentEvent{
+					Event:     "stop_failure",
+					SessionID: result.SessionID,
+					Cwd:       workdir,
+					Query:     goal,
+				})
 				if errors.Is(runErr, context.Canceled) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "cancelled.")
 					printRecoveryHint(cmd.ErrOrStderr(), result)
@@ -399,6 +410,14 @@ func newRunCmd() *cobra.Command {
 				}
 				return runErr
 			}
+
+			emitWarpAgentEvent(cmd.OutOrStdout(), warpAgentEvent{
+				Event:     "stop",
+				SessionID: result.SessionID,
+				Cwd:       workdir,
+				Query:     goal,
+				Response:  result.FinalAnswer,
+			})
 
 			if printAnswer || (!printJSONL) {
 				if result.FinalAnswer != "" {
